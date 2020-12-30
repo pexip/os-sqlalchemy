@@ -1,0 +1,22 @@
+From: =?utf-8?q?Piotr_O=C5=BCarowski?= <piotr@debian.org>
+Date: Thu, 15 Mar 2018 15:41:58 +0100
+Subject: drop_notfound_page_from_docs
+
+this makes this package FTBFS with Sphinx 1.6
+---
+ doc/build/conf.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/doc/build/conf.py b/doc/build/conf.py
+index 532d7cd..7f75680 100644
+--- a/doc/build/conf.py
++++ b/doc/build/conf.py
+@@ -271,7 +271,7 @@ html_last_updated_fmt = "%m/%d/%Y %H:%M:%S"
+ 
+ # Additional templates that should be rendered to pages, maps page names to
+ # template names.
+-html_additional_pages = {"notfound": "notfound.html"}
++#html_additional_pages = {"notfound": "notfound.html"}
+ 
+ # If false, no module index is generated.
+ html_domain_indices = False
