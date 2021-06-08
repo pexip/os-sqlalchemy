@@ -1,8 +1,9 @@
 Source: sqlalchemy
 Section: python
 Priority: optional
-Maintainer: Piotr Ożarowski <piotr@debian.org>
-Uploaders: Debian Python Modules Team <python-modules-team@lists.alioth.debian.org>,
+Maintainer: Pexip AS <packaging@pexip.com>
+XSBC-Pexip-Original-Maintainer: Piotr Ożarowski <piotr@debian.org>
+XSBC-Pexip-Original-Uploaders: Debian Python Modules Team <python-modules-team@lists.alioth.debian.org>,
 Build-Depends: debhelper-compat (= 9),
                dh-python,
                python3-all-dev (>= 3.1.2-8~),
@@ -16,6 +17,7 @@ Standards-Version: 4.5.0
 Homepage: http://www.sqlalchemy.org/
 Vcs-Git: https://salsa.debian.org/python-team/packages/sqlalchemy.git
 Vcs-Browser: https://salsa.debian.org/python-team/packages/sqlalchemy
+XS-Pexip-Upstream: http://ftp.debian.org/debian/ bullseye
 
 Package: python-sqlalchemy-doc
 Section: doc
