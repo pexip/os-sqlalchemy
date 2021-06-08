@@ -15,7 +15,7 @@ clean:
 	dh_testroot
 	rm -rf $(CURDIR)/lib/SQLAlchemy.egg-info $(CURDIR)/build/
 	find . -name '*\.py[co]' -delete
-	dh_clean build-docs build-stamp install-docs \
+	dh_clean build-stamp \
 		$(PY3VERS:%=install-python%) $(PY3VERS:%=build-python%) \
 		$(PHONYY3VERS:%=install-debug-python%) $(PY3VERS:%=build-debug-python%)
 
@@ -31,33 +31,7 @@ build-debug-python%:
 	python$*-dbg setup.py build
 	touch $@
 
-build-indep: build-docs
-build-docs:
-	dh_testdir
-	dh_installdirs -i
-	cd doc/build && python3 -m sphinx -N -E -b html . \
-	 ../../debian/${pd}/usr/share/doc/${pd}/html/
-	rm -rf debian/${pd}/usr/share/doc/${pd}/html/.doctrees
-	touch $@
-
-install-docs: build-docs
-	dh_testdir
-	dh_installdirs -i
-	
-	cp -r doc/build/ debian/${pd}/usr/share/doc/${pd}/rst/
-	cd debian/${pd}/usr/share/doc/${pd}/rst/\
-		&& rm -f '*.py' '*.html' '*.png' \
-	       	&& rm -rf texinputs/
-	dh_link -p${pd} /usr/share/javascript/jquery/jquery.js \
-		/usr/share/doc/${pd}/html/_static/jquery.js
-	dh_link -p${pd} /usr/share/javascript/underscore/underscore.js \
-		/usr/share/doc/${pd}/html/_static/underscore.js
-	# link docs in python-sqlalchemy's dir
-	dh_link -p${pd} /usr/share/doc/${pd}/html \
-		/usr/share/doc/python3-sqlalchemy/html
-	dh_link -p${pd} /usr/share/doc/${pd}/rst \
-		/usr/share/doc/python3-sqlalchemy/rst
-	touch $@
+build-indep:
 
 install: $(PY3VERS:%=install-python%)
 
@@ -70,12 +44,10 @@ install-python%: build
 	   $(call pkgdir,$*)-ext$(call py_libdir,$*)/sqlalchemy/
 	touch $@
 
-binary-indep: build install install-docs
+binary-indep: build install
 	dh_testdir -i
 	dh_testroot -i
-	dh_installchangelogs -i -p python-sqlalchemy-doc -X doc/changelog -X CHANGES
-	dh_installchangelogs -i -N python-sqlalchemy-doc -X doc/changelog -X CHANGES
-	dh_installdocs -i
+	dh_installchangelogs -i -X doc/changelog -X CHANGES
 	dh_installexamples -i
 	rm -rf debian/${pd}/usr/share/doc/${pd}/doc/build \
 	       debian/${pd}/usr/share/doc/${pd}/examples/README
@@ -93,7 +65,6 @@ binary-arch: build install
 	dh_testdir
 	dh_testroot
 	dh_installchangelogs -a -X doc/changelog -X CHANGES
-	dh_installdocs -a
 	dh_python3 -a
 	dh_makeshlibs -a
 	dh_strip -a
