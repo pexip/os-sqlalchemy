@@ -1,9 +1,9 @@
 # event/attr.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2023 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
 
 """Attribute implementation for _Dispatch classes.
 
@@ -41,6 +41,7 @@ from . import registry
 from .. import exc
 from .. import util
 from ..util import threading
+from ..util.concurrency import AsyncAdaptedLock
 
 
 class RefCollection(util.MemoizedSlots):
@@ -71,6 +72,7 @@ class _ClsLevelDispatch(RefCollection):
     """Class-level events on :class:`._Dispatch` classes."""
 
     __slots__ = (
+        "clsname",
         "name",
         "arg_names",
         "has_kw",
@@ -81,6 +83,7 @@ class _ClsLevelDispatch(RefCollection):
 
     def __init__(self, parent_dispatch_cls, fn):
         self.name = fn.__name__
+        self.clsname = parent_dispatch_cls.__name__
         argspec = util.inspect_getfullargspec(fn)
         self.arg_names = argspec.args[1:]
         self.has_kw = bool(argspec.varkw)
@@ -115,58 +118,43 @@ class _ClsLevelDispatch(RefCollection):
 
         return wrap_kw
 
-    def insert(self, event_key, propagate):
+    def _do_insert_or_append(self, event_key, is_append):
         target = event_key.dispatch_target
         assert isinstance(
             target, type
         ), "Class-level Event targets must be classes."
         if not getattr(target, "_sa_propagate_class_events", True):
             raise exc.InvalidRequestError(
-                "Can't assign an event directly to the %s class" % target
+                "Can't assign an event directly to the %s class" % (target,)
             )
-        stack = [target]
-        while stack:
-            cls = stack.pop(0)
-            stack.extend(cls.__subclasses__())
+
+        for cls in util.walk_subclasses(target):
             if cls is not target and cls not in self._clslevel:
                 self.update_subclass(cls)
             else:
                 if cls not in self._clslevel:
-                    self._assign_cls_collection(cls)
-                self._clslevel[cls].appendleft(event_key._listen_fn)
+                    self.update_subclass(cls)
+                if is_append:
+                    self._clslevel[cls].append(event_key._listen_fn)
+                else:
+                    self._clslevel[cls].appendleft(event_key._listen_fn)
         registry._stored_in_collection(event_key, self)
+
+    def insert(self, event_key, propagate):
+        self._do_insert_or_append(event_key, is_append=False)
 
     def append(self, event_key, propagate):
-        target = event_key.dispatch_target
-        assert isinstance(
-            target, type
-        ), "Class-level Event targets must be classes."
-        if not getattr(target, "_sa_propagate_class_events", True):
-            raise exc.InvalidRequestError(
-                "Can't assign an event directly to the %s class" % target
-            )
-        stack = [target]
-        while stack:
-            cls = stack.pop(0)
-            stack.extend(cls.__subclasses__())
-            if cls is not target and cls not in self._clslevel:
-                self.update_subclass(cls)
-            else:
-                if cls not in self._clslevel:
-                    self._assign_cls_collection(cls)
-                self._clslevel[cls].append(event_key._listen_fn)
-        registry._stored_in_collection(event_key, self)
-
-    def _assign_cls_collection(self, target):
-        if getattr(target, "_sa_propagate_class_events", True):
-            self._clslevel[target] = collections.deque()
-        else:
-            self._clslevel[target] = _empty_collection()
+        self._do_insert_or_append(event_key, is_append=True)
 
     def update_subclass(self, target):
         if target not in self._clslevel:
-            self._assign_cls_collection(target)
+            if getattr(target, "_sa_propagate_class_events", True):
+                self._clslevel[target] = collections.deque()
+            else:
+                self._clslevel[target] = _empty_collection()
+
         clslevel = self._clslevel[target]
+
         for cls in target.__mro__[1:]:
             if cls in self._clslevel:
                 clslevel.extend(
@@ -175,10 +163,8 @@ class _ClsLevelDispatch(RefCollection):
 
     def remove(self, event_key):
         target = event_key.dispatch_target
-        stack = [target]
-        while stack:
-            cls = stack.pop(0)
-            stack.extend(cls.__subclasses__())
+
+        for cls in util.walk_subclasses(target):
             if cls in self._clslevel:
                 self._clslevel[cls].remove(event_key._listen_fn)
         registry._removed_from_collection(event_key, self)
@@ -273,7 +259,10 @@ class _EmptyListener(_InstanceLevelDispatch):
 
 
 class _CompoundListener(_InstanceLevelDispatch):
-    __slots__ = "_exec_once_mutex", "_exec_once"
+    __slots__ = "_exec_once_mutex", "_exec_once", "_exec_w_sync_once"
+
+    def _set_asyncio(self):
+        self._exec_once_mutex = AsyncAdaptedLock()
 
     def _memoized_attr__exec_once_mutex(self):
         return threading.Lock()
@@ -312,6 +301,29 @@ class _CompoundListener(_InstanceLevelDispatch):
         """
         if not self._exec_once:
             self._exec_once_impl(True, *args, **kw)
+
+    def _exec_w_sync_on_first_run(self, *args, **kw):
+        """Execute this event, and use a mutex if it has not been
+        executed already for this collection, or was called
+        by a previous _exec_w_sync_on_first_run call and
+        raised an exception.
+
+        If _exec_w_sync_on_first_run was already called and didn't raise an
+        exception, then a mutex is not used.
+
+        .. versionadded:: 1.4.11
+
+        """
+        if not self._exec_w_sync_once:
+            with self._exec_once_mutex:
+                try:
+                    self(*args, **kw)
+                except:
+                    raise
+                else:
+                    self._exec_w_sync_once = True
+        else:
+            self(*args, **kw)
 
     def __call__(self, *args, **kw):
         """Execute this event."""
@@ -356,6 +368,7 @@ class _ListenerCollection(_CompoundListener):
         if target_cls not in parent._clslevel:
             parent.update_subclass(target_cls)
         self._exec_once = False
+        self._exec_w_sync_once = False
         self.parent_listeners = parent._clslevel[target_cls]
         self.parent = parent
         self.name = parent.name

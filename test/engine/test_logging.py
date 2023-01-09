@@ -1,4 +1,5 @@
 import logging.handlers
+import re
 
 import sqlalchemy as tsa
 from sqlalchemy import bindparam
@@ -8,10 +9,11 @@ from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import util
 from sqlalchemy.sql import util as sql_util
+from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
-from sqlalchemy.testing import assert_raises_return
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import eq_regex
@@ -20,36 +22,44 @@ from sqlalchemy.testing import mock
 from sqlalchemy.testing.util import lazy_gc
 
 
+def exec_sql(engine, sql, *args, **kwargs):
+    with engine.begin() as conn:
+        return conn.exec_driver_sql(sql, *args, **kwargs)
+
+
 class LogParamsTest(fixtures.TestBase):
     __only_on__ = "sqlite"
     __requires__ = ("ad_hoc_engines",)
 
-    def setup(self):
+    def setup_test(self):
         self.eng = engines.testing_engine(options={"echo": True})
         self.no_param_engine = engines.testing_engine(
             options={"echo": True, "hide_parameters": True}
         )
-        self.eng.execute("create table if not exists foo (data string)")
-        self.no_param_engine.execute(
-            "create table if not exists foo (data string)"
+        exec_sql(self.eng, "create table if not exists foo (data string)")
+        exec_sql(
+            self.no_param_engine,
+            "create table if not exists foo (data string)",
         )
         self.buf = logging.handlers.BufferingHandler(100)
         for log in [logging.getLogger("sqlalchemy.engine")]:
             log.addHandler(self.buf)
 
-    def teardown(self):
-        self.eng.execute("drop table if exists foo")
+    def teardown_test(self):
+        exec_sql(self.eng, "drop table if exists foo")
         for log in [logging.getLogger("sqlalchemy.engine")]:
             log.removeHandler(self.buf)
 
     def test_log_large_list_of_dict(self):
-        self.eng.execute(
+        exec_sql(
+            self.eng,
             "INSERT INTO foo (data) values (:data)",
             [{"data": str(i)} for i in range(100)],
         )
         eq_(
-            self.buf.buffer[1].message,
-            "[{'data': '0'}, {'data': '1'}, {'data': '2'}, {'data': '3'}, "
+            self.buf.buffer[2].message,
+            "[raw sql] [{'data': '0'}, {'data': '1'}, {'data': '2'}, "
+            "{'data': '3'}, "
             "{'data': '4'}, {'data': '5'}, {'data': '6'}, {'data': '7'}"
             "  ... displaying 10 of 100 total bound "
             "parameter sets ...  {'data': '98'}, {'data': '99'}]",
@@ -71,30 +81,32 @@ class LogParamsTest(fixtures.TestBase):
         )
 
     def test_log_no_parameters(self):
-        self.no_param_engine.execute(
+        exec_sql(
+            self.no_param_engine,
             "INSERT INTO foo (data) values (:data)",
             [{"data": str(i)} for i in range(100)],
         )
         eq_(
-            self.buf.buffer[1].message,
-            "[SQL parameters hidden due to hide_parameters=True]",
+            self.buf.buffer[2].message,
+            "[raw sql] [SQL parameters hidden due to hide_parameters=True]",
         )
 
     def test_log_large_list_of_tuple(self):
-        self.eng.execute(
+        exec_sql(
+            self.eng,
             "INSERT INTO foo (data) values (?)",
             [(str(i),) for i in range(100)],
         )
         eq_(
-            self.buf.buffer[1].message,
-            "[('0',), ('1',), ('2',), ('3',), ('4',), ('5',), "
+            self.buf.buffer[2].message,
+            "[raw sql] [('0',), ('1',), ('2',), ('3',), ('4',), ('5',), "
             "('6',), ('7',)  ... displaying 10 of 100 total "
             "bound parameter sets ...  ('98',), ('99',)]",
         )
 
     def test_log_positional_array(self):
         with self.eng.connect() as conn:
-            exc_info = assert_raises_return(
+            exc_info = assert_raises(
                 tsa.exc.DBAPIError,
                 conn.execute,
                 tsa.text("SELECT * FROM foo WHERE id IN :foo AND bar=:bar"),
@@ -106,7 +118,10 @@ class LogParamsTest(fixtures.TestBase):
                 "[parameters: ([1, 2, 3], 'hi')]\n" in str(exc_info)
             )
 
-            eq_(self.buf.buffer[1].message, "([1, 2, 3], 'hi')")
+            eq_regex(
+                self.buf.buffer[1].message,
+                r"\[generated .*\] \(\[1, 2, 3\], 'hi'\)",
+            )
 
     def test_repr_params_positional_array(self):
         eq_(
@@ -210,11 +225,11 @@ class LogParamsTest(fixtures.TestBase):
 
         largeparam = "".join(chr(random.randint(52, 85)) for i in range(5000))
 
-        self.eng.execute("INSERT INTO foo (data) values (?)", (largeparam,))
+        exec_sql(self.eng, "INSERT INTO foo (data) values (?)", (largeparam,))
 
         eq_(
-            self.buf.buffer[1].message,
-            "('%s ... (4702 characters truncated) ... %s',)"
+            self.buf.buffer[2].message,
+            "[raw sql] ('%s ... (4702 characters truncated) ... %s',)"
             % (largeparam[0:149], largeparam[-149:]),
         )
 
@@ -225,12 +240,12 @@ class LogParamsTest(fixtures.TestBase):
         lp2 = "".join(chr(random.randint(52, 85)) for i in range(8))
         lp3 = "".join(chr(random.randint(52, 85)) for i in range(670))
 
-        self.eng.execute("SELECT ?, ?, ?", (lp1, lp2, lp3))
+        exec_sql(self.eng, "SELECT ?, ?, ?", (lp1, lp2, lp3))
 
         eq_(
-            self.buf.buffer[1].message,
-            "('%s', '%s', '%s ... (372 characters truncated) ... %s')"
-            % (lp1, lp2, lp3[0:149], lp3[-149:]),
+            self.buf.buffer[2].message,
+            "[raw sql] ('%s', '%s', '%s ... (372 characters truncated) "
+            "... %s')" % (lp1, lp2, lp3[0:149], lp3[-149:]),
         )
 
     def test_log_large_parameter_multiple(self):
@@ -240,13 +255,16 @@ class LogParamsTest(fixtures.TestBase):
         lp2 = "".join(chr(random.randint(52, 85)) for i in range(200))
         lp3 = "".join(chr(random.randint(52, 85)) for i in range(670))
 
-        self.eng.execute(
-            "INSERT INTO foo (data) values (?)", [(lp1,), (lp2,), (lp3,)]
+        exec_sql(
+            self.eng,
+            "INSERT INTO foo (data) values (?)",
+            [(lp1,), (lp2,), (lp3,)],
         )
 
         eq_(
-            self.buf.buffer[1].message,
-            "[('%s ... (4702 characters truncated) ... %s',), ('%s',), "
+            self.buf.buffer[2].message,
+            "[raw sql] [('%s ... (4702 characters truncated) ... %s',), "
+            "('%s',), "
             "('%s ... (372 characters truncated) ... %s',)]"
             % (lp1[0:149], lp1[-149:], lp2, lp3[0:149], lp3[-149:]),
         )
@@ -273,7 +291,8 @@ class LogParamsTest(fixtures.TestBase):
             tsa.exc.DBAPIError,
             r".*INSERT INTO nonexistent \(data\) values \(:data\)\]\n"
             r"\[SQL parameters hidden due to hide_parameters=True\]",
-            lambda: self.no_param_engine.execute(
+            lambda: exec_sql(
+                self.no_param_engine,
                 "INSERT INTO nonexistent (data) values (:data)",
                 [{"data": str(i)} for i in range(10)],
             ),
@@ -291,7 +310,7 @@ class LogParamsTest(fixtures.TestBase):
                 r"foo.data = \? OR foo.data = \?\]\n"
                 r"\[SQL parameters hidden due to hide_parameters=True\]",
                 conn.execute,
-                select([foo]).where(
+                select(foo).where(
                     or_(
                         foo.c.data == bindparam("the_data_1"),
                         foo.c.data == bindparam("the_data_2"),
@@ -324,25 +343,25 @@ class LogParamsTest(fixtures.TestBase):
         largeparam = "".join(chr(random.randint(52, 85)) for i in range(5000))
 
         self.eng.echo = "debug"
-        result = self.eng.execute("SELECT ?", (largeparam,))
+        result = exec_sql(self.eng, "SELECT ?", (largeparam,))
 
         row = result.first()
 
         eq_(
-            self.buf.buffer[1].message,
-            "('%s ... (4702 characters truncated) ... %s',)"
+            self.buf.buffer[2].message,
+            "[raw sql] ('%s ... (4702 characters truncated) ... %s',)"
             % (largeparam[0:149], largeparam[-149:]),
         )
 
         if util.py3k:
             eq_(
-                self.buf.buffer[3].message,
+                self.buf.buffer[5].message,
                 "Row ('%s ... (4702 characters truncated) ... %s',)"
                 % (largeparam[0:149], largeparam[-149:]),
             )
         else:
             eq_(
-                self.buf.buffer[3].message,
+                self.buf.buffer[5].message,
                 "Row (u'%s ... (4703 characters truncated) ... %s',)"
                 % (largeparam[0:148], largeparam[-149:]),
             )
@@ -370,7 +389,8 @@ class LogParamsTest(fixtures.TestBase):
             r"{'data': '6'}, {'data': '7'}  ... displaying 10 of "
             r"100 total bound parameter sets ...  {'data': '98'}, "
             r"{'data': '99'}\]",
-            lambda: self.eng.execute(
+            lambda: exec_sql(
+                self.eng,
                 "INSERT INTO nonexistent (data) values (:data)",
                 [{"data": str(i)} for i in range(100)],
             ),
@@ -385,7 +405,8 @@ class LogParamsTest(fixtures.TestBase):
             r"... displaying "
             r"10 of 100 total bound parameter sets ...  "
             r"\('98',\), \('99',\)\]",
-            lambda: self.eng.execute(
+            lambda: exec_sql(
+                self.eng,
                 "INSERT INTO nonexistent (data) values (?)",
                 [(str(i),) for i in range(100)],
             ),
@@ -393,14 +414,14 @@ class LogParamsTest(fixtures.TestBase):
 
 
 class PoolLoggingTest(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         self.existing_level = logging.getLogger("sqlalchemy.pool").level
 
         self.buf = logging.handlers.BufferingHandler(100)
         for log in [logging.getLogger("sqlalchemy.pool")]:
             log.addHandler(self.buf)
 
-    def teardown(self):
+    def teardown_test(self):
         for log in [logging.getLogger("sqlalchemy.pool")]:
             log.removeHandler(self.buf)
         logging.getLogger("sqlalchemy.pool").setLevel(self.existing_level)
@@ -429,6 +450,14 @@ class PoolLoggingTest(fixtures.TestBase):
         conn = None
 
         conn = q.connect()
+        conn._close_special(transaction_reset=True)
+        conn = None
+
+        conn = q.connect()
+        conn._close_special(transaction_reset=False)
+        conn = None
+
+        conn = q.connect()
         conn = None
         del conn
         lazy_gc()
@@ -440,14 +469,20 @@ class PoolLoggingTest(fixtures.TestBase):
                 "Created new connection %r",
                 "Connection %r checked out from pool",
                 "Connection %r being returned to pool",
-                "Connection %s rollback-on-return%s",
+                "Connection %s rollback-on-return",
                 "Connection %r checked out from pool",
                 "Connection %r being returned to pool",
-                "Connection %s rollback-on-return%s",
+                "Connection %s rollback-on-return",
                 "Connection %r checked out from pool",
                 "Connection %r being returned to pool",
-                "Connection %s rollback-on-return%s",
-                "Closing connection %r",
+                "Connection %s reset, transaction already reset",
+                "Connection %r checked out from pool",
+                "Connection %r being returned to pool",
+                "Connection %s rollback-on-return",
+                "Connection %r checked out from pool",
+                "Connection %r being returned to pool",
+                "Connection %s rollback-on-return",
+                "%s connection %r",
             ]
             + (["Pool disposed. %s"] if dispose else []),
         )
@@ -460,10 +495,12 @@ class PoolLoggingTest(fixtures.TestBase):
         q = self._stpool_logging_fixture()
         self._test_queuepool(q, False)
 
+    @testing.requires.predictable_gc
     def test_queuepool_echo(self):
         q = self._queuepool_echo_fixture()
         self._test_queuepool(q)
 
+    @testing.requires.predictable_gc
     def test_queuepool_logging(self):
         q = self._queuepool_logging_fixture()
         self._test_queuepool(q)
@@ -473,21 +510,23 @@ class LoggingNameTest(fixtures.TestBase):
     __requires__ = ("ad_hoc_engines",)
 
     def _assert_names_in_execute(self, eng, eng_name, pool_name):
-        eng.execute(select([1]))
+        with eng.connect() as conn:
+            conn.execute(select(1))
         assert self.buf.buffer
         for name in [b.name for b in self.buf.buffer]:
             assert name in (
-                "sqlalchemy.engine.base.Engine.%s" % eng_name,
+                "sqlalchemy.engine.Engine.%s" % eng_name,
                 "sqlalchemy.pool.impl.%s.%s"
                 % (eng.pool.__class__.__name__, pool_name),
             )
 
     def _assert_no_name_in_execute(self, eng):
-        eng.execute(select([1]))
+        with eng.connect() as conn:
+            conn.execute(select(1))
         assert self.buf.buffer
         for name in [b.name for b in self.buf.buffer]:
             assert name in (
-                "sqlalchemy.engine.base.Engine",
+                "sqlalchemy.engine.Engine",
                 "sqlalchemy.pool.impl.%s" % eng.pool.__class__.__name__,
             )
 
@@ -504,7 +543,7 @@ class LoggingNameTest(fixtures.TestBase):
         kw.update({"echo": True})
         return engines.testing_engine(options=kw)
 
-    def setup(self):
+    def setup_test(self):
         self.buf = logging.handlers.BufferingHandler(100)
         for log in [
             logging.getLogger("sqlalchemy.engine"),
@@ -512,7 +551,7 @@ class LoggingNameTest(fixtures.TestBase):
         ]:
             log.addHandler(self.buf)
 
-    def teardown(self):
+    def teardown_test(self):
         for log in [
             logging.getLogger("sqlalchemy.engine"),
             logging.getLogger("sqlalchemy.pool"),
@@ -526,7 +565,8 @@ class LoggingNameTest(fixtures.TestBase):
 
     def test_named_logger_names_after_dispose(self):
         eng = self._named_engine()
-        eng.execute(select([1]))
+        with eng.connect() as conn:
+            conn.execute(select(1))
         eng.dispose()
         eq_(eng.logging_name, "myenginename")
         eq_(eng.pool.logging_name, "mypoolname")
@@ -546,7 +586,8 @@ class LoggingNameTest(fixtures.TestBase):
 
     def test_named_logger_execute_after_dispose(self):
         eng = self._named_engine()
-        eng.execute(select([1]))
+        with eng.connect() as conn:
+            conn.execute(select(1))
         eng.dispose()
         self._assert_names_in_execute(eng, "myenginename", "mypoolname")
 
@@ -559,16 +600,318 @@ class LoggingNameTest(fixtures.TestBase):
         self._assert_no_name_in_execute(eng)
 
 
+class TransactionContextLoggingTest(fixtures.TestBase):
+    __only_on__ = "sqlite"
+
+    @testing.fixture()
+    def plain_assert_buf(self, plain_logging_engine):
+        buf = logging.handlers.BufferingHandler(100)
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.addHandler(buf)
+
+        def go(expected):
+            assert buf.buffer
+
+            buflines = [rec.msg % rec.args for rec in buf.buffer]
+
+            eq_(buflines, expected)
+            buf.flush()
+
+        yield go
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.removeHandler(buf)
+
+    @testing.fixture()
+    def assert_buf(self, logging_engine):
+        buf = logging.handlers.BufferingHandler(100)
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.addHandler(buf)
+
+        def go(expected):
+            assert buf.buffer
+
+            buflines = [rec.msg % rec.args for rec in buf.buffer]
+
+            eq_(buflines, expected)
+            buf.flush()
+
+        yield go
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.removeHandler(buf)
+
+    @testing.fixture()
+    def logging_engine(self, testing_engine):
+        kw = {"echo": True, "future": True}
+        e = testing_engine(options=kw)
+        e.connect().close()
+        return e
+
+    @testing.fixture()
+    def autocommit_iso_logging_engine(self, testing_engine):
+        kw = {"echo": True, "future": True, "isolation_level": "AUTOCOMMIT"}
+        e = testing_engine(options=kw)
+        e.connect().close()
+        return e
+
+    @testing.fixture()
+    def plain_logging_engine(self, testing_engine):
+        # deliver an engine with logging using the plain logging API,
+        # not the echo parameter
+        log = logging.getLogger("sqlalchemy.engine")
+        existing_level = log.level
+        log.setLevel(logging.DEBUG)
+
+        try:
+            e = testing_engine(future=True)
+            e.connect().close()
+            yield e
+        finally:
+            log.setLevel(existing_level)
+
+    def test_begin_once_block(self, logging_engine, assert_buf):
+        with logging_engine.begin():
+            pass
+
+        assert_buf(["BEGIN (implicit)", "COMMIT"])
+
+    def test_commit_as_you_go_block_commit(self, logging_engine, assert_buf):
+        with logging_engine.connect() as conn:
+            conn.begin()
+            conn.commit()
+
+        assert_buf(["BEGIN (implicit)", "COMMIT"])
+
+    def test_commit_as_you_go_block_rollback(self, logging_engine, assert_buf):
+        with logging_engine.connect() as conn:
+            conn.begin()
+            conn.rollback()
+
+        assert_buf(["BEGIN (implicit)", "ROLLBACK"])
+
+    def test_commit_as_you_go_block_commit_engine_level_autocommit(
+        self, autocommit_iso_logging_engine, assert_buf
+    ):
+        with autocommit_iso_logging_engine.connect() as conn:
+            conn.begin()
+            conn.commit()
+
+        assert_buf(
+            [
+                "BEGIN (implicit; DBAPI should not "
+                "BEGIN due to autocommit mode)",
+                "COMMIT using DBAPI connection.commit(), DBAPI "
+                "should ignore due to autocommit mode",
+            ]
+        )
+
+    def test_commit_engine_level_autocommit_exec_opt_nonauto(
+        self, autocommit_iso_logging_engine, assert_buf
+    ):
+        with autocommit_iso_logging_engine.execution_options(
+            isolation_level=testing.db.dialect.default_isolation_level
+        ).connect() as conn:
+            conn.begin()
+            conn.commit()
+
+        assert_buf(
+            [
+                "BEGIN (implicit)",
+                "COMMIT",
+            ]
+        )
+
+    def test_commit_as_you_go_block_commit_autocommit(
+        self, logging_engine, assert_buf
+    ):
+        with logging_engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as conn:
+            conn.begin()
+            conn.commit()
+
+        assert_buf(
+            [
+                "BEGIN (implicit; DBAPI should not "
+                "BEGIN due to autocommit mode)",
+                "COMMIT using DBAPI connection.commit(), DBAPI "
+                "should ignore due to autocommit mode",
+            ]
+        )
+
+    def test_commit_as_you_go_block_rollback_autocommit(
+        self, logging_engine, assert_buf
+    ):
+        with logging_engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as conn:
+            conn.begin()
+            conn.rollback()
+
+        assert_buf(
+            [
+                "BEGIN (implicit; DBAPI should not "
+                "BEGIN due to autocommit mode)",
+                "ROLLBACK using DBAPI connection.rollback(), DBAPI "
+                "should ignore due to autocommit mode",
+            ]
+        )
+
+    def test_logging_compatibility(
+        self, plain_assert_buf, plain_logging_engine
+    ):
+        """ensure plain logging doesn't produce API errors.
+
+        Added as part of #7612
+
+        """
+        e = plain_logging_engine
+
+        with e.connect() as conn:
+            result = conn.exec_driver_sql("select 1")
+            result.all()
+
+        plain_assert_buf(
+            [
+                "BEGIN (implicit)",
+                "select 1",
+                "[raw sql] ()",
+                "Col ('1',)",
+                "Row (1,)",
+                "ROLLBACK",
+            ]
+        )
+
+    @testing.requires.python38
+    def test_log_messages_have_correct_metadata_plain(
+        self, plain_logging_engine
+    ):
+        """test #7612"""
+        self._test_log_messages_have_correct_metadata(plain_logging_engine)
+
+    @testing.requires.python38
+    def test_log_messages_have_correct_metadata_echo(self, logging_engine):
+        """test #7612"""
+        self._test_log_messages_have_correct_metadata(logging_engine)
+
+    def _test_log_messages_have_correct_metadata(self, logging_engine):
+        buf = logging.handlers.BufferingHandler(100)
+        log = logging.getLogger("sqlalchemy.engine")
+        try:
+            log.addHandler(buf)
+
+            with logging_engine.connect().execution_options(
+                isolation_level="AUTOCOMMIT"
+            ) as conn:
+                conn.begin()
+                conn.rollback()
+        finally:
+            log.removeHandler(buf)
+
+        assert len(buf.buffer) >= 2
+
+        # log messages must originate from functions called 'begin'/'rollback'
+        logging_functions = {rec.funcName for rec in buf.buffer}
+        assert any(
+            "begin" in fn for fn in logging_functions
+        ), logging_functions
+        assert any(
+            "rollback" in fn for fn in logging_functions
+        ), logging_functions
+
+        # log messages must originate from different lines
+        log_lines = {rec.lineno for rec in buf.buffer}
+        assert len(log_lines) > 1, log_lines
+        buf.flush()
+
+
+class LoggingTokenTest(fixtures.TestBase):
+    def setup_test(self):
+        self.buf = logging.handlers.BufferingHandler(100)
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.addHandler(self.buf)
+
+    def teardown_test(self):
+        for log in [
+            logging.getLogger("sqlalchemy.engine"),
+        ]:
+            log.removeHandler(self.buf)
+
+    def _assert_token_in_execute(self, conn, token):
+        self.buf.flush()
+        r = conn.execute(select(1))
+        r.all()
+        assert self.buf.buffer
+        for rec in self.buf.buffer:
+            line = rec.msg % rec.args
+            assert re.match(r"\[%s\]" % token, line)
+        self.buf.flush()
+
+    def _assert_no_tokens_in_execute(self, conn):
+        self.buf.flush()
+        r = conn.execute(select(1))
+        r.all()
+        assert self.buf.buffer
+        for rec in self.buf.buffer:
+            line = rec.msg % rec.args
+            assert not re.match(r"\[my_.*?\]", line)
+        self.buf.flush()
+
+    @testing.fixture()
+    def token_engine(self, testing_engine):
+        kw = {"echo": "debug"}
+        return testing_engine(options=kw)
+
+    def test_logging_token_option_connection(self, token_engine):
+        eng = token_engine
+
+        c1 = eng.connect().execution_options(logging_token="my_name_1")
+        c2 = eng.connect().execution_options(logging_token="my_name_2")
+        c3 = eng.connect()
+
+        self._assert_token_in_execute(c1, "my_name_1")
+        self._assert_token_in_execute(c2, "my_name_2")
+        self._assert_no_tokens_in_execute(c3)
+
+        c1.close()
+        c2.close()
+        c3.close()
+
+    def test_logging_token_option_engine(self, token_engine):
+        eng = token_engine
+
+        e1 = eng.execution_options(logging_token="my_name_1")
+        e2 = eng.execution_options(logging_token="my_name_2")
+
+        with e1.connect() as c1:
+            self._assert_token_in_execute(c1, "my_name_1")
+
+        with e2.connect() as c2:
+            self._assert_token_in_execute(c2, "my_name_2")
+
+        with eng.connect() as c3:
+            self._assert_no_tokens_in_execute(c3)
+
+
 class EchoTest(fixtures.TestBase):
     __requires__ = ("ad_hoc_engines",)
 
-    def setup(self):
+    def setup_test(self):
         self.level = logging.getLogger("sqlalchemy.engine").level
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARN)
         self.buf = logging.handlers.BufferingHandler(100)
         logging.getLogger("sqlalchemy.engine").addHandler(self.buf)
 
-    def teardown(self):
+    def teardown_test(self):
         logging.getLogger("sqlalchemy.engine").removeHandler(self.buf)
         logging.getLogger("sqlalchemy.engine").setLevel(self.level)
 
@@ -577,7 +920,8 @@ class EchoTest(fixtures.TestBase):
 
         # do an initial execute to clear out 'first connect'
         # messages
-        e.execute(select([10])).close()
+        with e.connect() as conn:
+            conn.execute(select(10)).close()
         self.buf.flush()
 
         return e
@@ -615,16 +959,25 @@ class EchoTest(fixtures.TestBase):
         e2 = self._testing_engine()
 
         e1.echo = True
-        e1.execute(select([1])).close()
-        e2.execute(select([2])).close()
+
+        with e1.connect() as conn:
+            conn.execute(select(1)).close()
+
+        with e2.connect() as conn:
+            conn.execute(select(2)).close()
 
         e1.echo = False
-        e1.execute(select([3])).close()
-        e2.execute(select([4])).close()
+
+        with e1.connect() as conn:
+            conn.execute(select(3)).close()
+        with e2.connect() as conn:
+            conn.execute(select(4)).close()
 
         e2.echo = True
-        e1.execute(select([5])).close()
-        e2.execute(select([6])).close()
+        with e1.connect() as conn:
+            conn.execute(select(5)).close()
+        with e2.connect() as conn:
+            conn.execute(select(6)).close()
 
         assert self.buf.buffer[0].getMessage().startswith("SELECT 1")
         assert self.buf.buffer[2].getMessage().startswith("SELECT 6")

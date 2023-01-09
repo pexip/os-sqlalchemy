@@ -8,20 +8,18 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import clear_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import defer
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm import undefer
 from sqlalchemy.orm import with_polymorphic
-from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import assert_warns
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
@@ -31,6 +29,8 @@ from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import ComparableEntity
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
@@ -55,16 +55,17 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), order_by=Address.id
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    order_by=Address.id,
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
 
         q = sess.query(User).options(selectinload(User.addresses))
 
@@ -88,7 +89,49 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
 
         self.assert_sql_count(testing.db, go, 2)
 
-    def test_from_aliased(self):
+    @testing.combinations(True, False)
+    def test_from_statement(self, legacy):
+        users, Address, addresses, User = (
+            self.tables.users,
+            self.classes.Address,
+            self.tables.addresses,
+            self.classes.User,
+        )
+
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={
+                "addresses": relationship(
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    order_by=Address.id,
+                )
+            },
+        )
+        sess = fixture_session()
+
+        stmt = select(User).where(User.id == 7)
+
+        def go():
+            if legacy:
+                ret = (
+                    sess.query(User)
+                    .from_statement(stmt)
+                    .options(selectinload(User.addresses))
+                    .all()
+                )
+            else:
+                ret = sess.scalars(
+                    select(User)
+                    .from_statement(stmt)
+                    .options(selectinload(User.addresses))
+                ).all()
+
+            eq_(self.static.user_address_result[0:1], ret)
+
+        self.assert_sql_count(testing.db, go, 2)
+
+    def user_dingaling_fixture(self):
         users, Dingaling, User, dingalings, Address, addresses = (
             self.tables.users,
             self.classes.Dingaling,
@@ -98,75 +141,107 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.addresses,
         )
 
-        mapper(Dingaling, dingalings)
-        mapper(
+        self.mapper_registry.map_imperatively(Dingaling, dingalings)
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties={
                 "dingalings": relationship(Dingaling, order_by=Dingaling.id)
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(Address, order_by=Address.id)
             },
         )
-        sess = create_session()
+        return User, Dingaling, Address
 
-        u = aliased(User)
+    def test_from_aliased_w_cache_one(self):
+        User, Dingaling, Address = self.user_dingaling_fixture()
 
-        q = sess.query(u).options(selectinload(u.addresses))
+        for i in range(3):
 
-        def go():
-            eq_(
-                [
-                    User(
-                        id=7,
-                        addresses=[
-                            Address(id=1, email_address="jack@bean.com")
-                        ],
-                    )
-                ],
-                q.filter(u.id == 7).all(),
-            )
+            def go():
 
-        self.assert_sql_count(testing.db, go, 2)
+                sess = fixture_session()
 
-        def go():
-            eq_(self.static.user_address_result, q.order_by(u.id).all())
+                u = aliased(User)
 
-        self.assert_sql_count(testing.db, go, 2)
+                q = sess.query(u).options(selectinload(u.addresses))
 
-        q = sess.query(u).options(
-            selectinload(u.addresses).selectinload(Address.dingalings)
-        )
+                eq_(
+                    [
+                        User(
+                            id=7,
+                            addresses=[
+                                Address(id=1, email_address="jack@bean.com")
+                            ],
+                        )
+                    ],
+                    q.filter(u.id == 7).all(),
+                )
 
-        def go():
-            eq_(
-                [
-                    User(
-                        id=8,
-                        addresses=[
-                            Address(
-                                id=2,
-                                email_address="ed@wood.com",
-                                dingalings=[Dingaling()],
-                            ),
-                            Address(id=3, email_address="ed@bettyboop.com"),
-                            Address(id=4, email_address="ed@lala.com"),
-                        ],
-                    ),
-                    User(
-                        id=9,
-                        addresses=[Address(id=5, dingalings=[Dingaling()])],
-                    ),
-                ],
-                q.filter(u.id.in_([8, 9])).all(),
-            )
+            self.assert_sql_count(testing.db, go, 2)
 
-        self.assert_sql_count(testing.db, go, 3)
+    def test_from_aliased_w_cache_two(self):
+        User, Dingaling, Address = self.user_dingaling_fixture()
+
+        for i in range(3):
+
+            def go():
+                sess = fixture_session()
+
+                u = aliased(User)
+
+                q = sess.query(u).options(selectinload(u.addresses))
+
+                eq_(self.static.user_address_result, q.order_by(u.id).all())
+
+            self.assert_sql_count(testing.db, go, 2)
+
+    def test_from_aliased_w_cache_three(self):
+
+        User, Dingaling, Address = self.user_dingaling_fixture()
+
+        for i in range(3):
+
+            def go():
+                sess = fixture_session()
+
+                u = aliased(User)
+
+                q = sess.query(u).options(
+                    selectinload(u.addresses).selectinload(Address.dingalings)
+                )
+                eq_(
+                    [
+                        User(
+                            id=8,
+                            addresses=[
+                                Address(
+                                    id=2,
+                                    email_address="ed@wood.com",
+                                    dingalings=[Dingaling()],
+                                ),
+                                Address(
+                                    id=3, email_address="ed@bettyboop.com"
+                                ),
+                                Address(id=4, email_address="ed@lala.com"),
+                            ],
+                        ),
+                        User(
+                            id=9,
+                            addresses=[
+                                Address(id=5, dingalings=[Dingaling()])
+                            ],
+                        ),
+                    ],
+                    q.filter(u.id.in_([8, 9])).all(),
+                )
+
+            self.assert_sql_count(testing.db, go, 3)
 
     def test_from_get(self):
         users, Address, addresses, User = (
@@ -176,18 +251,17 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), order_by=Address.id
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    order_by=Address.id,
                 )
             },
         )
-        sess = create_session()
-
-        q = sess.query(User).options(selectinload(User.addresses))
+        sess = fixture_session()
 
         def go():
             eq_(
@@ -195,7 +269,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     id=7,
                     addresses=[Address(id=1, email_address="jack@bean.com")],
                 ),
-                q.get(7),
+                sess.get(User, 7, options=[selectinload(User.addresses)]),
             )
 
         self.assert_sql_count(testing.db, go, 2)
@@ -208,16 +282,17 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), order_by=Address.id
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    order_by=Address.id,
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
 
         q = sess.query(User).options(selectinload(User.addresses))
 
@@ -242,13 +317,13 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={"addresses": relationship(Address, lazy="dynamic")},
         )
-        mapper(Address, addresses)
-        sess = create_session()
+        self.mapper_registry.map_imperatively(Address, addresses)
+        sess = fixture_session()
 
         # previously this would not raise, but would emit
         # the query needlessly and put the result nowhere.
@@ -268,8 +343,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Item,
         )
 
-        mapper(Keyword, keywords)
-        mapper(
+        self.mapper_registry.map_imperatively(Keyword, keywords)
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties=dict(
@@ -282,7 +357,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             ),
         )
 
-        q = create_session().query(Item).order_by(Item.id)
+        q = fixture_session().query(Item).order_by(Item.id)
 
         def go():
             eq_(self.static.item_keyword_result, q.all())
@@ -298,8 +373,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Item,
         )
 
-        mapper(Keyword, keywords)
-        mapper(
+        self.mapper_registry.map_imperatively(Keyword, keywords)
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties=dict(
@@ -312,12 +387,12 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             ),
         )
 
-        q = create_session().query(Item).order_by(Item.id)
+        q = fixture_session().query(Item).order_by(Item.id)
 
         def go():
             eq_(
                 self.static.item_keyword_result[0:2],
-                q.join("keywords").filter(Keyword.name == "red").all(),
+                q.join(Item.keywords).filter(Keyword.name == "red").all(),
             )
 
         self.assert_sql_count(testing.db, go, 2)
@@ -331,8 +406,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Item,
         )
 
-        mapper(Keyword, keywords)
-        mapper(
+        self.mapper_registry.map_imperatively(Keyword, keywords)
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties=dict(
@@ -345,16 +420,13 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             ),
         )
 
-        q = create_session().query(Item).order_by(Item.id)
+        q = fixture_session().query(Item).order_by(Item.id)
 
         def go():
+            ka = aliased(Keyword)
             eq_(
                 self.static.item_keyword_result[0:2],
-                (
-                    q.join("keywords", aliased=True).filter(
-                        Keyword.name == "red"
-                    )
-                ).all(),
+                (q.join(ka, Item.keywords).filter(ka.name == "red")).all(),
             )
 
         self.assert_sql_count(testing.db, go, 2)
@@ -367,18 +439,18 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses),
+                    self.mapper_registry.map_imperatively(Address, addresses),
                     lazy="selectin",
                     order_by=addresses.c.email_address,
                 )
             },
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         eq_(
             [
                 User(id=7, addresses=[Address(id=1)]),
@@ -404,18 +476,18 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses),
+                    self.mapper_registry.map_imperatively(Address, addresses),
                     lazy="selectin",
                     order_by=[addresses.c.email_address, addresses.c.id],
                 )
             },
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         eq_(
             [
                 User(id=7, addresses=[Address(id=1)]),
@@ -444,8 +516,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -455,7 +527,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             ),
         )
 
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         result = (
             q.filter(User.id == Address.user_id)
             .order_by(Address.email_address)
@@ -486,8 +558,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -498,7 +570,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )
             ),
         )
-        sess = create_session()
+        sess = fixture_session()
         eq_(
             [
                 User(id=7, addresses=[Address(id=1)]),
@@ -557,14 +629,14 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.item_keywords,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "orders": relationship(Order, order_by=orders.c.id)  # o2m, m2o
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -573,7 +645,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )  # m2m
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties={
@@ -582,13 +654,20 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )  # m2m
             },
         )
-        mapper(Keyword, keywords)
+        self.mapper_registry.map_imperatively(Keyword, keywords)
 
         callables = {
             "joinedload": joinedload,
             "selectinload": selectinload,
             "subqueryload": subqueryload,
         }
+
+        # NOTE: make sure this test continues to run many different
+        # combinations for the *same* mappers above; that is, don't tear the
+        # mappers down and build them up for every "config".  This allows
+        # testing of the LRUCache that's associated with LazyLoader
+        # and SelectInLoader and how they interact with the lambda query
+        # API, which stores AnalyzedFunction objects in this cache.
 
         for o, i, k, count in configs:
             options = []
@@ -600,7 +679,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 options.append(
                     callables[k](User.orders, Order.items, Item.keywords)
                 )
-
             self._do_query_tests(options, count)
 
     def _do_mapper_test(self, configs):
@@ -635,7 +713,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         }
 
         for o, i, k, count in configs:
-            mapper(
+            self.mapper_registry.map_imperatively(
                 User,
                 users,
                 properties={
@@ -644,7 +722,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     )
                 },
             )
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Order,
                 orders,
                 properties={
@@ -656,7 +734,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     )
                 },
             )
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Item,
                 items,
                 properties={
@@ -668,7 +746,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     )
                 },
             )
-            mapper(Keyword, keywords)
+            self.mapper_registry.map_imperatively(Keyword, keywords)
 
             try:
                 self._do_query_tests([], count)
@@ -678,35 +756,35 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
     def _do_query_tests(self, opts, count):
         Order, User = self.classes.Order, self.classes.User
 
-        sess = create_session()
+        with fixture_session() as sess:
 
-        def go():
+            def go():
+                eq_(
+                    sess.query(User).options(*opts).order_by(User.id).all(),
+                    self.static.user_item_keyword_result,
+                )
+
+            self.assert_sql_count(testing.db, go, count)
+
             eq_(
-                sess.query(User).options(*opts).order_by(User.id).all(),
-                self.static.user_item_keyword_result,
+                sess.query(User)
+                .options(*opts)
+                .filter(User.name == "fred")
+                .order_by(User.id)
+                .all(),
+                self.static.user_item_keyword_result[2:3],
             )
 
-        self.assert_sql_count(testing.db, go, count)
-
-        eq_(
-            sess.query(User)
-            .options(*opts)
-            .filter(User.name == "fred")
-            .order_by(User.id)
-            .all(),
-            self.static.user_item_keyword_result[2:3],
-        )
-
-        sess = create_session()
-        eq_(
-            sess.query(User)
-            .options(*opts)
-            .join(User.orders)
-            .filter(Order.id == 3)
-            .order_by(User.id)
-            .all(),
-            self.static.user_item_keyword_result[0:1],
-        )
+        with fixture_session() as sess:
+            eq_(
+                sess.query(User)
+                .options(*opts)
+                .join(User.orders)
+                .filter(Order.id == 3)
+                .order_by(User.id)
+                .all(),
+                self.static.user_item_keyword_result[0:1],
+            )
 
     def test_cyclical(self):
         """A circular eager relationship breaks the cycle with a lazy loader"""
@@ -718,8 +796,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -737,7 +815,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         )
         is_(sa.orm.class_mapper(Address).get_property("user").lazy, "selectin")
 
-        sess = create_session()
+        sess = fixture_session()
         eq_(
             self.static.user_address_result,
             sess.query(User).order_by(User.id).all(),
@@ -753,8 +831,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -775,7 +853,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         )
         is_(sa.orm.class_mapper(Address).get_property("user").lazy, "selectin")
 
-        sess = create_session()
+        sess = fixture_session()
         eq_(
             self.static.user_address_result,
             sess.query(User).order_by(User.id).all(),
@@ -805,8 +883,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.order_items,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -818,16 +896,16 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
         open_mapper = aliased(
-            Order, select([orders]).where(orders.c.isopen == 1).alias()
+            Order, select(orders).where(orders.c.isopen == 1).alias()
         )
         closed_mapper = aliased(
-            Order, select([orders]).where(orders.c.isopen == 0).alias()
+            Order, select(orders).where(orders.c.isopen == 0).alias()
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -835,10 +913,16 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     Address, lazy="selectin", order_by=addresses.c.id
                 ),
                 open_orders=relationship(
-                    open_mapper, lazy="selectin", order_by=open_mapper.id
+                    open_mapper,
+                    lazy="selectin",
+                    order_by=open_mapper.id,
+                    overlaps="closed_orders",
                 ),
                 closed_orders=relationship(
-                    closed_mapper, lazy="selectin", order_by=closed_mapper.id
+                    closed_mapper,
+                    lazy="selectin",
+                    order_by=closed_mapper.id,
+                    overlaps="open_orders",
                 ),
             ),
         )
@@ -869,8 +953,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.order_items,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -882,12 +966,12 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
         open_mapper = aliased(Order, orders)
         closed_mapper = aliased(Order, orders)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -902,6 +986,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     ),
                     lazy="selectin",
                     order_by=open_mapper.id,
+                    viewonly=True,
                 ),
                 closed_orders=relationship(
                     closed_mapper,
@@ -911,6 +996,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     ),
                     lazy="selectin",
                     order_by=closed_mapper.id,
+                    viewonly=True,
                 ),
             ),
         )
@@ -943,8 +1029,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.users,
         )
 
-        mapper(Address, addresses)
-        mapper(
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -956,8 +1042,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )
             },
         )
-        mapper(Item, items)
-        mapper(
+        self.mapper_registry.map_imperatively(Item, items)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -971,6 +1057,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     ),
                     lazy="selectin",
                     order_by=orders.c.id,
+                    overlaps="closed_orders",
                 ),
                 closed_orders=relationship(
                     Order,
@@ -979,6 +1066,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                     ),
                     lazy="selectin",
                     order_by=orders.c.id,
+                    overlaps="open_orders",
                 ),
             ),
         )
@@ -989,7 +1077,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         User, Address, Order, Item = self.classes(
             "User", "Address", "Order", "Item"
         )
-        q = create_session().query(User).order_by(User.id)
+        q = fixture_session().query(User).order_by(User.id)
 
         def items(*ids):
             if no_items:
@@ -1035,6 +1123,36 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         else:
             self.assert_sql_count(testing.db, go, 6)
 
+    @testing.combinations(
+        ("plain",), ("cte", testing.requires.ctes), ("subquery",), id_="s"
+    )
+    def test_map_to_cte_subq(self, type_):
+        User, Address = self.classes("User", "Address")
+        users, addresses = self.tables("users", "addresses")
+
+        if type_ == "plain":
+            target = users
+        elif type_ == "cte":
+            target = select(users).cte()
+        elif type_ == "subquery":
+            target = select(users).subquery()
+
+        self.mapper_registry.map_imperatively(
+            User,
+            target,
+            properties={"addresses": relationship(Address, backref="user")},
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
+
+        sess = fixture_session()
+
+        q = (
+            sess.query(Address)
+            .options(selectinload(Address.user))
+            .order_by(Address.id)
+        )
+        eq_(q.all(), self.static.address_user_result)
+
     def test_limit(self):
         """Limit operations combined with lazy-load relationships."""
 
@@ -1060,8 +1178,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.tables.addresses,
         )
 
-        mapper(Item, items)
-        mapper(
+        self.mapper_registry.map_imperatively(Item, items)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -1073,12 +1191,12 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses),
+                    self.mapper_registry.map_imperatively(Address, addresses),
                     lazy="selectin",
                     order_by=addresses.c.id,
                 ),
@@ -1088,7 +1206,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         result = q.order_by(User.id).limit(2).offset(1).all()
@@ -1105,16 +1223,18 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
                 address=relationship(
-                    mapper(Address, addresses), lazy="selectin", uselist=False
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="selectin",
+                    uselist=False,
                 )
             ),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
 
         def go():
             result = q.filter(users.c.id == 7).all()
@@ -1130,16 +1250,18 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
                 address=relationship(
-                    mapper(Address, addresses), lazy="selectin", uselist=False
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="selectin",
+                    uselist=False,
                 )
             ),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
 
         def go():
             result = q.filter(users.c.id == 10).all()
@@ -1155,20 +1277,23 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties=dict(
-                user=relationship(mapper(User, users), lazy="selectin")
+                user=relationship(
+                    self.mapper_registry.map_imperatively(User, users),
+                    lazy="selectin",
+                )
             ),
         )
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Address)
 
         def go():
             a = q.filter(addresses.c.id == 1).one()
             is_not(a.user, None)
-            u1 = sess.query(User).get(7)
+            u1 = sess.get(User, 7)
             is_(a.user, u1)
 
         self.assert_sql_count(testing.db, go, 2)
@@ -1181,14 +1306,14 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Address,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"address": relationship(Address, lazy="selectin")},
         )
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
         q = sess.query(Order).filter(Order.id.in_([4, 5])).order_by(Order.id)
 
         o4, o5 = q.all()
@@ -1215,16 +1340,16 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Address,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
                 "address": relationship(Address, lazy="selectin", uselist=True)
             },
         )
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).filter(Order.id.in_([4, 5])).order_by(Order.id)
 
         o4, o5 = q.all()
@@ -1239,16 +1364,17 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
                 addresses=relationship(
-                    mapper(Address, addresses), lazy="selectin"
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="selectin",
                 )
             ),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         result = q.filter(users.c.id == 10).all()
         u1 = result[0]
 
@@ -1262,17 +1388,20 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Order,
         )
 
-        max_orders_by_user = sa.select(
-            [sa.func.max(orders.c.id).label("order_id")],
-            group_by=[orders.c.user_id],
-        ).alias("max_orders_by_user")
+        max_orders_by_user = (
+            sa.select(sa.func.max(orders.c.id).label("order_id"))
+            .group_by(orders.c.user_id)
+            .alias("max_orders_by_user")
+        )
 
-        max_orders = orders.select(
-            orders.c.id == max_orders_by_user.c.order_id
-        ).alias("max_orders")
+        max_orders = (
+            orders.select()
+            .where(orders.c.id == max_orders_by_user.c.order_id)
+            .alias("max_orders")
+        )
 
-        mapper(Order, orders)
-        mapper(
+        self.mapper_registry.map_imperatively(Order, orders)
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -1288,7 +1417,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             },
         )
 
-        q = create_session().query(User)
+        q = fixture_session().query(User)
 
         def go():
             eq_(
@@ -1322,14 +1451,14 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.classes.Order,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={"order": relationship(Order, uselist=False)},
         )
-        mapper(Order, orders)
-        s = create_session()
-        assert_raises(
+        self.mapper_registry.map_imperatively(Order, orders)
+        s = fixture_session()
+        assert_warns(
             sa.exc.SAWarning,
             s.query(User).options(selectinload(User.order)).all,
         )
@@ -1347,19 +1476,21 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
             self.classes.Address,
             self.classes.Dingaling,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             self.tables.users,
             properties={"addresses": relationship(Address)},
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             self.tables.addresses,
             properties={"dingaling": relationship(Dingaling)},
         )
-        mapper(Dingaling, self.tables.dingalings)
+        self.mapper_registry.map_imperatively(
+            Dingaling, self.tables.dingalings
+        )
 
-        sess = Session(autoflush=False)
+        sess = fixture_session(autoflush=False)
         return User, Address, Dingaling, sess
 
     def _collection_to_collection_fixture(self):
@@ -1368,35 +1499,35 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
             self.classes.Order,
             self.classes.Item,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User, self.tables.users, properties={"orders": relationship(Order)}
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             self.tables.orders,
             properties={
                 "items": relationship(Item, secondary=self.tables.order_items)
             },
         )
-        mapper(Item, self.tables.items)
+        self.mapper_registry.map_imperatively(Item, self.tables.items)
 
-        sess = Session(autoflush=False)
+        sess = fixture_session(autoflush=False)
         return User, Order, Item, sess
 
-    def _eager_config_fixture(self):
+    def _eager_config_fixture(self, default_lazy="selectin"):
         User, Address = self.classes.User, self.classes.Address
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             self.tables.users,
-            properties={"addresses": relationship(Address, lazy="selectin")},
+            properties={"addresses": relationship(Address, lazy=default_lazy)},
         )
-        mapper(Address, self.tables.addresses)
-        sess = Session(autoflush=False)
+        self.mapper_registry.map_imperatively(Address, self.tables.addresses)
+        sess = fixture_session(autoflush=False)
         return User, Address, sess
 
     def _deferred_config_fixture(self):
         User, Address = self.classes.User, self.classes.Address
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             self.tables.users,
             properties={
@@ -1404,26 +1535,52 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
                 "addresses": relationship(Address, lazy="selectin"),
             },
         )
-        mapper(Address, self.tables.addresses)
-        sess = Session(autoflush=False)
+        self.mapper_registry.map_imperatively(Address, self.tables.addresses)
+        sess = fixture_session(autoflush=False)
         return User, Address, sess
 
-    def test_no_query_on_refresh(self):
+    def test_runs_query_on_refresh(self):
         User, Address, sess = self._eager_config_fixture()
 
-        u1 = sess.query(User).get(8)
+        u1 = sess.get(User, 8)
         assert "addresses" in u1.__dict__
         sess.expire(u1)
 
         def go():
             eq_(u1.id, 8)
 
-        self.assert_sql_count(testing.db, go, 1)
-        assert "addresses" not in u1.__dict__
+        self.assert_sql_count(testing.db, go, 2)
+        assert "addresses" in u1.__dict__
+
+    @testing.combinations(
+        ("raise",),
+        ("raise_on_sql",),
+        ("select",),
+        ("immediate"),
+    )
+    def test_runs_query_on_option_refresh(self, default_lazy):
+        User, Address, sess = self._eager_config_fixture(
+            default_lazy=default_lazy
+        )
+
+        u1 = (
+            sess.query(User)
+            .options(selectinload(User.addresses))
+            .filter_by(id=8)
+            .first()
+        )
+        assert "addresses" in u1.__dict__
+        sess.expire(u1)
+
+        def go():
+            eq_(u1.id, 8)
+
+        self.assert_sql_count(testing.db, go, 2)
+        assert "addresses" in u1.__dict__
 
     def test_no_query_on_deferred(self):
         User, Address, sess = self._deferred_config_fixture()
-        u1 = sess.query(User).get(8)
+        u1 = sess.get(User, 8)
         assert "addresses" in u1.__dict__
         sess.expire(u1, ["addresses"])
 
@@ -1435,7 +1592,7 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
 
     def test_populate_existing_propagate(self):
         User, Address, sess = self._eager_config_fixture()
-        u1 = sess.query(User).get(8)
+        u1 = sess.get(User, 8)
         u1.addresses[2].email_address = "foofoo"
         del u1.addresses[1]
         u1 = sess.query(User).populate_existing().filter_by(id=8).one()
@@ -1448,13 +1605,13 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
     def test_loads_second_level_collection_to_scalar(self):
         User, Address, Dingaling, sess = self._collection_to_scalar_fixture()
 
-        u1 = sess.query(User).get(8)
+        u1 = sess.get(User, 8)
         a1 = Address()
         u1.addresses.append(a1)
         a2 = u1.addresses[0]
         a2.email_address = "foo"
         sess.query(User).options(
-            selectinload("addresses").selectinload("dingaling")
+            selectinload(User.addresses).selectinload(Address.dingaling)
         ).filter_by(id=8).all()
         assert u1.addresses[-1] is a1
         for a in u1.addresses:
@@ -1468,12 +1625,12 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
     def test_loads_second_level_collection_to_collection(self):
         User, Order, Item, sess = self._collection_to_collection_fixture()
 
-        u1 = sess.query(User).get(7)
+        u1 = sess.get(User, 7)
         u1.orders
         o1 = Order()
         u1.orders.append(o1)
         sess.query(User).options(
-            selectinload("orders").selectinload("items")
+            selectinload(User.orders).selectinload(Order.items)
         ).filter_by(id=7).all()
         for o in u1.orders:
             if o is not o1:
@@ -1487,11 +1644,11 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
         u1 = (
             sess.query(User)
             .filter_by(id=8)
-            .options(selectinload("addresses"))
+            .options(selectinload(User.addresses))
             .one()
         )
         sess.query(User).filter_by(id=8).options(
-            selectinload("addresses").selectinload("dingaling")
+            selectinload(User.addresses).selectinload(Address.dingaling)
         ).first()
         assert "dingaling" in u1.addresses[0].__dict__
 
@@ -1501,11 +1658,11 @@ class LoadOnExistingTest(_fixtures.FixtureTest):
         u1 = (
             sess.query(User)
             .filter_by(id=7)
-            .options(selectinload("orders"))
+            .options(selectinload(User.orders))
             .one()
         )
         sess.query(User).filter_by(id=7).options(
-            selectinload("orders").selectinload("items")
+            selectinload(User.orders).selectinload(Order.items)
         ).first()
         assert "items" in u1.orders[0].__dict__
 
@@ -1565,7 +1722,7 @@ class OrderBySecondaryTest(fixtures.MappedTest):
         class B(fixtures.ComparableEntity):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             properties={
@@ -1574,9 +1731,9 @@ class OrderBySecondaryTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(B, b)
+        self.mapper_registry.map_imperatively(B, b)
 
-        sess = create_session()
+        sess = fixture_session()
 
         def go():
             eq_(
@@ -1653,7 +1810,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
         engineers = cls.tables.engineers
         paperwork = cls.tables.paperwork
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Person,
             people,
             polymorphic_on=people.c.type,
@@ -1665,14 +1822,14 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
             },
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Engineer,
             engineers,
             inherits=Person,
             polymorphic_identity="engineer",
         )
 
-        mapper(Paperwork, paperwork)
+        cls.mapper_registry.map_imperatively(Paperwork, paperwork)
 
     @classmethod
     def insert_data(cls, connection):
@@ -1684,12 +1841,12 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
             Paperwork(description="tps report #2"),
         ]
         e2.paperwork = [Paperwork(description="tps report #3")]
-        sess = create_session(connection)
+        sess = Session(connection)
         sess.add_all([e1, e2])
         sess.flush()
 
     def test_correct_select_nofrom(self):
-        sess = create_session()
+        sess = fixture_session()
         # use Person.paperwork here just to give the least
         # amount of context
         q = (
@@ -1725,14 +1882,14 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.paperwork_id AS paperwork_paperwork_id, "
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
-                "IN ([EXPANDING_primary_keys]) "
+                "IN (__[POSTCOMPILE_primary_keys]) "
                 "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
         )
 
     def test_correct_select_existingfrom(self):
-        sess = create_session()
+        sess = fixture_session()
         # use Person.paperwork here just to give the least
         # amount of context
         q = (
@@ -1775,7 +1932,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.paperwork_id AS paperwork_paperwork_id, "
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
-                "IN ([EXPANDING_primary_keys]) "
+                "IN (__[POSTCOMPILE_primary_keys]) "
                 "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
@@ -1783,7 +1940,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
 
     def test_correct_select_with_polymorphic_no_alias(self):
         # test #3106
-        sess = create_session()
+        sess = fixture_session()
 
         wp = with_polymorphic(Person, [Engineer])
         q = (
@@ -1821,7 +1978,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.paperwork_id AS paperwork_paperwork_id, "
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
-                "IN ([EXPANDING_primary_keys]) "
+                "IN (__[POSTCOMPILE_primary_keys]) "
                 "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
@@ -1829,7 +1986,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
 
     def test_correct_select_with_polymorphic_alias(self):
         # test #3106
-        sess = create_session()
+        sess = fixture_session()
 
         wp = with_polymorphic(Person, [Engineer], aliased=True)
         q = (
@@ -1875,7 +2032,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.paperwork_id AS paperwork_paperwork_id, "
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
-                "IN ([EXPANDING_primary_keys]) "
+                "IN (__[POSTCOMPILE_primary_keys]) "
                 "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
@@ -1883,7 +2040,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
 
     def test_correct_select_with_polymorphic_flat_alias(self):
         # test #3106
-        sess = create_session()
+        sess = fixture_session()
 
         wp = with_polymorphic(Person, [Engineer], aliased=True, flat=True)
         q = (
@@ -1923,7 +2080,7 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
                 "paperwork.paperwork_id AS paperwork_paperwork_id, "
                 "paperwork.description AS paperwork_description "
                 "FROM paperwork WHERE paperwork.person_id "
-                "IN ([EXPANDING_primary_keys]) "
+                "IN (__[POSTCOMPILE_primary_keys]) "
                 "ORDER BY paperwork.paperwork_id",
                 [{"primary_keys": [1]}],
             ),
@@ -2015,7 +2172,7 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
         Company, Programmer, Manager, GolfSwing, Language = self.classes(
             "Company", "Programmer", "Manager", "GolfSwing", "Language"
         )
-        sess = Session()
+        sess = fixture_session()
         company = (
             sess.query(Company)
             .filter(Company.id == 1)
@@ -2036,7 +2193,7 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
         Company, Programmer, Manager, GolfSwing, Language = self.classes(
             "Company", "Programmer", "Manager", "GolfSwing", "Language"
         )
-        sess = Session()
+        sess = fixture_session()
         company = (
             sess.query(Company)
             .filter(Company.id == 2)
@@ -2059,7 +2216,7 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
         Company, Programmer, Manager, GolfSwing, Language = self.classes(
             "Company", "Programmer", "Manager", "GolfSwing", "Language"
         )
-        sess = Session()
+        sess = fixture_session()
         rows = (
             sess.query(Company)
             .options(
@@ -2123,7 +2280,7 @@ class TupleTest(fixtures.DeclarativeMappedTest):
     def test_load_o2m(self):
         A, B = self.classes("A", "B")
 
-        session = Session()
+        session = fixture_session()
 
         def go():
             q = (
@@ -2144,7 +2301,7 @@ class TupleTest(fixtures.DeclarativeMappedTest):
             CompiledSQL(
                 "SELECT b.a_id1 AS b_a_id1, b.a_id2 AS b_a_id2, b.id AS b_id "
                 "FROM b WHERE (b.a_id1, b.a_id2) IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.id",
+                "(__[POSTCOMPILE_primary_keys]) ORDER BY b.id",
                 [{"primary_keys": [(i, i + 2) for i in range(1, 20)]}],
             ),
         )
@@ -2159,7 +2316,7 @@ class TupleTest(fixtures.DeclarativeMappedTest):
     def test_load_m2o(self):
         A, B = self.classes("A", "B")
 
-        session = Session()
+        session = fixture_session()
 
         def go():
             q = session.query(B).options(selectinload(B.a)).order_by(B.id)
@@ -2175,7 +2332,7 @@ class TupleTest(fixtures.DeclarativeMappedTest):
             ),
             CompiledSQL(
                 "SELECT a.id1 AS a_id1, a.id2 AS a_id2 FROM a "
-                "WHERE (a.id1, a.id2) IN ([EXPANDING_primary_keys])",
+                "WHERE (a.id1, a.id2) IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [(i, i + 2) for i in range(1, 20)]}],
             ),
         )
@@ -2231,7 +2388,7 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
     def test_odd_number_chunks(self):
         A, B = self.classes("A", "B")
 
-        session = Session()
+        session = fixture_session()
 
         def go():
             with mock.patch(
@@ -2249,19 +2406,19 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.id",
+                "(__[POSTCOMPILE_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(1, 48))},
             ),
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.id",
+                "(__[POSTCOMPILE_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(48, 95))},
             ),
             CompiledSQL(
                 "SELECT b.a_id AS b_a_id, b.id AS b_id "
                 "FROM b WHERE b.a_id IN "
-                "([EXPANDING_primary_keys]) ORDER BY b.id",
+                "(__[POSTCOMPILE_primary_keys]) ORDER BY b.id",
                 {"primary_keys": list(range(95, 101))},
             ),
         )
@@ -2274,7 +2431,7 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
 
         import random
 
-        session = Session()
+        session = fixture_session()
 
         yield_per = random.randint(8, 105)
         offset = random.randint(0, 19)
@@ -2304,7 +2461,7 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
     def test_dont_emit_for_redundant_m2o(self):
         A, B = self.classes("A", "B")
 
-        session = Session()
+        session = fixture_session()
 
         def go():
             with mock.patch(
@@ -2325,19 +2482,19 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
             # chunk size is 47.  so first chunk are a 1->47...
             CompiledSQL(
                 "SELECT a.id AS a_id FROM a WHERE a.id IN "
-                "([EXPANDING_primary_keys])",
+                "(__[POSTCOMPILE_primary_keys])",
                 {"primary_keys": list(range(1, 48))},
             ),
             # second chunk is a 48-94
             CompiledSQL(
                 "SELECT a.id AS a_id FROM a WHERE a.id IN "
-                "([EXPANDING_primary_keys])",
+                "(__[POSTCOMPILE_primary_keys])",
                 {"primary_keys": list(range(48, 95))},
             ),
             # third and final chunk 95-100.
             CompiledSQL(
                 "SELECT a.id AS a_id FROM a WHERE a.id IN "
-                "([EXPANDING_primary_keys])",
+                "(__[POSTCOMPILE_primary_keys])",
                 {"primary_keys": list(range(95, 101))},
             ),
         )
@@ -2417,14 +2574,14 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
         machines = cls.tables.machines
         machine_type = cls.tables.machine_type
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={
                 "employees": relationship(Person, order_by=people.c.person_id)
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Person,
             people,
             polymorphic_on=people.c.type,
@@ -2432,7 +2589,7 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
             with_polymorphic="*",
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Engineer,
             engineers,
             inherits=Person,
@@ -2444,15 +2601,15 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
             },
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Machine, machines, properties={"type": relationship(MachineType)}
         )
-        mapper(MachineType, machine_type)
+        cls.mapper_registry.map_imperatively(MachineType, machine_type)
 
     @classmethod
     def insert_data(cls, connection):
         c1 = cls._fixture()
-        sess = create_session(connection)
+        sess = Session(connection)
         sess.add(c1)
         sess.flush()
 
@@ -2480,7 +2637,7 @@ class SubRelationFromJoinedSubclassMultiLevelTest(_Polymorphic):
         )
 
     def test_chained_selectin_subclass(self):
-        s = Session()
+        s = fixture_session()
         q = s.query(Company).options(
             selectinload(Company.employees.of_type(Engineer))
             .selectinload(Engineer.machines)
@@ -2513,7 +2670,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             def append(self, node):
                 self.children.append(node)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={
@@ -2522,7 +2679,7 @@ class SelfReferentialTest(fixtures.MappedTest):
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -2589,7 +2746,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             def append(self, node):
                 self.children.append(node)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={
@@ -2598,7 +2755,7 @@ class SelfReferentialTest(fixtures.MappedTest):
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -2635,7 +2792,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             def append(self, node):
                 self.children.append(node)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={
@@ -2645,7 +2802,7 @@ class SelfReferentialTest(fixtures.MappedTest):
                 "data": deferred(nodes.c.data),
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -2667,7 +2824,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             eq_(
                 Node(data="n1", children=[Node(data="n11"), Node(data="n12")]),
                 sess.query(Node)
-                .options(undefer("data"))
+                .options(undefer(Node.data))
                 .order_by(Node.id)
                 .first(),
             )
@@ -2680,7 +2837,10 @@ class SelfReferentialTest(fixtures.MappedTest):
             eq_(
                 Node(data="n1", children=[Node(data="n11"), Node(data="n12")]),
                 sess.query(Node)
-                .options(undefer("data"), undefer("children.data"))
+                .options(
+                    undefer(Node.data),
+                    defaultload(Node.children).undefer(Node.data),
+                )
                 .first(),
             )
 
@@ -2693,12 +2853,12 @@ class SelfReferentialTest(fixtures.MappedTest):
             def append(self, node):
                 self.children.append(node)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={"children": relationship(Node, order_by=nodes.c.id)},
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -2715,7 +2875,9 @@ class SelfReferentialTest(fixtures.MappedTest):
                 sess.query(Node)
                 .filter_by(data="n1")
                 .order_by(Node.id)
-                .options(selectinload("children").selectinload("children"))
+                .options(
+                    selectinload(Node.children).selectinload(Node.children)
+                )
                 .first()
             )
             eq_(
@@ -2748,12 +2910,12 @@ class SelfReferentialTest(fixtures.MappedTest):
             def append(self, node):
                 self.children.append(node)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={"children": relationship(Node, lazy="selectin")},
         )
-        sess = create_session()
+        sess = fixture_session()
         n1 = Node(data="n1")
         n1.append(Node(data="n11"))
         n1.append(Node(data="n12"))
@@ -2845,7 +3007,7 @@ class SelfRefInheritanceAliasedTest(
             attr1 = Foo.foo.of_type(r)
             attr2 = r.foo
 
-            s = Session()
+            s = fixture_session()
             q = (
                 s.query(Foo)
                 .filter(Foo.id == 2)
@@ -2863,13 +3025,13 @@ class SelfRefInheritanceAliasedTest(
                     "SELECT foo_1.id AS foo_1_id, "
                     "foo_1.type AS foo_1_type, foo_1.foo_id AS foo_1_foo_id "
                     "FROM foo AS foo_1 "
-                    "WHERE foo_1.id IN ([EXPANDING_primary_keys])",
+                    "WHERE foo_1.id IN (__[POSTCOMPILE_primary_keys])",
                     {"primary_keys": [3]},
                 ),
                 CompiledSQL(
                     "SELECT foo.id AS foo_id_1, foo.type AS foo_type, "
                     "foo.foo_id AS foo_foo_id FROM foo "
-                    "WHERE foo.id IN ([EXPANDING_primary_keys])",
+                    "WHERE foo.id IN (__[POSTCOMPILE_primary_keys])",
                     {"primary_keys": [1]},
                 ),
             )
@@ -2950,7 +3112,7 @@ class TestExistingRowPopulation(fixtures.DeclarativeMappedTest):
     def test_o2m(self):
         A, A2, B, C1o2m, C2o2m = self.classes("A", "A2", "B", "C1o2m", "C2o2m")
 
-        s = Session()
+        s = fixture_session()
 
         # A -J-> B -L-> C1
         # A -J-> B -S-> C2
@@ -2971,7 +3133,7 @@ class TestExistingRowPopulation(fixtures.DeclarativeMappedTest):
     def test_m2o(self):
         A, A2, B, C1m2o, C2m2o = self.classes("A", "A2", "B", "C1m2o", "C2m2o")
 
-        s = Session()
+        s = fixture_session()
 
         # A -J-> B -L-> C1
         # A -J-> B -S-> C2
@@ -3024,7 +3186,7 @@ class SingleInhSubclassTest(
 
     def test_load(self):
         (EmployerUser,) = self.classes("EmployerUser")
-        s = Session()
+        s = fixture_session()
 
         q = s.query(EmployerUser)
 
@@ -3033,13 +3195,13 @@ class SingleInhSubclassTest(
             q.all,
             CompiledSQL(
                 'SELECT "user".id AS user_id, "user".type AS user_type '
-                'FROM "user" WHERE "user".type IN (:type_1)',
-                {"type_1": "employer"},
+                'FROM "user" WHERE "user".type IN (__[POSTCOMPILE_type_1])',
+                {"type_1": ["employer"]},
             ),
             CompiledSQL(
                 "SELECT role.user_id AS role_user_id, role.id AS role_id "
                 "FROM role WHERE role.user_id "
-                "IN ([EXPANDING_primary_keys])",
+                "IN (__[POSTCOMPILE_primary_keys])",
                 {"primary_keys": [1]},
             ),
         )
@@ -3086,7 +3248,7 @@ class MissingForeignTest(
     def test_missing_rec(self):
         A, B = self.classes("A", "B")
 
-        s = Session()
+        s = fixture_session()
         eq_(
             s.query(A).options(selectinload(A.b)).order_by(A.id).all(),
             [
@@ -3110,7 +3272,7 @@ class M2OWDegradeTest(
             id = Column(Integer, primary_key=True)
             b_id = Column(ForeignKey("b.id"))
             b = relationship("B")
-            b_no_omit_join = relationship("B", omit_join=False)
+            b_no_omit_join = relationship("B", omit_join=False, overlaps="b")
             q = Column(Integer)
 
         class B(fixtures.ComparableEntity, Base):
@@ -3145,7 +3307,7 @@ class M2OWDegradeTest(
 
     def test_use_join_parent_criteria(self):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(A)
             .filter(A.id.in_([1, 3]))
@@ -3157,12 +3319,12 @@ class M2OWDegradeTest(
             q.all,
             CompiledSQL(
                 "SELECT a.id AS a_id, a.b_id AS a_b_id, a.q AS a_q "
-                "FROM a WHERE a.id IN (:id_1, :id_2) ORDER BY a.id",
-                [{"id_1": 1, "id_2": 3}],
+                "FROM a WHERE a.id IN (__[POSTCOMPILE_id_1]) ORDER BY a.id",
+                [{"id_1": [1, 3]}],
             ),
             CompiledSQL(
                 "SELECT b.id AS b_id, b.x AS b_x, b.y AS b_y "
-                "FROM b WHERE b.id IN ([EXPANDING_primary_keys])",
+                "FROM b WHERE b.id IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1, 2]}],
             ),
         )
@@ -3174,7 +3336,7 @@ class M2OWDegradeTest(
 
     def test_use_join_parent_criteria_degrade_on_defer(self):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(A)
             .filter(A.id.in_([1, 3]))
@@ -3186,8 +3348,8 @@ class M2OWDegradeTest(
             q.all,
             CompiledSQL(
                 "SELECT a.id AS a_id, a.q AS a_q "
-                "FROM a WHERE a.id IN (:id_1, :id_2) ORDER BY a.id",
-                [{"id_1": 1, "id_2": 3}],
+                "FROM a WHERE a.id IN (__[POSTCOMPILE_id_1]) ORDER BY a.id",
+                [{"id_1": [1, 3]}],
             ),
             # in the very unlikely case that the the FK col on parent is
             # deferred, we degrade to the JOIN version so that we don't need to
@@ -3197,7 +3359,7 @@ class M2OWDegradeTest(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
                 "b.y AS b_y "
                 "FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
-                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
+                "WHERE a_1.id IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1, 3]}],
             ),
         )
@@ -3209,7 +3371,7 @@ class M2OWDegradeTest(
 
     def test_use_join(self):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session()
         q = s.query(A).options(selectinload(A.b)).order_by(A.id)
         results = self.assert_sql_execution(
             testing.db,
@@ -3221,7 +3383,7 @@ class M2OWDegradeTest(
             ),
             CompiledSQL(
                 "SELECT b.id AS b_id, b.x AS b_x, b.y AS b_y "
-                "FROM b WHERE b.id IN ([EXPANDING_primary_keys])",
+                "FROM b WHERE b.id IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1, 2]}],
             ),
         )
@@ -3240,7 +3402,7 @@ class M2OWDegradeTest(
 
     def test_use_join_omit_join_false(self):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session()
         q = s.query(A).options(selectinload(A.b_no_omit_join)).order_by(A.id)
         results = self.assert_sql_execution(
             testing.db,
@@ -3253,7 +3415,7 @@ class M2OWDegradeTest(
             CompiledSQL(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
                 "b.y AS b_y FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
-                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
+                "WHERE a_1.id IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1, 2, 3, 4, 5]}],
             ),
         )
@@ -3272,7 +3434,7 @@ class M2OWDegradeTest(
 
     def test_use_join_parent_degrade_on_defer(self):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session()
         q = s.query(A).options(defer(A.b_id), selectinload(A.b)).order_by(A.id)
         results = self.assert_sql_execution(
             testing.db,
@@ -3288,7 +3450,7 @@ class M2OWDegradeTest(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id, b.x AS b_x, "
                 "b.y AS b_y "
                 "FROM a AS a_1 JOIN b ON b.id = a_1.b_id "
-                "WHERE a_1.id IN ([EXPANDING_primary_keys])",
+                "WHERE a_1.id IN (__[POSTCOMPILE_primary_keys])",
                 [{"primary_keys": [1, 2, 3, 4, 5]}],
             ),
         )
@@ -3377,7 +3539,7 @@ class SameNamePolymorphicTest(fixtures.DeclarativeMappedTest):
         GenericParent, ParentA, ParentB, ChildA, ChildB = self.classes(
             "GenericParent", "ParentA", "ParentB", "ChildA", "ChildB"
         )
-        session = Session()
+        session = fixture_session()
 
         parent_types = with_polymorphic(GenericParent, [ParentA, ParentB])
 
@@ -3400,13 +3562,15 @@ class SameNamePolymorphicTest(fixtures.DeclarativeMappedTest):
                 CompiledSQL(
                     "SELECT child_a.parent_id AS child_a_parent_id, "
                     "child_a.id AS child_a_id FROM child_a "
-                    "WHERE child_a.parent_id IN ([EXPANDING_primary_keys])",
+                    "WHERE child_a.parent_id IN "
+                    "(__[POSTCOMPILE_primary_keys])",
                     [{"primary_keys": [1]}],
                 ),
                 CompiledSQL(
                     "SELECT child_b.parent_id AS child_b_parent_id, "
                     "child_b.id AS child_b_id FROM child_b "
-                    "WHERE child_b.parent_id IN ([EXPANDING_primary_keys])",
+                    "WHERE child_b.parent_id IN "
+                    "(__[POSTCOMPILE_primary_keys])",
                     [{"primary_keys": [2]}],
                 ),
             ),
@@ -3470,7 +3634,7 @@ class TestBakedCancelsCorrectly(fixtures.DeclarativeMappedTest):
             # the cache spoil did not use full=True which kept the lead
             # entities around.
 
-            sess = Session()
+            sess = fixture_session()
             foo_polymorphic = with_polymorphic(Foo, [SubFoo], aliased=True)
 
             credit_adjustment_load = selectinload(
@@ -3486,3 +3650,68 @@ class TestBakedCancelsCorrectly(fixtures.DeclarativeMappedTest):
         self.assert_sql_count(testing.db, go, 2)
         self.assert_sql_count(testing.db, go, 2)
         self.assert_sql_count(testing.db, go, 2)
+
+
+class TestCompositePlusNonComposite(fixtures.DeclarativeMappedTest):
+    __requires__ = ("tuple_in",)
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        from sqlalchemy.sql import lambdas
+        from sqlalchemy.orm import configure_mappers
+
+        lambdas._closure_per_cache_key.clear()
+        lambdas.AnalyzedCode._fns.clear()
+
+        class A(ComparableEntity, Base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            bs = relationship("B", lazy="selectin")
+
+        class B(ComparableEntity, Base):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+
+        class A2(ComparableEntity, Base):
+            __tablename__ = "a2"
+
+            id = Column(Integer, primary_key=True)
+            id2 = Column(Integer, primary_key=True)
+            bs = relationship("B2", lazy="selectin")
+
+        class B2(ComparableEntity, Base):
+            __tablename__ = "b2"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(Integer)
+            a_id2 = Column(Integer)
+            __table_args__ = (
+                ForeignKeyConstraint(["a_id", "a_id2"], ["a2.id", "a2.id2"]),
+            )
+
+        configure_mappers()
+
+    @classmethod
+    def insert_data(cls, connection):
+        A, B, A2, B2 = cls.classes("A", "B", "A2", "B2")
+        s = Session(connection)
+
+        s.add(A(bs=[B()]))
+        s.add(A2(id=1, id2=1, bs=[B2()]))
+
+        s.commit()
+
+    def test_load_composite_then_non_composite(self):
+
+        A, B, A2, B2 = self.classes("A", "B", "A2", "B2")
+
+        s = fixture_session()
+
+        a2 = s.query(A2).first()
+        a1 = s.query(A).first()
+
+        eq_(a2.bs, [B2()])
+        eq_(a1.bs, [B()])

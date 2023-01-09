@@ -12,11 +12,6 @@ Files: debian/*
 Copyright: 2006-2015 Piotr Ożarowski <piotr@debian.org>
 License: Expat
 
-Files: lib/sqlalchemy/interfaces.py
-Copyright: 2007, Jason Kirtland jek@discorporate.us
-  2007-2015, the SQLAlchemy authors and contributors
-License: Expat
-
 Files: lib/sqlalchemy/dialects/sybase/base.py
 Copyright: 2007, Fisch Asset Management
   2010-2015, the SQLAlchemy authors and contributors

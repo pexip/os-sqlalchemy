@@ -1,10 +1,10 @@
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
+from sqlalchemy import testing
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -42,7 +42,13 @@ class O2OTest(fixtures.MappedTest):
         class Port(cls.Basic):
             pass
 
-    def test_basic(self):
+    @testing.combinations(
+        (True, False),
+        (False, False),
+        (False, True),
+        argnames="_legacy_inactive_history_style, active_history",
+    )
+    def test_basic(self, _legacy_inactive_history_style, active_history):
         Port, port, jack, Jack = (
             self.classes.Port,
             self.tables.port,
@@ -50,16 +56,24 @@ class O2OTest(fixtures.MappedTest):
             self.classes.Jack,
         )
 
-        mapper(Port, port)
-        mapper(
+        self.mapper_registry.map_imperatively(Port, port)
+        self.mapper_registry.map_imperatively(
             Jack,
             jack,
             properties=dict(
-                port=relationship(Port, backref="jack", uselist=False)
+                port=relationship(
+                    Port,
+                    backref="jack",
+                    uselist=False,
+                    active_history=active_history,
+                    _legacy_inactive_history_style=(
+                        _legacy_inactive_history_style
+                    ),
+                )
             ),
         )
 
-        session = create_session()
+        session = fixture_session()
 
         j = Jack(number="101")
         session.add(j)
@@ -71,8 +85,8 @@ class O2OTest(fixtures.MappedTest):
         jid = j.id
         pid = p.id
 
-        j = session.query(Jack).get(jid)
-        p = session.query(Port).get(pid)
+        j = session.get(Jack, jid)
+        p = session.get(Port, pid)
         assert p.jack is not None
         assert p.jack is j
         assert j.port is not None
@@ -81,12 +95,95 @@ class O2OTest(fixtures.MappedTest):
 
         session.expunge_all()
 
-        j = session.query(Jack).get(jid)
-        p = session.query(Port).get(pid)
+        j = session.get(Jack, jid)
+        p = session.get(Port, pid)
 
         j.port = None
-        self.assert_(p.jack is None)
-        session.flush()
+
+        if not active_history and not _legacy_inactive_history_style:
+            session.flush()
+            self.assert_(p.jack is None)
+        else:
+            self.assert_(p.jack is None)
+            session.flush()
 
         session.delete(j)
         session.flush()
+
+    @testing.combinations(
+        (True,), (False,), argnames="_legacy_inactive_history_style"
+    )
+    def test_simple_replace(self, _legacy_inactive_history_style):
+        Port, port, jack, Jack = (
+            self.classes.Port,
+            self.tables.port,
+            self.tables.jack,
+            self.classes.Jack,
+        )
+
+        self.mapper_registry.map_imperatively(Port, port)
+        self.mapper_registry.map_imperatively(
+            Jack,
+            jack,
+            properties=dict(
+                port=relationship(
+                    Port,
+                    uselist=False,
+                    _legacy_inactive_history_style=(
+                        _legacy_inactive_history_style
+                    ),
+                )
+            ),
+        )
+
+        s = fixture_session()
+
+        p1 = Port(name="p1")
+        j1 = Jack(number="j1", port=p1)
+
+        s.add(j1)
+        s.commit()
+
+        j1.port = Port(name="p2")
+        s.commit()
+
+        assert s.query(Port).filter_by(name="p1").one().jack_id is None
+
+    @testing.combinations(
+        (True,), (False,), argnames="_legacy_inactive_history_style"
+    )
+    def test_simple_del(self, _legacy_inactive_history_style):
+        Port, port, jack, Jack = (
+            self.classes.Port,
+            self.tables.port,
+            self.tables.jack,
+            self.classes.Jack,
+        )
+
+        self.mapper_registry.map_imperatively(Port, port)
+        self.mapper_registry.map_imperatively(
+            Jack,
+            jack,
+            properties=dict(
+                port=relationship(
+                    Port,
+                    uselist=False,
+                    _legacy_inactive_history_style=(
+                        _legacy_inactive_history_style
+                    ),
+                )
+            ),
+        )
+
+        s = fixture_session()
+
+        p1 = Port(name="p1")
+        j1 = Jack(number="j1", port=p1)
+
+        s.add(j1)
+        s.commit()
+
+        del j1.port
+        s.commit()
+
+        assert s.query(Port).filter_by(name="p1").one().jack_id is None

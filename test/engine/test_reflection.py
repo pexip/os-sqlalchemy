@@ -3,13 +3,16 @@ import unicodedata
 import sqlalchemy as sa
 from sqlalchemy import Computed
 from sqlalchemy import DefaultClause
+from sqlalchemy import event
 from sqlalchemy import FetchedValue
 from sqlalchemy import ForeignKey
+from sqlalchemy import Identity
 from sqlalchemy import Index
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import schema
+from sqlalchemy import select
 from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import testing
@@ -19,13 +22,14 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import ComparesTables
 from sqlalchemy.testing import config
-from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import eq_regex
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
 from sqlalchemy.testing import is_instance_of
 from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
@@ -37,19 +41,11 @@ from sqlalchemy.testing.schema import Table
 from sqlalchemy.util import ue
 
 
-metadata, users = None, None
-
-
 class ReflectionTest(fixtures.TestBase, ComparesTables):
     __backend__ = True
 
-    @testing.exclude(
-        "mssql", "<", (10, 0, 0), "Date is only supported on MSSQL 2008+"
-    )
-    @testing.exclude("mysql", "<", (4, 1, 1), "early types are squirrely")
-    @testing.provide_metadata
-    def test_basic_reflection(self):
-        meta = self.metadata
+    def test_basic_reflection(self, connection, metadata):
+        meta = metadata
 
         users = Table(
             "engine_users",
@@ -85,26 +81,22 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("email_address", sa.String(20)),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         meta2 = MetaData()
         reflected_users = Table(
-            "engine_users", meta2, autoload=True, autoload_with=testing.db
+            "engine_users", meta2, autoload_with=connection
         )
         reflected_addresses = Table(
             "engine_email_addresses",
             meta2,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         self.assert_tables_equal(users, reflected_users)
         self.assert_tables_equal(addresses, reflected_addresses)
 
-    @testing.provide_metadata
-    def test_autoload_with_imply_autoload(
-        self,
-    ):
-        meta = self.metadata
+    def test_autoload_with_imply_autoload(self, metadata, connection):
+        meta = metadata
         t = Table(
             "t",
             meta,
@@ -112,15 +104,14 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("x", sa.String(20)),
             Column("y", sa.Integer),
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         meta2 = MetaData()
-        reflected_t = Table("t", meta2, autoload_with=testing.db)
+        reflected_t = Table("t", meta2, autoload_with=connection)
         self.assert_tables_equal(t, reflected_t)
 
-    @testing.provide_metadata
-    def test_two_foreign_keys(self):
-        meta = self.metadata
+    def test_two_foreign_keys(self, metadata, connection):
+        meta = metadata
         Table(
             "t1",
             meta,
@@ -141,18 +132,17 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("id", sa.Integer, primary_key=True),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
         meta2 = MetaData()
         t1r, t2r, t3r = [
-            Table(x, meta2, autoload=True, autoload_with=testing.db)
+            Table(x, meta2, autoload_with=connection)
             for x in ("t1", "t2", "t3")
         ]
         assert t1r.c.t2id.references(t2r.c.id)
         assert t1r.c.t3id.references(t3r.c.id)
 
-    @testing.provide_metadata
-    def test_resolve_fks_false_table(self):
-        meta = self.metadata
+    def test_resolve_fks_false_table(self, connection, metadata):
+        meta = metadata
         Table(
             "t1",
             meta,
@@ -166,9 +156,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("id", sa.Integer, primary_key=True),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
         meta2 = MetaData()
-        t1 = Table("t1", meta2, resolve_fks=False, autoload_with=testing.db)
+        t1 = Table("t1", meta2, resolve_fks=False, autoload_with=connection)
         in_("t1", meta2.tables)
         not_in("t2", meta2.tables)
 
@@ -177,14 +167,13 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             lambda: list(t1.c.t2id.foreign_keys)[0].column,
         )
 
-        t2 = Table("t2", meta2, autoload_with=testing.db)
+        t2 = Table("t2", meta2, autoload_with=connection)
 
         # now it resolves
         is_true(t1.c.t2id.references(t2.c.id))
 
-    @testing.provide_metadata
-    def test_resolve_fks_false_extend_existing(self):
-        meta = self.metadata
+    def test_resolve_fks_false_extend_existing(self, connection, metadata):
+        meta = metadata
         Table(
             "t1",
             meta,
@@ -198,7 +187,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("id", sa.Integer, primary_key=True),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
         meta2 = MetaData()
         Table("t1", meta2)
         in_("t1", meta2.tables)
@@ -207,7 +196,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             "t1",
             meta2,
             resolve_fks=False,
-            autoload_with=testing.db,
+            autoload_with=connection,
             extend_existing=True,
         )
         not_in("t2", meta2.tables)
@@ -217,14 +206,13 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             lambda: list(t1.c.t2id.foreign_keys)[0].column,
         )
 
-        t2 = Table("t2", meta2, autoload_with=testing.db)
+        t2 = Table("t2", meta2, autoload_with=connection)
 
         # now it resolves
         is_true(t1.c.t2id.references(t2.c.id))
 
-    @testing.provide_metadata
-    def test_resolve_fks_false_metadata(self):
-        meta = self.metadata
+    def test_resolve_fks_false_metadata(self, connection, metadata):
+        meta = metadata
         Table(
             "t1",
             meta,
@@ -238,9 +226,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("id", sa.Integer, primary_key=True),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
         meta2 = MetaData()
-        meta2.reflect(testing.db, resolve_fks=False, only=["t1"])
+        meta2.reflect(connection, resolve_fks=False, only=["t1"])
         in_("t1", meta2.tables)
         not_in("t2", meta2.tables)
 
@@ -251,53 +239,24 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             lambda: list(t1.c.t2id.foreign_keys)[0].column,
         )
 
-        meta2.reflect(testing.db, resolve_fks=False)
+        meta2.reflect(connection, resolve_fks=False)
 
         t2 = meta2.tables["t2"]
         is_true(t1.c.t2id.references(t2.c.id))
 
-    def test_nonexistent(self):
-        meta = MetaData(testing.db)
+    def test_nonexistent(self, connection):
+        meta = MetaData()
         assert_raises(
-            sa.exc.NoSuchTableError, Table, "nonexistent", meta, autoload=True
+            sa.exc.NoSuchTableError,
+            Table,
+            "nonexistent",
+            meta,
+            autoload_with=connection,
         )
         assert "nonexistent" not in meta.tables
 
-    @testing.provide_metadata
-    def test_include_columns(self):
-        meta = self.metadata
-        foo = Table(
-            "foo",
-            meta,
-            *[Column(n, sa.String(30)) for n in ["a", "b", "c", "d", "e", "f"]]
-        )
-        meta.create_all()
-        meta2 = MetaData(testing.db)
-        foo = Table(
-            "foo", meta2, autoload=True, include_columns=["b", "f", "e"]
-        )
-        # test that cols come back in original order
-        eq_([c.name for c in foo.c], ["b", "e", "f"])
-        for c in ("b", "f", "e"):
-            assert c in foo.c
-        for c in ("a", "c", "d"):
-            assert c not in foo.c
-
-        # test against a table which is already reflected
-        meta3 = MetaData(testing.db)
-        foo = Table("foo", meta3, autoload=True)
-        foo = Table(
-            "foo", meta3, include_columns=["b", "f", "e"], extend_existing=True
-        )
-        eq_([c.name for c in foo.c], ["b", "e", "f"])
-        for c in ("b", "f", "e"):
-            assert c in foo.c
-        for c in ("a", "c", "d"):
-            assert c not in foo.c
-
-    @testing.provide_metadata
-    def test_extend_existing(self):
-        meta = self.metadata
+    def test_extend_existing(self, connection, metadata):
+        meta = metadata
 
         Table(
             "t",
@@ -307,24 +266,27 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("y", Integer),
             Column("z", Integer, server_default="5"),
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         m2 = MetaData()
         old_z = Column("z", String, primary_key=True)
         old_y = Column("y", String)
         old_q = Column("q", Integer)
         t2 = Table("t", m2, old_z, old_q)
-        eq_(t2.primary_key.columns, (t2.c.z,))
+        eq_(list(t2.primary_key.columns), [t2.c.z])
         t2 = Table(
             "t",
             m2,
             old_y,
             extend_existing=True,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         eq_(set(t2.columns.keys()), set(["x", "y", "z", "q", "id"]))
-        eq_(t2.primary_key.columns, (t2.c.id,))
+
+        # this has been the actual behavior, the cols are added together,
+        # however the test wasn't checking this correctly
+        eq_(list(t2.primary_key.columns), [t2.c.z, t2.c.id])
+
         assert t2.c.z is not old_z
         assert t2.c.y is old_y
         assert t2.c.z.type._type_affinity is Integer
@@ -336,8 +298,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             "t",
             m3,
             extend_existing=False,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         eq_(set(t3.columns.keys()), set(["z"]))
 
@@ -346,26 +307,26 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         old_y = Column("y", String)
         old_q = Column("q", Integer)
         t4 = Table("t", m4, old_z, old_q)
-        eq_(t4.primary_key.columns, (t4.c.z,))
+        eq_(list(t4.primary_key.columns), [t4.c.z])
         t4 = Table(
             "t",
             m4,
             old_y,
             extend_existing=True,
-            autoload=True,
             autoload_replace=False,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         eq_(set(t4.columns.keys()), set(["x", "y", "z", "q", "id"]))
-        eq_(t4.primary_key.columns, (t4.c.id,))
+        eq_(list(t4.primary_key.columns), [t4.c.z, t4.c.id])
         assert t4.c.z is old_z
         assert t4.c.y is old_y
         assert t4.c.z.type._type_affinity is String
         assert t4.c.q is old_q
 
-    @testing.provide_metadata
-    def test_extend_existing_reflect_all_dont_dupe_index(self):
-        m = self.metadata
+    def test_extend_existing_reflect_all_dont_dupe_index(
+        self, connection, metadata
+    ):
+        m = metadata
         d = Table(
             "d",
             m,
@@ -381,10 +342,10 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("id", Integer, primary_key=True),
             Column("aid", ForeignKey("d.id")),
         )
-        m.create_all()
+        m.create_all(connection)
 
         m2 = MetaData()
-        m2.reflect(testing.db, extend_existing=True)
+        m2.reflect(connection, extend_existing=True)
 
         eq_(
             len(
@@ -414,50 +375,51 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             )
 
     @testing.emits_warning(r".*omitted columns")
-    @testing.provide_metadata
-    def test_include_columns_indexes(self):
-        m = self.metadata
+    def test_include_columns_indexes(self, connection, metadata):
+        m = metadata
 
         t1 = Table("t1", m, Column("a", sa.Integer), Column("b", sa.Integer))
         sa.Index("foobar", t1.c.a, t1.c.b)
         sa.Index("bat", t1.c.a)
-        m.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("t1", m2, autoload=True)
+        m.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("t1", m2, autoload_with=connection)
         assert len(t2.indexes) == 2
 
-        m2 = MetaData(testing.db)
-        t2 = Table("t1", m2, autoload=True, include_columns=["a"])
+        m2 = MetaData()
+        t2 = Table("t1", m2, autoload_with=connection, include_columns=["a"])
         assert len(t2.indexes) == 1
 
-        m2 = MetaData(testing.db)
-        t2 = Table("t1", m2, autoload=True, include_columns=["a", "b"])
+        m2 = MetaData()
+        t2 = Table(
+            "t1", m2, autoload_with=connection, include_columns=["a", "b"]
+        )
         assert len(t2.indexes) == 2
 
-    @testing.provide_metadata
-    def test_autoload_replace_foreign_key_nonpresent(self):
+    def test_autoload_replace_foreign_key_nonpresent(
+        self, connection, metadata
+    ):
         """test autoload_replace=False with col plus FK
         establishes the FK not present in the DB.
 
         """
-        Table("a", self.metadata, Column("id", Integer, primary_key=True))
+        Table("a", metadata, Column("id", Integer, primary_key=True))
         Table(
             "b",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("a_id", Integer),
         )
-        self.metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
         b2 = Table("b", m2, Column("a_id", Integer, sa.ForeignKey("a.id")))
-        a2 = Table("a", m2, autoload=True, autoload_with=testing.db)
+        a2 = Table("a", m2, autoload_with=connection)
         b2 = Table(
             "b",
             m2,
             extend_existing=True,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
             autoload_replace=False,
         )
 
@@ -465,31 +427,31 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert b2.c.a_id.references(a2.c.id)
         eq_(len(b2.constraints), 2)
 
-    @testing.provide_metadata
-    def test_autoload_replace_foreign_key_ispresent(self):
+    def test_autoload_replace_foreign_key_ispresent(
+        self, connection, metadata
+    ):
         """test autoload_replace=False with col plus FK mirroring
         DB-reflected FK skips the reflected FK and installs
         the in-python one only.
 
         """
-        Table("a", self.metadata, Column("id", Integer, primary_key=True))
+        Table("a", metadata, Column("id", Integer, primary_key=True))
         Table(
             "b",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("a_id", Integer, sa.ForeignKey("a.id")),
         )
-        self.metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
         b2 = Table("b", m2, Column("a_id", Integer, sa.ForeignKey("a.id")))
-        a2 = Table("a", m2, autoload=True, autoload_with=testing.db)
+        a2 = Table("a", m2, autoload_with=connection)
         b2 = Table(
             "b",
             m2,
             extend_existing=True,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
             autoload_replace=False,
         )
 
@@ -497,30 +459,28 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert b2.c.a_id.references(a2.c.id)
         eq_(len(b2.constraints), 2)
 
-    @testing.provide_metadata
-    def test_autoload_replace_foreign_key_removed(self):
+    def test_autoload_replace_foreign_key_removed(self, connection, metadata):
         """test autoload_replace=False with col minus FK that's in the
         DB means the FK is skipped and doesn't get installed at all.
 
         """
-        Table("a", self.metadata, Column("id", Integer, primary_key=True))
+        Table("a", metadata, Column("id", Integer, primary_key=True))
         Table(
             "b",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("a_id", Integer, sa.ForeignKey("a.id")),
         )
-        self.metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
         b2 = Table("b", m2, Column("a_id", Integer))
-        a2 = Table("a", m2, autoload=True, autoload_with=testing.db)
+        a2 = Table("a", m2, autoload_with=connection)
         b2 = Table(
             "b",
             m2,
             extend_existing=True,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
             autoload_replace=False,
         )
 
@@ -528,10 +488,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert not b2.c.a_id.references(a2.c.id)
         eq_(len(b2.constraints), 1)
 
-    @testing.provide_metadata
-    def test_autoload_replace_primary_key(self):
-        Table("a", self.metadata, Column("id", Integer))
-        self.metadata.create_all()
+    def test_autoload_replace_primary_key(self, connection, metadata):
+        Table("a", metadata, Column("id", Integer))
+        metadata.create_all(connection)
 
         m2 = MetaData()
         a2 = Table("a", m2, Column("id", Integer, primary_key=True))
@@ -539,8 +498,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         Table(
             "a",
             m2,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
             autoload_replace=False,
             extend_existing=True,
         )
@@ -549,15 +507,14 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
     def test_autoload_replace_arg(self):
         Table("t", MetaData(), autoload_replace=False)
 
-    @testing.provide_metadata
-    def test_autoincrement_col(self):
+    def test_autoincrement_col(self, connection, metadata):
         """test that 'autoincrement' is reflected according to sqla's policy.
 
         Don't mark this test as unsupported for any backend !
 
         """
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "test",
             meta,
@@ -575,41 +532,35 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("data", sa.String(50)),
             mysql_engine="InnoDB",
         )
-        meta.create_all()
-        m2 = MetaData(testing.db)
-        t1a = Table("test", m2, autoload=True)
+        meta.create_all(connection)
+        m2 = MetaData()
+        t1a = Table("test", m2, autoload_with=connection)
         assert t1a._autoincrement_column is t1a.c.id
 
-        t2a = Table("test2", m2, autoload=True)
+        t2a = Table("test2", m2, autoload_with=connection)
         assert t2a._autoincrement_column is None
 
     @skip("sqlite")
-    @testing.provide_metadata
-    def test_unknown_types(self):
+    def test_unknown_types(self, connection, metadata):
         """Test the handling of unknown types for the given dialect.
 
         sqlite is skipped because it has special rules for unknown types using
         'affinity types' - this feature is tested in that dialect's test spec.
         """
-        meta = self.metadata
+        meta = metadata
         t = Table("test", meta, Column("foo", sa.DateTime))
 
-        ischema_names = testing.db.dialect.ischema_names
-        t.create()
-        testing.db.dialect.ischema_names = {}
-        try:
-            m2 = MetaData(testing.db)
+        t.create(connection)
+
+        with mock.patch.object(connection.dialect, "ischema_names", {}):
+            m2 = MetaData()
 
             with testing.expect_warnings("Did not recognize type"):
-                t3 = Table("test", m2, autoload_with=testing.db)
+                t3 = Table("test", m2, autoload_with=connection)
                 is_(t3.c.foo.type.__class__, sa.types.NullType)
 
-        finally:
-            testing.db.dialect.ischema_names = ischema_names
-
-    @testing.provide_metadata
-    def test_basic_override(self):
-        meta = self.metadata
+    def test_basic_override(self, connection, metadata):
+        meta = metadata
         table = Table(
             "override_test",
             meta,
@@ -617,24 +568,23 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("col2", sa.String(20)),
             Column("col3", sa.Numeric),
         )
-        table.create()
+        table.create(connection)
 
-        meta2 = MetaData(testing.db)
+        meta2 = MetaData()
         table = Table(
             "override_test",
             meta2,
             Column("col2", sa.Unicode()),
             Column("col4", sa.String(30)),
-            autoload=True,
+            autoload_with=connection,
         )
 
         self.assert_(isinstance(table.c.col1.type, sa.Integer))
         self.assert_(isinstance(table.c.col2.type, sa.Unicode))
         self.assert_(isinstance(table.c.col4.type, sa.String))
 
-    @testing.provide_metadata
-    def test_override_upgrade_pk_flag(self):
-        meta = self.metadata
+    def test_override_upgrade_pk_flag(self, connection, metadata):
+        meta = metadata
         table = Table(
             "override_test",
             meta,
@@ -642,26 +592,25 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("col2", sa.String(20)),
             Column("col3", sa.Numeric),
         )
-        table.create()
+        table.create(connection)
 
-        meta2 = MetaData(testing.db)
+        meta2 = MetaData()
         table = Table(
             "override_test",
             meta2,
             Column("col1", sa.Integer, primary_key=True),
-            autoload=True,
+            autoload_with=connection,
         )
 
         eq_(list(table.primary_key), [table.c.col1])
         eq_(table.c.col1.primary_key, True)
 
-    @testing.provide_metadata
-    def test_override_pkfk(self):
+    def test_override_pkfk(self, connection, metadata):
         """test that you can override columns which contain foreign keys
         to other reflected tables, where the foreign key column is also
         a primary key column"""
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "users",
             meta,
@@ -675,44 +624,43 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("street", sa.String(30)),
         )
 
-        meta.create_all()
-        meta2 = MetaData(testing.db)
+        meta.create_all(connection)
+        meta2 = MetaData()
         a2 = Table(
             "addresses",
             meta2,
             Column(
                 "id", sa.Integer, sa.ForeignKey("users.id"), primary_key=True
             ),
-            autoload=True,
+            autoload_with=connection,
         )
-        u2 = Table("users", meta2, autoload=True)
+        u2 = Table("users", meta2, autoload_with=connection)
 
         assert list(a2.primary_key) == [a2.c.id]
         assert list(u2.primary_key) == [u2.c.id]
         assert u2.join(a2).onclause.compare(u2.c.id == a2.c.id)
 
-        meta3 = MetaData(testing.db)
-        u3 = Table("users", meta3, autoload=True)
+        meta3 = MetaData()
+        u3 = Table("users", meta3, autoload_with=connection)
         a3 = Table(
             "addresses",
             meta3,
             Column(
                 "id", sa.Integer, sa.ForeignKey("users.id"), primary_key=True
             ),
-            autoload=True,
+            autoload_with=connection,
         )
 
         assert list(a3.primary_key) == [a3.c.id]
         assert list(u3.primary_key) == [u3.c.id]
         assert u3.join(a3).onclause.compare(u3.c.id == a3.c.id)
 
-    @testing.provide_metadata
-    def test_override_nonexistent_fk(self):
+    def test_override_nonexistent_fk(self, connection, metadata):
         """test that you can override columns and create new foreign
         keys to other reflected tables which have no foreign keys.  this
         is common with MySQL MyISAM tables."""
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "users",
             meta,
@@ -727,40 +675,40 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("user_id", sa.Integer),
         )
 
-        meta.create_all()
-        meta2 = MetaData(testing.db)
+        meta.create_all(connection)
+        meta2 = MetaData()
         a2 = Table(
             "addresses",
             meta2,
             Column("user_id", sa.Integer, sa.ForeignKey("users.id")),
-            autoload=True,
+            autoload_with=connection,
         )
-        u2 = Table("users", meta2, autoload=True)
+        u2 = Table("users", meta2, autoload_with=connection)
         assert len(a2.c.user_id.foreign_keys) == 1
         assert len(a2.foreign_keys) == 1
         assert [c.parent for c in a2.foreign_keys] == [a2.c.user_id]
         assert [c.parent for c in a2.c.user_id.foreign_keys] == [a2.c.user_id]
         assert list(a2.c.user_id.foreign_keys)[0].parent is a2.c.user_id
         assert u2.join(a2).onclause.compare(u2.c.id == a2.c.user_id)
-        meta3 = MetaData(testing.db)
+        meta3 = MetaData()
 
-        u3 = Table("users", meta3, autoload=True)
+        u3 = Table("users", meta3, autoload_with=connection)
 
         a3 = Table(
             "addresses",
             meta3,
             Column("user_id", sa.Integer, sa.ForeignKey("users.id")),
-            autoload=True,
+            autoload_with=connection,
         )
         assert u3.join(a3).onclause.compare(u3.c.id == a3.c.user_id)
 
-        meta4 = MetaData(testing.db)
+        meta4 = MetaData()
 
         u4 = Table(
             "users",
             meta4,
             Column("id", sa.Integer, key="u_id", primary_key=True),
-            autoload=True,
+            autoload_with=connection,
         )
 
         a4 = Table(
@@ -771,8 +719,11 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column(
                 "user_id", sa.Integer, sa.ForeignKey("users.u_id"), key="id"
             ),
-            autoload=True,
+            autoload_with=connection,
         )
+
+        # for the thing happening here with the column collection,
+        # see test/base/test_utils.py-> test_replace_switch_key_name.
         assert u4.join(a4).onclause.compare(u4.c.u_id == a4.c.id)
         assert list(u4.primary_key) == [u4.c.u_id]
         assert len(u4.columns) == 2
@@ -780,11 +731,8 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert len(a4.columns) == 3
         assert len(a4.constraints) == 2
 
-    @testing.provide_metadata
-    def test_override_composite_fk(self):
+    def test_override_composite_fk(self, connection, metadata):
         """Test double-remove of composite foreign key, when replaced."""
-
-        metadata = self.metadata
 
         Table(
             "a",
@@ -801,28 +749,25 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             sa.ForeignKeyConstraint(["x", "y"], ["a.x", "a.y"]),
         )
 
-        metadata.create_all()
+        metadata.create_all(connection)
 
         meta2 = MetaData()
 
         c1 = Column("x", sa.Integer, primary_key=True)
         c2 = Column("y", sa.Integer, primary_key=True)
         f1 = sa.ForeignKeyConstraint(["x", "y"], ["a.x", "a.y"])
-        b1 = Table(
-            "b", meta2, c1, c2, f1, autoload=True, autoload_with=testing.db
-        )
+        b1 = Table("b", meta2, c1, c2, f1, autoload_with=connection)
 
         assert b1.c.x is c1
         assert b1.c.y is c2
         assert f1 in b1.constraints
         assert len(b1.constraints) == 2
 
-    @testing.provide_metadata
-    def test_override_keys(self):
+    def test_override_keys(self, metadata, connection):
         """test that columns can be overridden with a 'key',
         and that ForeignKey targeting during reflection still works."""
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "a",
             meta,
@@ -836,27 +781,26 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("y", sa.Integer, sa.ForeignKey("a.x")),
             test_needs_fk=True,
         )
-        meta.create_all()
-        m2 = MetaData(testing.db)
+        meta.create_all(connection)
+        m2 = MetaData()
         a2 = Table(
             "a",
             m2,
             Column("x", sa.Integer, primary_key=True, key="x1"),
-            autoload=True,
+            autoload_with=connection,
         )
-        b2 = Table("b", m2, autoload=True)
+        b2 = Table("b", m2, autoload_with=connection)
         assert a2.join(b2).onclause.compare(a2.c.x1 == b2.c.y)
         assert b2.c.y.references(a2.c.x1)
 
-    @testing.provide_metadata
-    def test_nonreflected_fk_raises(self):
+    def test_nonreflected_fk_raises(self, connection, metadata):
         """test that a NoReferencedColumnError is raised when reflecting
         a table with an FK to another table which has not included the target
         column in its reflection.
 
         """
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "a",
             meta,
@@ -870,21 +814,19 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("y", sa.Integer, sa.ForeignKey("a.x")),
             test_needs_fk=True,
         )
-        meta.create_all()
-        m2 = MetaData(testing.db)
-        a2 = Table("a", m2, include_columns=["z"], autoload=True)
-        b2 = Table("b", m2, autoload=True)
+        meta.create_all(connection)
+        m2 = MetaData()
+        a2 = Table("a", m2, include_columns=["z"], autoload_with=connection)
+        b2 = Table("b", m2, autoload_with=connection)
 
         assert_raises(sa.exc.NoReferencedColumnError, a2.join, b2)
 
-    @testing.exclude("mysql", "<", (4, 1, 1), "innodb funkiness")
-    @testing.provide_metadata
-    def test_override_existing_fk(self):
+    def test_override_existing_fk(self, connection, metadata):
         """test that you can override columns and specify new foreign
         keys to other reflected tables, on columns which *do* already
         have that foreign key, and that the FK is not duped."""
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "users",
             meta,
@@ -900,16 +842,16 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             test_needs_fk=True,
         )
 
-        meta.create_all()
-        meta2 = MetaData(testing.db)
+        meta.create_all(connection)
+        meta2 = MetaData()
         a2 = Table(
             "addresses",
             meta2,
             Column("user_id", sa.Integer, sa.ForeignKey("users.id")),
-            autoload=True,
+            autoload_with=connection,
         )
-        u2 = Table("users", meta2, autoload=True)
-        s = sa.select([a2])
+        u2 = Table("users", meta2, autoload_with=connection)
+        s = sa.select(a2).subquery()
 
         assert s.c.user_id is not None
         assert len(a2.foreign_keys) == 1
@@ -920,21 +862,21 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert list(a2.c.user_id.foreign_keys)[0].parent is a2.c.user_id
         assert u2.join(a2).onclause.compare(u2.c.id == a2.c.user_id)
 
-        meta2 = MetaData(testing.db)
+        meta2 = MetaData()
         u2 = Table(
             "users",
             meta2,
             Column("id", sa.Integer, primary_key=True),
-            autoload=True,
+            autoload_with=connection,
         )
         a2 = Table(
             "addresses",
             meta2,
             Column("id", sa.Integer, primary_key=True),
             Column("user_id", sa.Integer, sa.ForeignKey("users.id")),
-            autoload=True,
+            autoload_with=connection,
         )
-        s = sa.select([a2])
+        s = sa.select(a2).subquery()
 
         assert s.c.user_id is not None
         assert len(a2.foreign_keys) == 1
@@ -946,8 +888,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert u2.join(a2).onclause.compare(u2.c.id == a2.c.user_id)
 
     @testing.only_on(["postgresql", "mysql"])
-    @testing.provide_metadata
-    def test_fk_options(self):
+    def test_fk_options(self, connection, metadata):
         """test that foreign key reflection includes options (on
         backends with {dialect}.get_foreign_keys() support)"""
 
@@ -982,7 +923,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             )
             test_attrs = ("onupdate", "ondelete")
 
-        meta = self.metadata
+        meta = metadata
         Table(
             "users",
             meta,
@@ -997,41 +938,38 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("user_id", sa.Integer, addresses_user_id_fkey),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         meta2 = MetaData()
-        meta2.reflect(testing.db)
+        meta2.reflect(connection)
         for fk in meta2.tables["addresses"].foreign_keys:
             ref = addresses_user_id_fkey
             for attr in test_attrs:
                 eq_(getattr(fk, attr), getattr(ref, attr))
 
-    def test_pks_not_uniques(self):
+    def test_pks_not_uniques(self, connection, metadata):
         """test that primary key reflection not tripped up by unique
         indexes"""
 
-        testing.db.execute(
+        conn = connection
+        conn.exec_driver_sql(
             """
-        CREATE TABLE book (
-            id INTEGER NOT NULL,
-            title VARCHAR(100) NOT NULL,
-            series INTEGER,
-            series_id INTEGER,
-            UNIQUE(series, series_id),
-            PRIMARY KEY(id)
-        )"""
+            CREATE TABLE book (
+                id INTEGER NOT NULL,
+                title VARCHAR(100) NOT NULL,
+                series INTEGER,
+                series_id INTEGER,
+                UNIQUE(series, series_id),
+                PRIMARY KEY(id)
+            )"""
         )
-        try:
-            metadata = MetaData(bind=testing.db)
-            book = Table("book", metadata, autoload=True)
-            assert book.primary_key.contains_column(book.c.id)
-            assert not book.primary_key.contains_column(book.c.series)
-            assert len(book.primary_key) == 1
-        finally:
-            testing.db.execute("drop table book")
 
-    def test_fk_error(self):
-        metadata = MetaData(testing.db)
+        book = Table("book", metadata, autoload_with=connection)
+        assert book.primary_key.contains_column(book.c.id)
+        assert not book.primary_key.contains_column(book.c.series)
+        eq_(len(book.primary_key), 1)
+
+    def test_fk_error(self, connection, metadata):
         Table(
             "slots",
             metadata,
@@ -1046,39 +984,35 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             "could not find table 'pkgs' with which to generate "
             "a foreign key to target column 'pkg_id'",
             metadata.create_all,
+            connection,
         )
 
-    def test_composite_pks(self):
+    def test_composite_pks(self, connection, metadata):
         """test reflection of a composite primary key"""
 
-        testing.db.execute(
+        conn = connection
+        conn.exec_driver_sql(
             """
-        CREATE TABLE book (
-            id INTEGER NOT NULL,
-            isbn VARCHAR(50) NOT NULL,
-            title VARCHAR(100) NOT NULL,
-            series INTEGER NOT NULL,
-            series_id INTEGER NOT NULL,
-            UNIQUE(series, series_id),
-            PRIMARY KEY(id, isbn)
-        )"""
+            CREATE TABLE book (
+                id INTEGER NOT NULL,
+                isbn VARCHAR(50) NOT NULL,
+                title VARCHAR(100) NOT NULL,
+                series INTEGER NOT NULL,
+                series_id INTEGER NOT NULL,
+                UNIQUE(series, series_id),
+                PRIMARY KEY(id, isbn)
+            )"""
         )
-        try:
-            metadata = MetaData(bind=testing.db)
-            book = Table("book", metadata, autoload=True)
-            assert book.primary_key.contains_column(book.c.id)
-            assert book.primary_key.contains_column(book.c.isbn)
-            assert not book.primary_key.contains_column(book.c.series)
-            assert len(book.primary_key) == 2
-        finally:
-            testing.db.execute("drop table book")
+        book = Table("book", metadata, autoload_with=connection)
+        assert book.primary_key.contains_column(book.c.id)
+        assert book.primary_key.contains_column(book.c.isbn)
+        assert not book.primary_key.contains_column(book.c.series)
+        eq_(len(book.primary_key), 2)
 
-    @testing.exclude("mysql", "<", (4, 1, 1), "innodb funkiness")
-    @testing.provide_metadata
-    def test_composite_fk(self):
+    def test_composite_fk(self, connection, metadata):
         """test reflection of composite foreign keys"""
 
-        meta = self.metadata
+        meta = metadata
         multi = Table(
             "multi",
             meta,
@@ -1103,13 +1037,11 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             ),
             test_needs_fk=True,
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         meta2 = MetaData()
-        table = Table("multi", meta2, autoload=True, autoload_with=testing.db)
-        table2 = Table(
-            "multi2", meta2, autoload=True, autoload_with=testing.db
-        )
+        table = Table("multi", meta2, autoload_with=connection)
+        table2 = Table("multi2", meta2, autoload_with=connection)
         self.assert_tables_equal(multi, table)
         self.assert_tables_equal(multi2, table2)
         j = sa.join(table, table2)
@@ -1124,13 +1056,12 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
 
     @testing.crashes("oracle", "FIXME: unknown, confirm not fails_on")
     @testing.requires.check_constraints
-    @testing.provide_metadata
-    def test_reserved(self):
+    def test_reserved(self, connection, metadata):
 
         # check a table that uses a SQL reserved name doesn't cause an
         # error
 
-        meta = self.metadata
+        meta = metadata
         table_a = Table(
             "select",
             meta,
@@ -1140,14 +1071,11 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         )
         sa.Index("where", table_a.c["from"])
 
-        # There's currently no way to calculate identifier case
-        # normalization in isolation, so...
-
-        if testing.against("firebird", "oracle"):
+        if connection.dialect.requires_name_normalize:
             check_col = "TRUE"
         else:
             check_col = "true"
-        quoter = meta.bind.dialect.identifier_preparer.quote_identifier
+        quoter = connection.dialect.identifier_preparer.quote_identifier
 
         Table(
             "false",
@@ -1165,145 +1093,96 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             sa.PrimaryKeyConstraint("or", "join", name="to"),
         )
         index_c = sa.Index("else", table_c.c.join)
-        meta.create_all()
-        index_c.drop()
-        meta2 = MetaData(testing.db)
-        Table("select", meta2, autoload=True)
-        Table("false", meta2, autoload=True)
-        Table("is", meta2, autoload=True)
+        meta.create_all(connection)
+        index_c.drop(connection)
+        meta2 = MetaData()
+        Table("select", meta2, autoload_with=connection)
+        Table("false", meta2, autoload_with=connection)
+        Table("is", meta2, autoload_with=connection)
 
-    @testing.provide_metadata
-    def _test_reflect_uses_bind(self, fn):
-        from sqlalchemy.pool import AssertionPool
-
-        e = engines.testing_engine(options={"poolclass": AssertionPool})
-        fn(e)
-
-    @testing.uses_deprecated()
-    def test_reflect_uses_bind_constructor_conn(self):
-        self._test_reflect_uses_bind(
-            lambda e: MetaData(e.connect(), reflect=True)
-        )
-
-    @testing.uses_deprecated()
-    def test_reflect_uses_bind_constructor_engine(self):
-        self._test_reflect_uses_bind(lambda e: MetaData(e, reflect=True))
-
-    def test_reflect_uses_bind_constructor_conn_reflect(self):
-        self._test_reflect_uses_bind(lambda e: MetaData(e.connect()).reflect())
-
-    def test_reflect_uses_bind_constructor_engine_reflect(self):
-        self._test_reflect_uses_bind(lambda e: MetaData(e).reflect())
-
-    def test_reflect_uses_bind_conn_reflect(self):
-        self._test_reflect_uses_bind(lambda e: MetaData().reflect(e.connect()))
-
-    def test_reflect_uses_bind_engine_reflect(self):
-        self._test_reflect_uses_bind(lambda e: MetaData().reflect(e))
-
-    def test_reflect_uses_bind_option_engine_reflect(self):
-        self._test_reflect_uses_bind(
-            lambda e: MetaData().reflect(e.execution_options(foo="bar"))
-        )
-
-    @testing.provide_metadata
-    def test_reflect_all(self):
-        existing = testing.db.table_names()
-
+    def test_reflect_all(self, connection, metadata):
         names = ["rt_%s" % name for name in ("a", "b", "c", "d", "e")]
         nameset = set(names)
-        for name in names:
-            # be sure our starting environment is sane
-            self.assert_(name not in existing)
-        self.assert_("rt_f" not in existing)
 
-        baseline = self.metadata
+        baseline = metadata
         for name in names:
             Table(name, baseline, Column("id", sa.Integer, primary_key=True))
-        baseline.create_all()
+        baseline.create_all(connection)
 
-        m1 = MetaData(testing.db)
-        self.assert_(not m1.tables)
-        m1.reflect()
-        self.assert_(nameset.issubset(set(m1.tables.keys())))
+        m1 = MetaData()
+        is_false(m1.tables)
+        m1.reflect(connection)
+        is_true(nameset.issubset(set(m1.tables.keys())))
 
         m2 = MetaData()
-        m2.reflect(testing.db, only=["rt_a", "rt_b"])
-        self.assert_(set(m2.tables.keys()) == set(["rt_a", "rt_b"]))
+        m2.reflect(connection, only=["rt_a", "rt_b"])
+        eq_(set(m2.tables.keys()), set(["rt_a", "rt_b"]))
 
         m3 = MetaData()
-        c = testing.db.connect()
-        m3.reflect(bind=c, only=lambda name, meta: name == "rt_c")
-        self.assert_(set(m3.tables.keys()) == set(["rt_c"]))
+        m3.reflect(connection, only=lambda name, meta: name == "rt_c")
+        eq_(set(m3.tables.keys()), set(["rt_c"]))
 
-        m4 = MetaData(testing.db)
+        m4 = MetaData()
 
         assert_raises_message(
             sa.exc.InvalidRequestError,
             r"Could not reflect: requested table\(s\) not available in "
             r"Engine\(.*?\): \(rt_f\)",
             m4.reflect,
+            connection,
             only=["rt_a", "rt_f"],
         )
 
-        m5 = MetaData(testing.db)
-        m5.reflect(only=[])
-        self.assert_(not m5.tables)
+        m5 = MetaData()
+        m5.reflect(connection, only=[])
+        is_false(m5.tables)
 
-        m6 = MetaData(testing.db)
-        m6.reflect(only=lambda n, m: False)
-        self.assert_(not m6.tables)
+        m6 = MetaData()
+        m6.reflect(connection, only=lambda n, m: False)
+        is_false(m6.tables)
 
-        m7 = MetaData(testing.db)
-        m7.reflect()
-        self.assert_(nameset.issubset(set(m7.tables.keys())))
+        m7 = MetaData()
+        m7.reflect(connection)
+        is_true(nameset.issubset(set(m7.tables.keys())))
 
-        m8 = MetaData()
-        assert_raises(sa.exc.UnboundExecutionError, m8.reflect)
-
-        m8_e1 = MetaData(testing.db)
+        m8_e1 = MetaData()
         rt_c = Table("rt_c", m8_e1)
-        m8_e1.reflect(extend_existing=True)
+        m8_e1.reflect(connection, extend_existing=True)
         eq_(set(m8_e1.tables.keys()), set(names))
         eq_(rt_c.c.keys(), ["id"])
 
-        m8_e2 = MetaData(testing.db)
+        m8_e2 = MetaData()
         rt_c = Table("rt_c", m8_e2)
-        m8_e2.reflect(extend_existing=True, only=["rt_a", "rt_c"])
+        m8_e2.reflect(connection, extend_existing=True, only=["rt_a", "rt_c"])
         eq_(set(m8_e2.tables.keys()), set(["rt_a", "rt_c"]))
         eq_(rt_c.c.keys(), ["id"])
 
-        if existing:
-            print("Other tables present in database, skipping some checks.")
-        else:
-            baseline.drop_all()
-            m9 = MetaData(testing.db)
-            m9.reflect()
-            self.assert_(not m9.tables)
+        baseline.drop_all(connection)
+        m9 = MetaData()
+        m9.reflect(connection)
+        is_false(m9.tables)
 
-    @testing.provide_metadata
-    def test_reflect_all_unreflectable_table(self):
+    def test_reflect_all_unreflectable_table(self, connection, metadata):
         names = ["rt_%s" % name for name in ("a", "b", "c", "d", "e")]
 
         for name in names:
-            Table(
-                name, self.metadata, Column("id", sa.Integer, primary_key=True)
-            )
-        self.metadata.create_all()
+            Table(name, metadata, Column("id", sa.Integer, primary_key=True))
+        metadata.create_all(connection)
 
         m = MetaData()
 
-        reflecttable = testing.db.dialect.reflecttable
+        inspector = sa.engine.reflection.Inspector
+        reflect_table = inspector.reflect_table
 
-        def patched(conn, table, *arg, **kw):
+        def patched(self, table, *arg, **kw):
             if table.name == "rt_c":
                 raise sa.exc.UnreflectableTableError("Can't reflect rt_c")
             else:
-                return reflecttable(conn, table, *arg, **kw)
+                return reflect_table(self, table, *arg, **kw)
 
-        with mock.patch.object(testing.db.dialect, "reflecttable", patched):
+        with mock.patch.object(inspector, "reflect_table", patched):
             with expect_warnings("Skipping table rt_c: Can't reflect rt_c"):
-                m.reflect(bind=testing.db)
+                m.reflect(connection)
 
             assert_raises_message(
                 sa.exc.UnreflectableTableError,
@@ -1311,23 +1190,11 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
                 Table,
                 "rt_c",
                 m,
-                autoload_with=testing.db,
+                autoload_with=connection,
             )
 
-    def test_reflect_all_conn_closing(self):
-        m1 = MetaData()
-        c = testing.db.connect()
-        m1.reflect(bind=c)
-        assert not c.closed
-
-    def test_inspector_conn_closing(self):
-        c = testing.db.connect()
-        inspect(c)
-        assert not c.closed
-
-    @testing.provide_metadata
-    def test_index_reflection(self):
-        m1 = self.metadata
+    def test_index_reflection(self, connection, metadata):
+        m1 = metadata
         t1 = Table(
             "party",
             m1,
@@ -1336,9 +1203,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         )
         sa.Index("idx1", t1.c.id, unique=True)
         sa.Index("idx2", t1.c.name, t1.c.id, unique=False)
-        m1.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("party", m2, autoload=True)
+        m1.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("party", m2, autoload_with=connection)
 
         assert len(t2.indexes) == 3
         # Make sure indexes are in the order we expect them in
@@ -1356,18 +1223,17 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         assert set([t2.c.name]) == set(r3.columns)
 
     @testing.requires.comment_reflection
-    @testing.provide_metadata
-    def test_comment_reflection(self):
-        m1 = self.metadata
+    def test_comment_reflection(self, connection, metadata):
+        m1 = metadata
         Table(
             "sometable",
             m1,
             Column("id", sa.Integer, comment="c1 comment"),
             comment="t1 comment",
         )
-        m1.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("sometable", m2, autoload=True)
+        m1.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("sometable", m2, autoload_with=connection)
 
         eq_(t2.comment, "t1 comment")
         eq_(t2.c.id.comment, "c1 comment")
@@ -1377,18 +1243,17 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         eq_(t3.c.id.comment, "c1 comment")
 
     @testing.requires.check_constraint_reflection
-    @testing.provide_metadata
-    def test_check_constraint_reflection(self):
-        m1 = self.metadata
+    def test_check_constraint_reflection(self, connection, metadata):
+        m1 = metadata
         Table(
             "x",
             m1,
             Column("q", Integer),
             sa.CheckConstraint("q > 10", name="ck1"),
         )
-        m1.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("x", m2, autoload=True)
+        m1.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("x", m2, autoload_with=connection)
 
         ck = [
             const
@@ -1399,39 +1264,36 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         eq_regex(ck.sqltext.text, r"[\(`]*q[\)`]* > 10")
         eq_(ck.name, "ck1")
 
-    @testing.provide_metadata
-    def test_index_reflection_cols_busted(self):
-        t = Table(
-            "x", self.metadata, Column("a", Integer), Column("b", Integer)
-        )
+    def test_index_reflection_cols_busted(self, connection, metadata):
+        t = Table("x", metadata, Column("a", Integer), Column("b", Integer))
         sa.Index("x_ix", t.c.a, t.c.b)
-        self.metadata.create_all()
+        metadata.create_all(connection)
 
         def mock_get_columns(self, connection, table_name, **kw):
             return [{"name": "b", "type": Integer, "primary_key": False}]
 
         with testing.mock.patch.object(
-            testing.db.dialect, "get_columns", mock_get_columns
+            connection.dialect, "get_columns", mock_get_columns
         ):
             m = MetaData()
             with testing.expect_warnings(
                 "index key 'a' was not located in columns"
             ):
-                t = Table("x", m, autoload=True, autoload_with=testing.db)
+                t = Table("x", m, autoload_with=connection)
 
         eq_(list(t.indexes)[0].columns, [t.c.b])
 
     @testing.requires.views
-    @testing.provide_metadata
-    def test_views(self):
-        metadata = self.metadata
+    def test_views(self, connection, metadata):
         users, addresses, dingalings = createTables(metadata)
         try:
-            metadata.create_all()
-            _create_views(metadata.bind, None)
-            m2 = MetaData(testing.db)
-            users_v = Table("users_v", m2, autoload=True)
-            addresses_v = Table("email_addresses_v", m2, autoload=True)
+            metadata.create_all(connection)
+            _create_views(connection, None)
+            m2 = MetaData()
+            users_v = Table("users_v", m2, autoload_with=connection)
+            addresses_v = Table(
+                "email_addresses_v", m2, autoload_with=connection
+            )
 
             for c1, c2 in zip(users_v.c, users.c):
                 eq_(c1.name, c2.name)
@@ -1441,25 +1303,23 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
                 eq_(c1.name, c2.name)
                 self.assert_types_base(c1, c2)
         finally:
-            _drop_views(metadata.bind)
+            _drop_views(connection)
 
     @testing.requires.views
-    @testing.provide_metadata
-    def test_reflect_all_with_views(self):
-        metadata = self.metadata
+    def test_reflect_all_with_views(self, connection, metadata):
         users, addresses, dingalings = createTables(metadata, None)
         try:
-            metadata.create_all()
-            _create_views(metadata.bind, None)
-            m2 = MetaData(testing.db)
+            metadata.create_all(connection)
+            _create_views(connection, None)
+            m2 = MetaData()
 
-            m2.reflect(views=False)
+            m2.reflect(connection, views=False)
             eq_(
                 set(m2.tables), set(["users", "email_addresses", "dingalings"])
             )
 
-            m2 = MetaData(testing.db)
-            m2.reflect(views=True)
+            m2 = MetaData()
+            m2.reflect(connection, views=True)
             eq_(
                 set(m2.tables),
                 set(
@@ -1473,17 +1333,24 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
                 ),
             )
         finally:
-            _drop_views(metadata.bind)
+            _drop_views(connection)
 
 
-class CreateDropTest(fixtures.TestBase):
+class CreateDropTest(fixtures.TablesTest):
     __backend__ = True
 
+    run_create_tables = None
+
     @classmethod
-    def setup_class(cls):
-        global metadata, users
-        metadata = MetaData()
-        users = Table(
+    def teardown_test_class(cls):
+        # TablesTest is used here without
+        # run_create_tables, so add an explicit drop of whatever is in
+        # metadata
+        cls._tables_metadata.drop_all(testing.db)
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
             "users",
             metadata,
             Column(
@@ -1504,7 +1371,7 @@ class CreateDropTest(fixtures.TestBase):
                 sa.Sequence("address_id_seq", optional=True),
                 primary_key=True,
             ),
-            Column("user_id", sa.Integer, sa.ForeignKey(users.c.user_id)),
+            Column("user_id", sa.Integer, sa.ForeignKey("users.user_id")),
             Column("email_address", sa.String(40)),
         )
 
@@ -1517,7 +1384,7 @@ class CreateDropTest(fixtures.TestBase):
                 sa.Sequence("order_id_seq", optional=True),
                 primary_key=True,
             ),
-            Column("user_id", sa.Integer, sa.ForeignKey(users.c.user_id)),
+            Column("user_id", sa.Integer, sa.ForeignKey("users.user_id")),
             Column("description", sa.String(50)),
             Column("isopen", sa.Integer),
         )
@@ -1535,7 +1402,7 @@ class CreateDropTest(fixtures.TestBase):
         )
 
     def test_sorter(self):
-        tables = metadata.sorted_tables
+        tables = self.tables_test_metadata.sorted_tables
         table_names = [t.name for t in tables]
         ua = [n for n in table_names if n in ("users", "email_addresses")]
         oi = [n for n in table_names if n in ("orders", "items")]
@@ -1543,43 +1410,44 @@ class CreateDropTest(fixtures.TestBase):
         eq_(ua, ["users", "email_addresses"])
         eq_(oi, ["orders", "items"])
 
-    def test_checkfirst(self):
-        try:
-            assert not users.exists(testing.db)
-            users.create(bind=testing.db)
-            assert users.exists(testing.db)
-            users.create(bind=testing.db, checkfirst=True)
-            users.drop(bind=testing.db)
-            users.drop(bind=testing.db, checkfirst=True)
-            assert not users.exists(bind=testing.db)
-            users.create(bind=testing.db, checkfirst=True)
-            users.drop(bind=testing.db)
-        finally:
-            metadata.drop_all(bind=testing.db)
+    def test_checkfirst(self, connection):
+        insp = inspect(connection)
+        users = self.tables.users
 
-    def test_createdrop(self):
-        metadata.create_all(bind=testing.db)
-        eq_(testing.db.has_table("items"), True)
-        eq_(testing.db.has_table("email_addresses"), True)
-        metadata.create_all(bind=testing.db)
-        eq_(testing.db.has_table("items"), True)
+        is_false(insp.has_table("users"))
+        users.create(connection)
+        is_true(insp.has_table("users"))
+        users.create(connection, checkfirst=True)
+        users.drop(connection)
+        users.drop(connection, checkfirst=True)
+        is_false(insp.has_table("users"))
+        users.create(connection, checkfirst=True)
+        users.drop(connection)
 
-        metadata.drop_all(bind=testing.db)
-        eq_(testing.db.has_table("items"), False)
-        eq_(testing.db.has_table("email_addresses"), False)
-        metadata.drop_all(bind=testing.db)
-        eq_(testing.db.has_table("items"), False)
+    def test_createdrop(self, connection):
+        insp = inspect(connection)
 
-    def test_tablenames(self):
-        metadata.create_all(bind=testing.db)
+        metadata = self.tables_test_metadata
 
-        # we only check to see if all the explicitly created tables are
-        # there, rather than assertEqual -- the test db could have
-        # "extra" tables if there is a misconfigured template.  (*cough*
-        # tsearch2 w/ the pg windows installer.)
+        metadata.create_all(connection)
+        is_true(insp.has_table("items"))
+        is_true(insp.has_table("email_addresses"))
+        metadata.create_all(connection)
+        is_true(insp.has_table("items"))
 
-        self.assert_(not set(metadata.tables) - set(testing.db.table_names()))
-        metadata.drop_all(bind=testing.db)
+        metadata.drop_all(connection)
+        is_false(insp.has_table("items"))
+        is_false(insp.has_table("email_addresses"))
+        metadata.drop_all(connection)
+        is_false(insp.has_table("items"))
+
+    def test_tablenames(self, connection):
+        metadata = self.tables_test_metadata
+        metadata.create_all(bind=connection)
+        insp = inspect(connection)
+
+        # ensure all tables we created are in the list.
+        is_true(set(insp.get_table_names()).issuperset(metadata.tables))
 
 
 class SchemaManipulationTest(fixtures.TestBase):
@@ -1604,12 +1472,11 @@ class SchemaManipulationTest(fixtures.TestBase):
         assert addresses.constraints == set([addresses.primary_key, fk])
 
 
-class UnicodeReflectionTest(fixtures.TestBase):
+class UnicodeReflectionTest(fixtures.TablesTest):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        cls.metadata = metadata = MetaData()
+    def define_tables(cls, metadata):
 
         no_multibyte_period = set([("plain", "col_plain", "ix_plain")])
         no_has_table = [
@@ -1678,31 +1545,24 @@ class UnicodeReflectionTest(fixtures.TestBase):
             )
             schema.Index(ixname, t.c[cname])
 
-        metadata.create_all(testing.db)
         cls.names = names
 
-    @classmethod
-    def teardown_class(cls):
-        cls.metadata.drop_all(testing.db, checkfirst=False)
-
     @testing.requires.unicode_connections
-    def test_has_table(self):
+    def test_has_table(self, connection):
+        insp = inspect(connection)
         for tname, cname, ixname in self.names:
-            assert testing.db.has_table(tname), "Can't detect name %s" % tname
+            assert insp.has_table(tname), "Can't detect name %s" % tname
 
     @testing.requires.unicode_connections
-    def test_basic(self):
+    def test_basic(self, connection):
         # the 'convert_unicode' should not get in the way of the
-        # reflection process.  reflecttable for oracle, postgresql
+        # reflection process.  reflect_table for oracle, postgresql
         # (others?) expect non-unicode strings in result sets/bind
         # params
 
-        bind = testing.db
         names = set([rec[0] for rec in self.names])
 
-        reflected = set(bind.table_names())
-
-        # Jython 2.5 on Java 5 lacks unicodedata.normalize
+        reflected = set(inspect(connection).get_table_names())
 
         if not names.issubset(reflected) and hasattr(unicodedata, "normalize"):
 
@@ -1717,14 +1577,14 @@ class UnicodeReflectionTest(fixtures.TestBase):
             # Yep.  But still ensure that bulk reflection and
             # create/drop work with either normalization.
 
-        r = MetaData(bind)
-        r.reflect()
-        r.drop_all(checkfirst=False)
-        r.create_all(checkfirst=False)
+        r = MetaData()
+        r.reflect(connection)
+        r.drop_all(connection, checkfirst=False)
+        r.create_all(connection, checkfirst=False)
 
     @testing.requires.unicode_connections
-    def test_get_names(self):
-        inspector = inspect(testing.db)
+    def test_get_names(self, connection):
+        inspector = inspect(connection)
         names = dict(
             (tname, (cname, ixname)) for tname, cname, ixname in self.names
         )
@@ -1750,23 +1610,22 @@ class SchemaTest(fixtures.TestBase):
                 "dialect %s doesn't have a has_schema method"
                 % testing.db.dialect.name
             )
-        eq_(
-            testing.db.dialect.has_schema(
-                testing.db, testing.config.test_schema
-            ),
-            True,
-        )
-        eq_(
-            testing.db.dialect.has_schema(testing.db, "sa_fake_schema_123"),
-            False,
-        )
+        with testing.db.connect() as conn:
+            eq_(
+                testing.db.dialect.has_schema(
+                    conn, testing.config.test_schema
+                ),
+                True,
+            )
+            eq_(
+                testing.db.dialect.has_schema(conn, "sa_fake_schema_123"),
+                False,
+            )
 
     @testing.requires.schemas
     @testing.requires.cross_schema_fk_reflection
     @testing.requires.implicit_default_schema
-    @testing.provide_metadata
-    def test_blank_schema_arg(self):
-        metadata = self.metadata
+    def test_blank_schema_arg(self, connection, metadata):
 
         Table(
             "some_table",
@@ -1783,37 +1642,27 @@ class SchemaTest(fixtures.TestBase):
             schema=None,
             test_needs_fk=True,
         )
-        metadata.create_all()
-        with testing.db.connect() as conn:
-            meta2 = MetaData(conn, schema=testing.config.test_schema)
-            meta2.reflect()
+        metadata.create_all(connection)
+        meta2 = MetaData(schema=testing.config.test_schema)
+        meta2.reflect(connection)
 
-            eq_(
-                set(meta2.tables),
-                set(
-                    [
-                        "some_other_table",
-                        "%s.some_table" % testing.config.test_schema,
-                    ]
-                ),
-            )
+        eq_(
+            set(meta2.tables),
+            set(
+                [
+                    "some_other_table",
+                    "%s.some_table" % testing.config.test_schema,
+                ]
+            ),
+        )
 
     @testing.requires.schemas
-    def test_explicit_default_schema(self):
-        engine = testing.db
-        engine.connect().close()
+    def test_explicit_default_schema(self, connection, metadata):
 
-        if testing.against("sqlite"):
-            # Works for CREATE TABLE main.foo, SELECT FROM main.foo, etc.,
-            # but fails on:
-            #   FOREIGN KEY(col2) REFERENCES main.table1 (col1)
-            schema = "main"
-        else:
-            schema = engine.dialect.default_schema_name
+        schema = connection.dialect.default_schema_name
 
         assert bool(schema)
 
-        metadata = MetaData(engine)
         Table(
             "table1",
             metadata,
@@ -1831,54 +1680,41 @@ class SchemaTest(fixtures.TestBase):
             test_needs_fk=True,
             schema=schema,
         )
-        try:
-            metadata.create_all()
-            metadata.create_all(checkfirst=True)
-            assert len(metadata.tables) == 2
-            metadata.clear()
+        metadata.create_all(connection)
+        metadata.create_all(connection, checkfirst=True)
+        eq_(len(metadata.tables), 2)
 
-            Table("table1", metadata, autoload=True, schema=schema)
-            Table("table2", metadata, autoload=True, schema=schema)
-            assert len(metadata.tables) == 2
-        finally:
-            metadata.drop_all()
+        m1 = MetaData()
+        Table("table1", m1, autoload_with=connection, schema=schema)
+        Table("table2", m1, autoload_with=connection, schema=schema)
+        eq_(len(m1.tables), 2)
 
     @testing.requires.schemas
-    @testing.provide_metadata
-    def test_schema_translation(self):
+    def test_schema_translation(self, connection, metadata):
         Table(
             "foob",
-            self.metadata,
+            metadata,
             Column("q", Integer),
             schema=config.test_schema,
         )
-        self.metadata.create_all()
+        metadata.create_all(connection)
 
         m = MetaData()
         map_ = {"foob": config.test_schema}
-        with config.db.connect().execution_options(
-            schema_translate_map=map_
-        ) as conn:
-            t = Table("foob", m, schema="foob", autoload_with=conn)
-            eq_(t.schema, "foob")
-            eq_(t.c.keys(), ["q"])
+
+        c2 = connection.execution_options(schema_translate_map=map_)
+        t = Table("foob", m, schema="foob", autoload_with=c2)
+        eq_(t.schema, "foob")
+        eq_(t.c.keys(), ["q"])
 
     @testing.requires.schemas
     @testing.fails_on("sybase", "FIXME: unknown")
-    def test_explicit_default_schema_metadata(self):
-        engine = testing.db
+    def test_explicit_default_schema_metadata(self, connection, metadata):
+        schema = connection.dialect.default_schema_name
 
-        if testing.against("sqlite"):
-            # Works for CREATE TABLE main.foo, SELECT FROM main.foo, etc.,
-            # but fails on:
-            #   FOREIGN KEY(col2) REFERENCES main.table1 (col1)
-            schema = "main"
-        else:
-            schema = engine.dialect.default_schema_name
+        is_true(schema)
 
-        assert bool(schema)
-
-        metadata = MetaData(engine, schema=schema)
+        metadata.schema = schema
         Table(
             "table1",
             metadata,
@@ -1892,26 +1728,21 @@ class SchemaTest(fixtures.TestBase):
             Column("col2", sa.Integer, sa.ForeignKey("table1.col1")),
             test_needs_fk=True,
         )
-        try:
-            metadata.create_all()
-            metadata.create_all(checkfirst=True)
-            assert len(metadata.tables) == 2
-            metadata.clear()
+        metadata.create_all(connection)
+        metadata.create_all(connection, checkfirst=True)
 
-            Table("table1", metadata, autoload=True)
-            Table("table2", metadata, autoload=True)
-            assert len(metadata.tables) == 2
-        finally:
-            metadata.drop_all()
+        m1 = MetaData(schema=schema)
+
+        Table("table1", m1, autoload_with=connection)
+        Table("table2", m1, autoload_with=connection)
+        eq_(len(m1.tables), 2)
 
     @testing.requires.schemas
-    @testing.provide_metadata
-    def test_metadata_reflect_schema(self):
-        metadata = self.metadata
+    def test_metadata_reflect_schema(self, connection, metadata):
         createTables(metadata, testing.config.test_schema)
-        metadata.create_all()
-        m2 = MetaData(schema=testing.config.test_schema, bind=testing.db)
-        m2.reflect()
+        metadata.create_all(connection)
+        m2 = MetaData(schema=testing.config.test_schema)
+        m2.reflect(connection)
         eq_(
             set(m2.tables),
             set(
@@ -1926,24 +1757,23 @@ class SchemaTest(fixtures.TestBase):
     @testing.requires.schemas
     @testing.requires.cross_schema_fk_reflection
     @testing.requires.implicit_default_schema
-    @testing.provide_metadata
-    def test_reflect_all_schemas_default_overlap(self):
-        Table("t", self.metadata, Column("id", Integer, primary_key=True))
+    def test_reflect_all_schemas_default_overlap(self, connection, metadata):
+        Table("t", metadata, Column("id", Integer, primary_key=True))
 
         Table(
             "t",
-            self.metadata,
+            metadata,
             Column("id1", sa.ForeignKey("t.id")),
             schema=testing.config.test_schema,
         )
 
-        self.metadata.create_all()
+        metadata.create_all(connection)
         m2 = MetaData()
-        m2.reflect(testing.db, schema=testing.config.test_schema)
+        m2.reflect(connection, schema=testing.config.test_schema)
 
         m3 = MetaData()
-        m3.reflect(testing.db)
-        m3.reflect(testing.db, schema=testing.config.test_schema)
+        m3.reflect(connection)
+        m3.reflect(connection, schema=testing.config.test_schema)
 
         eq_(
             set((t.name, t.schema) for t in m2.tables.values()),
@@ -2020,25 +1850,28 @@ def createIndexes(con, schema=None):
 
 
 @testing.requires.views
-def _create_views(con, schema=None):
+def _create_views(conn, schema=None):
     for table_name in ("users", "email_addresses"):
         fullname = table_name
         if schema:
             fullname = "%s.%s" % (schema, table_name)
         view_name = fullname + "_v"
-        query = "CREATE VIEW %s AS SELECT * FROM %s" % (view_name, fullname)
-        con.execute(sa.sql.text(query))
+        query = "CREATE VIEW %s AS SELECT * FROM %s" % (
+            view_name,
+            fullname,
+        )
+        conn.execute(sa.sql.text(query))
 
 
 @testing.requires.views
-def _drop_views(con, schema=None):
+def _drop_views(conn, schema=None):
     for table_name in ("email_addresses", "users"):
         fullname = table_name
         if schema:
             fullname = "%s.%s" % (schema, table_name)
         view_name = fullname + "_v"
         query = "DROP VIEW %s" % view_name
-        con.execute(sa.sql.text(query))
+        conn.execute(sa.sql.text(query))
 
 
 class ReverseCasingReflectTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -2046,25 +1879,27 @@ class ReverseCasingReflectTest(fixtures.TestBase, AssertsCompiledSQL):
     __backend__ = True
 
     @testing.requires.denormalized_names
-    def setup(self):
-        testing.db.execute(
+    def setup_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql(
+                """
+            CREATE TABLE weird_casing(
+                    col1 char(20),
+                    "Col2" char(20),
+                    "col3" char(20)
+            )
             """
-        CREATE TABLE weird_casing(
-                col1 char(20),
-                "Col2" char(20),
-                "col3" char(20)
-        )
-        """
-        )
+            )
 
     @testing.requires.denormalized_names
-    def teardown(self):
-        testing.db.execute("drop table weird_casing")
+    def teardown_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql("drop table weird_casing")
 
     @testing.requires.denormalized_names
-    def test_direct_quoting(self):
-        m = MetaData(testing.db)
-        t = Table("weird_casing", m, autoload=True)
+    def test_direct_quoting(self, connection):
+        m = MetaData()
+        t = Table("weird_casing", m, autoload_with=connection)
         self.assert_compile(
             t.select(),
             "SELECT weird_casing.col1, "
@@ -2095,13 +1930,13 @@ class CaseSensitiveTest(fixtures.TablesTest):
         )
 
     @testing.fails_if(testing.requires._has_mysql_on_windows)
-    def test_table_names(self):
-        x = testing.db.run_callable(testing.db.dialect.get_table_names)
+    def test_table_names(self, connection):
+        x = inspect(connection).get_table_names()
         assert set(["SomeTable", "SomeOtherTable"]).issubset(x)
 
-    def test_reflect_exact_name(self):
+    def test_reflect_exact_name(self, connection):
         m = MetaData()
-        t1 = Table("SomeTable", m, autoload=True, autoload_with=testing.db)
+        t1 = Table("SomeTable", m, autoload_with=connection)
         eq_(t1.name, "SomeTable")
         assert t1.c.x is not None
 
@@ -2109,54 +1944,48 @@ class CaseSensitiveTest(fixtures.TablesTest):
         lambda: testing.against(("mysql", "<", (5, 5)))
         and not testing.requires._has_mysql_fully_case_sensitive()
     )
-    def test_reflect_via_fk(self):
+    def test_reflect_via_fk(self, connection):
         m = MetaData()
-        t2 = Table(
-            "SomeOtherTable", m, autoload=True, autoload_with=testing.db
-        )
+        t2 = Table("SomeOtherTable", m, autoload_with=connection)
         eq_(t2.name, "SomeOtherTable")
         assert "SomeTable" in m.tables
 
     @testing.fails_if(testing.requires._has_mysql_fully_case_sensitive)
     @testing.fails_on_everything_except("sqlite", "mysql", "mssql")
-    def test_reflect_case_insensitive(self):
+    def test_reflect_case_insensitive(self, connection):
         m = MetaData()
-        t2 = Table("sOmEtAbLe", m, autoload=True, autoload_with=testing.db)
+        t2 = Table("sOmEtAbLe", m, autoload_with=connection)
         eq_(t2.name, "sOmEtAbLe")
 
 
-class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
+class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TablesTest):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        cls.metadata = MetaData()
-        cls.to_reflect = Table(
+    def define_tables(cls, metadata):
+        to_reflect = Table(
             "to_reflect",
-            cls.metadata,
-            Column("x", sa.Integer, primary_key=True),
+            metadata,
+            Column("x", sa.Integer, primary_key=True, autoincrement=False),
             Column("y", sa.Integer),
             test_needs_fk=True,
         )
-        cls.related = Table(
+        Table(
             "related",
-            cls.metadata,
+            metadata,
             Column("q", sa.Integer, sa.ForeignKey("to_reflect.x")),
             test_needs_fk=True,
         )
-        sa.Index("some_index", cls.to_reflect.c.y)
-        cls.metadata.create_all(testing.db)
+        sa.Index("some_index", to_reflect.c.y)
 
-    @classmethod
-    def teardown_class(cls):
-        cls.metadata.drop_all(testing.db)
-
-    def _do_test(self, col, update, assert_, tablename="to_reflect"):
+    def _do_test(
+        self, connection, col, update, assert_, tablename="to_reflect"
+    ):
         # load the actual Table class, not the test
         # wrapper
         from sqlalchemy.schema import Table
 
-        m = MetaData(testing.db)
+        m = MetaData()
 
         def column_reflect(insp, table, column_info):
             if column_info["name"] == col:
@@ -2165,32 +1994,32 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
         t = Table(
             tablename,
             m,
-            autoload=True,
+            autoload_with=connection,
             listeners=[("column_reflect", column_reflect)],
         )
         assert_(t)
 
-        m = MetaData(testing.db)
+        m = MetaData()
         self.event_listen(Table, "column_reflect", column_reflect)
-        t2 = Table(tablename, m, autoload=True)
+        t2 = Table(tablename, m, autoload_with=connection)
         assert_(t2)
 
-    def test_override_key(self):
+    def test_override_key(self, connection):
         def assertions(table):
             eq_(table.c.YXZ.name, "x")
             eq_(set(table.primary_key), set([table.c.YXZ]))
 
-        self._do_test("x", {"key": "YXZ"}, assertions)
+        self._do_test(connection, "x", {"key": "YXZ"}, assertions)
 
-    def test_override_index(self):
+    def test_override_index(self, connection):
         def assertions(table):
             idx = list(table.indexes)[0]
             eq_(idx.columns, [table.c.YXZ])
 
-        self._do_test("y", {"key": "YXZ"}, assertions)
+        self._do_test(connection, "y", {"key": "YXZ"}, assertions)
 
-    def test_override_key_fk(self):
-        m = MetaData(testing.db)
+    def test_override_key_fk(self, connection):
+        m = MetaData()
 
         def column_reflect(insp, table, column_info):
 
@@ -2202,48 +2031,51 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
         to_reflect = Table(
             "to_reflect",
             m,
-            autoload=True,
+            autoload_with=connection,
             listeners=[("column_reflect", column_reflect)],
         )
         related = Table(
             "related",
             m,
-            autoload=True,
+            autoload_with=connection,
             listeners=[("column_reflect", column_reflect)],
         )
 
         assert related.c.qyz.references(to_reflect.c.xyz)
 
-    def test_override_type(self):
+    def test_override_type(self, connection):
         def assert_(table):
             assert isinstance(table.c.x.type, sa.String)
 
-        self._do_test("x", {"type": sa.String}, assert_)
+        self._do_test(connection, "x", {"type": sa.String}, assert_)
 
-    def test_override_info(self):
+    def test_override_info(self, connection):
         self._do_test(
+            connection,
             "x",
             {"info": {"a": "b"}},
             lambda table: eq_(table.c.x.info, {"a": "b"}),
         )
 
-    def test_override_server_default_fetchedvalue(self):
+    def test_override_server_default_fetchedvalue(self, connection):
         my_default = FetchedValue()
         self._do_test(
+            connection,
             "x",
             {"default": my_default},
             lambda table: eq_(table.c.x.server_default, my_default),
         )
 
-    def test_override_server_default_default_clause(self):
+    def test_override_server_default_default_clause(self, connection):
         my_default = DefaultClause("1")
         self._do_test(
+            connection,
             "x",
             {"default": my_default},
             lambda table: eq_(table.c.x.server_default, my_default),
         )
 
-    def test_override_server_default_plain_text(self):
+    def test_override_server_default_plain_text(self, connection):
         my_default = "1"
 
         def assert_text_of_one(table):
@@ -2254,9 +2086,11 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
             )
             eq_(str(table.c.x.server_default.arg), "1")
 
-        self._do_test("x", {"default": my_default}, assert_text_of_one)
+        self._do_test(
+            connection, "x", {"default": my_default}, assert_text_of_one
+        )
 
-    def test_override_server_default_textclause(self):
+    def test_override_server_default_textclause(self, connection):
         my_default = sa.text("1")
 
         def assert_text_of_one(table):
@@ -2267,7 +2101,44 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TestBase):
             )
             eq_(str(table.c.x.server_default.arg), "1")
 
-        self._do_test("x", {"default": my_default}, assert_text_of_one)
+        self._do_test(
+            connection, "x", {"default": my_default}, assert_text_of_one
+        )
+
+    def test_listen_metadata_obj(self, connection):
+        m1 = MetaData()
+
+        m2 = MetaData()
+
+        canary = []
+
+        @event.listens_for(m1, "column_reflect")
+        def go(insp, table, info):
+            canary.append(info["name"])
+
+        Table("related", m1, autoload_with=connection)
+
+        Table("related", m2, autoload_with=connection)
+
+        eq_(canary, ["q", "x", "y"])
+
+    def test_listen_metadata_cls(self, connection):
+        m1 = MetaData()
+
+        m2 = MetaData()
+
+        canary = []
+
+        def go(insp, table, info):
+            canary.append(info["name"])
+
+        self.event_listen(MetaData, "column_reflect", go)
+
+        Table("related", m1, autoload_with=connection)
+
+        Table("related", m2, autoload_with=connection)
+
+        eq_(canary, ["q", "x", "y", "q", "x", "y"])
 
 
 class ComputedColumnTest(fixtures.ComputedReflectionFixtureTest):
@@ -2307,3 +2178,181 @@ class ComputedColumnTest(fixtures.ComputedReflectionFixtureTest):
                 "normal-42",
                 True,
             )
+
+
+class IdentityColumnTest(fixtures.TablesTest):
+    run_inserts = run_deletes = None
+
+    __backend__ = True
+    __requires__ = ("identity_columns", "table_reflection")
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "t1",
+            metadata,
+            Column("normal", Integer),
+            Column("id1", Integer, Identity(start=2, increment=3)),
+        )
+
+    def test_table_reflection(self):
+        meta = MetaData()
+        table = Table("t1", meta, autoload_with=config.db)
+
+        eq_(table.c.normal.identity, None)
+        is_true(table.c.id1.identity is not None)
+        eq_(table.c.id1.identity.start, 2)
+        eq_(table.c.id1.identity.increment, 3)
+
+
+class IncludeColsFksTest(AssertsCompiledSQL, fixtures.TestBase):
+    __dialect__ = "default"
+
+    @testing.fixture
+    def tab_wo_fks(self, connection, metadata):
+        meta = metadata
+        foo = Table(
+            "foo",
+            meta,
+            *[Column(n, sa.String(30)) for n in ["a", "b", "c", "d", "e", "f"]]
+        )
+        meta.create_all(connection)
+
+        return foo
+
+    @testing.fixture
+    def tab_w_fks(self, connection, metadata):
+        Table(
+            "a",
+            metadata,
+            Column("x", Integer, primary_key=True),
+            test_needs_fk=True,
+        )
+
+        b = Table(
+            "b",
+            metadata,
+            Column("x", Integer, primary_key=True),
+            Column("q", Integer),
+            Column("p", Integer),
+            Column("r", Integer, ForeignKey("a.x")),
+            Column("s", Integer),
+            Column("t", Integer),
+            test_needs_fk=True,
+        )
+
+        metadata.create_all(connection)
+
+        return b
+
+    def test_include_columns(self, connection, tab_wo_fks):
+        foo = tab_wo_fks
+        meta2 = MetaData()
+        foo = Table(
+            "foo",
+            meta2,
+            autoload_with=connection,
+            include_columns=["b", "f", "e"],
+        )
+        # test that cols come back in original order
+        eq_([c.name for c in foo.c], ["b", "e", "f"])
+        for c in ("b", "f", "e"):
+            assert c in foo.c
+        for c in ("a", "c", "d"):
+            assert c not in foo.c
+
+        # test against a table which is already reflected
+        meta3 = MetaData()
+        foo = Table("foo", meta3, autoload_with=connection)
+
+        foo = Table(
+            "foo", meta3, include_columns=["b", "f", "e"], extend_existing=True
+        )
+        eq_([c.name for c in foo.c], ["b", "e", "f"])
+        for c in ("b", "f", "e"):
+            assert c in foo.c
+        for c in ("a", "c", "d"):
+            assert c not in foo.c
+
+    @testing.emits_warning
+    @testing.combinations(True, False, argnames="resolve_fks")
+    def test_include_cols_skip_fk_col(
+        self, connection, tab_w_fks, resolve_fks
+    ):
+        """test #8100"""
+
+        m2 = MetaData()
+
+        b2 = Table(
+            "b",
+            m2,
+            autoload_with=connection,
+            resolve_fks=resolve_fks,
+            include_columns=["x", "q", "p"],
+        )
+
+        eq_([c.name for c in b2.c], ["x", "q", "p"])
+
+        # no FK, whether or not resolve_fks was called
+        eq_(b2.constraints, set((b2.primary_key,)))
+
+        b2a = b2.alias()
+        eq_([c.name for c in b2a.c], ["x", "q", "p"])
+
+        self.assert_compile(select(b2), "SELECT b.x, b.q, b.p FROM b")
+        self.assert_compile(
+            select(b2.alias()),
+            "SELECT b_1.x, b_1.q, b_1.p FROM b AS b_1",
+        )
+
+    def test_table_works_minus_fks(self, connection, tab_w_fks):
+        """test #8101"""
+
+        m2 = MetaData()
+
+        b2 = Table(
+            "b",
+            m2,
+            autoload_with=connection,
+            resolve_fks=False,
+        )
+
+        eq_([c.name for c in b2.c], ["x", "q", "p", "r", "s", "t"])
+
+        b2a = b2.alias()
+        eq_([c.name for c in b2a.c], ["x", "q", "p", "r", "s", "t"])
+
+        self.assert_compile(
+            select(b2), "SELECT b.x, b.q, b.p, b.r, b.s, b.t FROM b"
+        )
+        b2a_1 = b2.alias()
+        self.assert_compile(
+            select(b2a_1),
+            "SELECT b_1.x, b_1.q, b_1.p, b_1.r, b_1.s, b_1.t FROM b AS b_1",
+        )
+
+        # reflecting the related table
+        a2 = Table("a", m2, autoload_with=connection)
+
+        # the existing alias doesn't know about it
+        with expect_raises_message(
+            sa.exc.InvalidRequestError,
+            "Foreign key associated with column 'anon_1.r' could not find "
+            "table 'a' with which to generate a foreign key to target "
+            "column 'x'",
+        ):
+            select(b2a_1).join(a2).compile()
+
+        # can still join manually (needed to fix inside of util for this...)
+        self.assert_compile(
+            select(b2a_1).join(a2, b2a_1.c.r == a2.c.x),
+            "SELECT b_1.x, b_1.q, b_1.p, b_1.r, b_1.s, b_1.t "
+            "FROM b AS b_1 JOIN a ON b_1.r = a.x",
+        )
+
+        # a new alias does know about it however
+        self.assert_compile(
+            select(b2.alias()).join(a2),
+            "SELECT b_1.x, b_1.q, b_1.p, b_1.r, b_1.s, b_1.t "
+            "FROM b AS b_1 JOIN a ON a.x = b_1.r",
+        )

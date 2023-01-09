@@ -3,12 +3,12 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.orm import mapper
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
@@ -41,13 +41,15 @@ class BulkInsertUpdateVersionId(BulkTest, fixtures.MappedTest):
     def setup_mappers(cls):
         Foo, version_table = cls.classes.Foo, cls.tables.version_table
 
-        mapper(Foo, version_table, version_id_col=version_table.c.version_id)
+        cls.mapper_registry.map_imperatively(
+            Foo, version_table, version_id_col=version_table.c.version_id
+        )
 
     @testing.emits_warning(r".*versioning cannot be verified")
     def test_bulk_insert_via_save(self):
         Foo = self.classes.Foo
 
-        s = Session()
+        s = fixture_session()
 
         s.bulk_save_objects([Foo(value="value")])
 
@@ -57,7 +59,7 @@ class BulkInsertUpdateVersionId(BulkTest, fixtures.MappedTest):
     def test_bulk_update_via_save(self):
         Foo = self.classes.Foo
 
-        s = Session()
+        s = fixture_session()
 
         s.add(Foo(value="value"))
         s.commit()
@@ -76,14 +78,14 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         User, Address, Order = cls.classes("User", "Address", "Order")
         u, a, o = cls.tables("users", "addresses", "orders")
 
-        mapper(User, u)
-        mapper(Address, a)
-        mapper(Order, o)
+        cls.mapper_registry.map_imperatively(User, u)
+        cls.mapper_registry.map_imperatively(Address, a)
+        cls.mapper_registry.map_imperatively(Order, o)
 
     def test_bulk_save_return_defaults(self):
         (User,) = self.classes("User")
 
-        s = Session()
+        s = fixture_session()
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
         assert "id" not in objects[0].__dict__
 
@@ -91,22 +93,36 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
             s.bulk_save_objects(objects, return_defaults=True)
 
         asserter.assert_(
-            CompiledSQL(
-                "INSERT INTO users (name) VALUES (:name)", [{"name": "u1"}]
-            ),
-            CompiledSQL(
-                "INSERT INTO users (name) VALUES (:name)", [{"name": "u2"}]
-            ),
-            CompiledSQL(
-                "INSERT INTO users (name) VALUES (:name)", [{"name": "u3"}]
-            ),
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "u1"}, {"name": "u2"}, {"name": "u3"}],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "u1"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "u2"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "u3"}],
+                    ),
+                ],
+            )
         )
         eq_(objects[0].__dict__["id"], 1)
 
     def test_bulk_save_mappings_preserve_order(self):
         (User,) = self.classes("User")
 
-        s = Session()
+        s = fixture_session()
 
         # commit some object into db
         user1 = User(name="i1")
@@ -162,7 +178,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
     def test_bulk_save_no_defaults(self):
         (User,) = self.classes("User")
 
-        s = Session()
+        s = fixture_session()
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
         assert "id" not in objects[0].__dict__
 
@@ -180,7 +196,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
     def test_bulk_save_updated_include_unchanged(self):
         (User,) = self.classes("User")
 
-        s = Session(expire_on_commit=False)
+        s = fixture_session(expire_on_commit=False)
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
         s.add_all(objects)
         s.commit()
@@ -188,7 +204,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
         objects[0].name = "u1new"
         objects[2].name = "u3new"
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_save_objects(objects, update_changed_only=False)
 
@@ -206,12 +222,12 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
     def test_bulk_update(self):
         (User,) = self.classes("User")
 
-        s = Session(expire_on_commit=False)
+        s = fixture_session(expire_on_commit=False)
         objects = [User(name="u1"), User(name="u2"), User(name="u3")]
         s.add_all(objects)
         s.commit()
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_update_mappings(
                 User,
@@ -236,7 +252,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
     def test_bulk_insert(self):
         (User,) = self.classes("User")
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_insert_mappings(
                 User,
@@ -261,7 +277,7 @@ class BulkInsertUpdateTest(BulkTest, _fixtures.FixtureTest):
     def test_bulk_insert_render_nulls(self):
         (Order,) = self.classes("Order")
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_insert_mappings(
                 Order,
@@ -314,12 +330,12 @@ class BulkUDPostfetchTest(BulkTest, fixtures.MappedTest):
         A = cls.classes.A
         a = cls.tables.a
 
-        mapper(A, a)
+        cls.mapper_registry.map_imperatively(A, a)
 
     def test_insert_w_fetch(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         a1 = A(x=1)
         s.bulk_save_objects([a1])
         s.commit()
@@ -327,7 +343,7 @@ class BulkUDPostfetchTest(BulkTest, fixtures.MappedTest):
     def test_update_w_fetch(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         a1 = A(x=1, y=2)
         s.add(a1)
         s.commit()
@@ -387,8 +403,8 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             "people_keys", "people_attrs", "people_both"
         )
 
-        mapper(PersonKeys, people_keys)
-        mapper(
+        cls.mapper_registry.map_imperatively(PersonKeys, people_keys)
+        cls.mapper_registry.map_imperatively(
             PersonAttrs,
             people_attrs,
             properties={
@@ -397,7 +413,7 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             },
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             PersonBoth,
             people_both,
             properties={
@@ -436,8 +452,15 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             )
         )
 
-    def test_update_keys(self):
-        asserter = self._test_update(self.classes.PersonKeys)
+    @testing.combinations(
+        ("states",),
+        ("dicts",),
+    )
+    def test_update_keys(self, type_):
+        if type_ == "states":
+            asserter = self._test_update_states(self.classes.PersonKeys)
+        else:
+            asserter = self._test_update(self.classes.PersonKeys)
         asserter.assert_(
             CompiledSQL(
                 "UPDATE people_keys SET name=:personname "
@@ -446,9 +469,16 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             )
         )
 
+    @testing.combinations(
+        ("states",),
+        ("dicts",),
+    )
     @testing.requires.updateable_autoincrement_pks
-    def test_update_attrs(self):
-        asserter = self._test_update(self.classes.PersonAttrs)
+    def test_update_attrs(self, type_):
+        if type_ == "states":
+            asserter = self._test_update_states(self.classes.PersonAttrs)
+        else:
+            asserter = self._test_update(self.classes.PersonAttrs)
         asserter.assert_(
             CompiledSQL(
                 "UPDATE people_attrs SET name=:name "
@@ -473,7 +503,7 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
     def _test_insert(self, person_cls):
         Person = person_cls
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter(testing.db) as asserter:
             s.bulk_insert_mappings(
                 Person, [{"id": 5, "personname": "thename"}]
@@ -486,7 +516,7 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
     def _test_update(self, person_cls):
         Person = person_cls
 
-        s = Session()
+        s = fixture_session()
         s.add(Person(id=5, personname="thename"))
         s.commit()
 
@@ -494,6 +524,22 @@ class BulkUDTestAltColKeys(BulkTest, fixtures.MappedTest):
             s.bulk_update_mappings(
                 Person, [{"id": 5, "personname": "newname"}]
             )
+
+        eq_(s.query(Person).first(), Person(id=5, personname="newname"))
+
+        return asserter
+
+    def _test_update_states(self, person_cls):
+        Person = person_cls
+
+        s = fixture_session()
+        s.add(Person(id=5, personname="thename"))
+        s.commit()
+
+        p = s.get(Person, 5)
+        with self.sql_execution_asserter(testing.db) as asserter:
+            p.personname = "newname"
+            s.bulk_save_objects([p])
 
         eq_(s.query(Person).first(), Person(id=5, personname="newname"))
 
@@ -578,19 +624,25 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
         )
         p, e, m, b = cls.tables("people", "engineers", "managers", "boss")
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Person, p, polymorphic_on=p.c.type, polymorphic_identity="person"
         )
-        mapper(Engineer, e, inherits=Person, polymorphic_identity="engineer")
-        mapper(Manager, m, inherits=Person, polymorphic_identity="manager")
-        mapper(Boss, b, inherits=Manager, polymorphic_identity="boss")
+        cls.mapper_registry.map_imperatively(
+            Engineer, e, inherits=Person, polymorphic_identity="engineer"
+        )
+        cls.mapper_registry.map_imperatively(
+            Manager, m, inherits=Person, polymorphic_identity="manager"
+        )
+        cls.mapper_registry.map_imperatively(
+            Boss, b, inherits=Manager, polymorphic_identity="boss"
+        )
 
     def test_bulk_save_joined_inh_return_defaults(self):
         Person, Engineer, Manager, Boss = self.classes(
             "Person", "Engineer", "Manager", "Boss"
         )
 
-        s = Session()
+        s = fixture_session()
         objects = [
             Manager(name="m1", status="s1", manager_name="mn1"),
             Engineer(name="e1", status="s2", primary_language="l1"),
@@ -612,13 +664,30 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
                 "VALUES (:person_id, :status, :manager_name)",
                 [{"person_id": 1, "status": "s1", "manager_name": "mn1"}],
             ),
-            CompiledSQL(
-                "INSERT INTO people (name, type) VALUES (:name, :type)",
-                [{"type": "engineer", "name": "e1"}],
-            ),
-            CompiledSQL(
-                "INSERT INTO people (name, type) VALUES (:name, :type)",
-                [{"type": "engineer", "name": "e2"}],
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO people (name, type) "
+                        "VALUES (:name, :type)",
+                        [
+                            {"type": "engineer", "name": "e1"},
+                            {"type": "engineer", "name": "e2"},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO people (name, type) "
+                        "VALUES (:name, :type)",
+                        [{"type": "engineer", "name": "e1"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO people (name, type) "
+                        "VALUES (:name, :type)",
+                        [{"type": "engineer", "name": "e2"}],
+                    ),
+                ],
             ),
             CompiledSQL(
                 "INSERT INTO engineers (person_id, status, primary_language) "
@@ -652,7 +721,7 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
             "Person", "Engineer", "Manager", "Boss"
         )
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_save_objects(
                 [
@@ -734,7 +803,7 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
             "Person", "Engineer", "Manager", "Boss"
         )
 
-        s = Session()
+        s = fixture_session()
         with self.sql_execution_asserter() as asserter:
             s.bulk_insert_mappings(
                 Boss,
@@ -762,14 +831,28 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
             )
 
         asserter.assert_(
-            CompiledSQL(
-                "INSERT INTO people (name) VALUES (:name)", [{"name": "b1"}]
-            ),
-            CompiledSQL(
-                "INSERT INTO people (name) VALUES (:name)", [{"name": "b2"}]
-            ),
-            CompiledSQL(
-                "INSERT INTO people (name) VALUES (:name)", [{"name": "b3"}]
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO people (name) VALUES (:name)",
+                        [{"name": "b1"}, {"name": "b2"}, {"name": "b3"}],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO people (name) VALUES (:name)",
+                        [{"name": "b1"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO people (name) VALUES (:name)",
+                        [{"name": "b2"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO people (name) VALUES (:name)",
+                        [{"name": "b3"}],
+                    ),
+                ],
             ),
             CompiledSQL(
                 "INSERT INTO managers (person_id, status, manager_name) "
@@ -789,4 +872,58 @@ class BulkInheritanceTest(BulkTest, fixtures.MappedTest):
                     {"golf_swing": "g3", "boss_id": 3},
                 ],
             ),
+        )
+
+
+class BulkIssue6793Test(BulkTest, fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class User(Base):
+            __tablename__ = "users"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(255), nullable=False)
+
+    def test_issue_6793(self):
+        User = self.classes.User
+
+        session = fixture_session()
+
+        with self.sql_execution_asserter() as asserter:
+
+            session.bulk_save_objects([User(name="A"), User(name="B")])
+
+            session.add(User(name="C"))
+            session.add(User(name="D"))
+            session.flush()
+
+        asserter.assert_(
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "A"}, {"name": "B"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "C"}, {"name": "D"}],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "A"}, {"name": "B"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "C"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO users (name) VALUES (:name)",
+                        [{"name": "D"}],
+                    ),
+                ],
+            )
         )

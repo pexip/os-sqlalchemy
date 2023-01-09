@@ -14,7 +14,10 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import is_true
+from sqlalchemy.testing import not_in
+from sqlalchemy.testing.assertions import assert_warns
 from sqlalchemy.testing.mock import call
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.util import all_partial_orderings
@@ -207,7 +210,7 @@ class AttributeImplAPITest(fixtures.MappedTest):
 
 
 class AttributesTest(fixtures.ORMTest):
-    def setup(self):
+    def setup_test(self):
         global MyTest, MyTest2
 
         class MyTest(object):
@@ -216,7 +219,7 @@ class AttributesTest(fixtures.ORMTest):
         class MyTest2(object):
             pass
 
-    def teardown(self):
+    def teardown_test(self):
         global MyTest, MyTest2
         MyTest, MyTest2 = None, None
 
@@ -359,6 +362,27 @@ class AttributesTest(fixtures.ORMTest):
             lambda: Foo().bars.append(Bar()),
         )
 
+    def test_unmapped_instance_raises(self):
+        class User(object):
+            pass
+
+        instrumentation.register_class(User)
+        attributes.register_attribute(
+            User, "user_name", uselist=False, useobject=False
+        )
+
+        class Blog(object):
+            name = User.user_name
+
+        def go():
+            b = Blog()
+            return b.name
+
+        assert_raises(
+            orm_exc.UnmappedInstanceError,
+            go,
+        )
+
     def test_del_scalar_nonobject(self):
         class Foo(object):
             pass
@@ -440,14 +464,14 @@ class AttributesTest(fixtures.ORMTest):
 
         data = {"a": "this is a", "b": 12}
 
-        def loader(state, keys):
+        def loader(state, keys, passive):
             for k in keys:
                 state.dict[k] = data[k]
             return attributes.ATTR_WAS_SET
 
         instrumentation.register_class(Foo)
         manager = attributes.manager_of_class(Foo)
-        manager.deferred_scalar_loader = loader
+        manager.expired_attribute_loader = loader
         attributes.register_attribute(Foo, "a", uselist=False, useobject=False)
         attributes.register_attribute(Foo, "b", uselist=False, useobject=False)
 
@@ -486,14 +510,14 @@ class AttributesTest(fixtures.ORMTest):
     def test_deferred_pickleable(self):
         data = {"a": "this is a", "b": 12}
 
-        def loader(state, keys):
+        def loader(state, keys, passive):
             for k in keys:
                 state.dict[k] = data[k]
             return attributes.ATTR_WAS_SET
 
         instrumentation.register_class(MyTest)
         manager = attributes.manager_of_class(MyTest)
-        manager.deferred_scalar_loader = loader
+        manager.expired_attribute_loader = loader
         attributes.register_attribute(
             MyTest, "a", uselist=False, useobject=False
         )
@@ -1028,31 +1052,27 @@ class GetNoValueTest(fixtures.ORMTest):
             attributes.PASSIVE_NO_RESULT,
         )
 
-    def test_passive_no_result_never_set(self):
-        attr, state, dict_ = self._fixture(attributes.NEVER_SET)
+    def test_passive_no_result_no_value(self):
+        attr, state, dict_ = self._fixture(attributes.NO_VALUE)
         eq_(
             attr.get(state, dict_, passive=attributes.PASSIVE_NO_INITIALIZE),
             attributes.PASSIVE_NO_RESULT,
         )
         assert "attr" not in dict_
 
-    def test_passive_ret_never_set_never_set(self):
-        attr, state, dict_ = self._fixture(attributes.NEVER_SET)
+    def test_passive_ret_no_value(self):
+        attr, state, dict_ = self._fixture(attributes.NO_VALUE)
         eq_(
-            attr.get(
-                state, dict_, passive=attributes.PASSIVE_RETURN_NEVER_SET
-            ),
-            attributes.NEVER_SET,
+            attr.get(state, dict_, passive=attributes.PASSIVE_RETURN_NO_VALUE),
+            attributes.NO_VALUE,
         )
         assert "attr" not in dict_
 
-    def test_passive_ret_never_set_empty(self):
+    def test_passive_ret_no_value_empty(self):
         attr, state, dict_ = self._fixture(None)
         eq_(
-            attr.get(
-                state, dict_, passive=attributes.PASSIVE_RETURN_NEVER_SET
-            ),
-            attributes.NEVER_SET,
+            attr.get(state, dict_, passive=attributes.PASSIVE_RETURN_NO_VALUE),
+            attributes.NO_VALUE,
         )
         assert "attr" not in dict_
 
@@ -1091,7 +1111,7 @@ class UtilTest(fixtures.ORMTest):
         attributes.del_attribute(f1, "coll")
         assert "coll" not in f1.__dict__
 
-    def test_set_commited_value_none_uselist(self):
+    def test_set_committed_value_none_uselist(self):
         """test that set_committed_value->None to a uselist generates an
         empty list"""
 
@@ -1266,7 +1286,7 @@ class BackrefTest(fixtures.ORMTest):
     def test_symmetric_o2o_inheritance(self):
         """Test that backref 'initiator' catching goes against
         a token that is global to all InstrumentedAttribute objects
-        within a particular class, not just the indvidual IA object
+        within a particular class, not just the individual IA object
         since we use distinct objects in an inheritance scenario.
 
         """
@@ -1607,7 +1627,7 @@ class PendingBackrefTest(fixtures.ORMTest):
         )
         eq_(lazy_posts.call_count, 1)
 
-    def test_passive_history_collection_never_set(self):
+    def test_passive_history_collection_no_value(self):
         Post, Blog, lazy_posts = self._fixture()
 
         lazy_posts.return_value = attributes.PASSIVE_NO_RESULT
@@ -1620,10 +1640,10 @@ class PendingBackrefTest(fixtures.ORMTest):
             attributes.instance_dict(b),
         )
 
-        # this sets up NEVER_SET on b.posts
+        # this sets up NO_VALUE on b.posts
         p.blog = b
 
-        eq_(state.committed_state, {"posts": attributes.NEVER_SET})
+        eq_(state.committed_state, {"posts": attributes.NO_VALUE})
         assert "posts" not in dict_
 
         # then suppose the object was made transient again,
@@ -1633,12 +1653,14 @@ class PendingBackrefTest(fixtures.ORMTest):
         p2 = Post("asdf")
         p2.blog = b
 
-        eq_(state.committed_state, {"posts": attributes.NEVER_SET})
+        eq_(state.committed_state, {"posts": attributes.NO_VALUE})
         eq_(dict_["posts"], [p2])
 
         # then this would fail.
         eq_(
-            Blog.posts.impl.get_history(state, dict_, passive=True),
+            Blog.posts.impl.get_history(
+                state, dict_, passive=attributes.PASSIVE_NO_INITIALIZE
+            ),
             ([p2], (), ()),
         )
 
@@ -2106,17 +2128,17 @@ class HistoryTest(fixtures.TestBase):
         assert "someattr" not in f.__dict__
         assert "someattr" not in attributes.instance_state(f).committed_state
 
-    def test_collection_never_set(self):
+    def test_collection_no_value(self):
         Foo = self._fixture(uselist=True, useobject=True, active_history=True)
         f = Foo()
         eq_(self._someattr_history(f, passive=True), (None, None, None))
 
-    def test_scalar_obj_never_set(self):
+    def test_scalar_obj_no_value(self):
         Foo = self._fixture(uselist=False, useobject=True, active_history=True)
         f = Foo()
         eq_(self._someattr_history(f, passive=True), (None, None, None))
 
-    def test_scalar_never_set(self):
+    def test_scalar_no_value(self):
         Foo = self._fixture(
             uselist=False, useobject=False, active_history=True
         )
@@ -2244,10 +2266,10 @@ class HistoryTest(fixtures.TestBase):
         state.dict.pop("someattr", None)
         state.expired_attributes.add("someattr")
 
-        def scalar_loader(state, toload):
+        def scalar_loader(state, toload, passive):
             state.dict["someattr"] = "one"
 
-        state.manager.deferred_scalar_loader = scalar_loader
+        state.manager.expired_attribute_loader = scalar_loader
 
         eq_(self._someattr_history(f), ((), ["one"], ()))
 
@@ -2905,27 +2927,6 @@ class HistoryTest(fixtures.TestBase):
             ([f1], (), ()),
         )
 
-    def test_deprecated_flags(self):
-        assert_raises_message(
-            sa_exc.SADeprecationWarning,
-            "Passing True for 'passive' is deprecated. "
-            "Use attributes.PASSIVE_NO_INITIALIZE",
-            attributes.get_history,
-            object(),
-            "foo",
-            True,
-        )
-
-        assert_raises_message(
-            sa_exc.SADeprecationWarning,
-            "Passing False for 'passive' is deprecated.  "
-            "Use attributes.PASSIVE_OFF",
-            attributes.get_history,
-            object(),
-            "foo",
-            False,
-        )
-
 
 class LazyloadHistoryTest(fixtures.TestBase):
     def test_lazy_backref_collections(self):
@@ -3476,15 +3477,31 @@ class ListenerTest(fixtures.ORMTest):
         class Foo(object):
             pass
 
+        class Bar(object):
+            pass
+
         instrumentation.register_class(Foo)
+        instrumentation.register_class(Bar)
         attributes.register_attribute(Foo, "bar", useobject=True, uselist=True)
 
         event.listen(Foo.bar, "set", canary)
 
         f1 = Foo()
         eq_(f1.bar, [])
+
+        assert "bar" not in f1.__dict__
+
+        adapter = Foo.bar.impl.get_collection(
+            attributes.instance_state(f1), attributes.instance_dict(f1)
+        )
+        assert adapter.empty
+
         # reversal of approach in #3061
         eq_(canary.mock_calls, [])
+
+        f1.bar.append(Bar())
+        assert "bar" in f1.__dict__
+        assert not adapter.empty
 
 
 class EventPropagateTest(fixtures.TestBase):
@@ -3507,14 +3524,14 @@ class EventPropagateTest(fixtures.TestBase):
             b = B()
             b.attrib = "foo"
             eq_(b.attrib, "foo")
-            eq_(canary, [("foo", attributes.NEVER_SET)])
+            eq_(canary, [("foo", attributes.NO_VALUE)])
 
             c = C()
             c.attrib = "bar"
             eq_(c.attrib, "bar")
             eq_(
                 canary,
-                [("foo", attributes.NEVER_SET), ("bar", attributes.NEVER_SET)],
+                [("foo", attributes.NO_VALUE), ("bar", attributes.NO_VALUE)],
             )
 
     def test_propagate(self):
@@ -3555,16 +3572,13 @@ class EventPropagateTest(fixtures.TestBase):
             d1 = D()
             b.attrib = d1
             is_(b.attrib, d1)
-            eq_(canary, [(d1, attributes.NEVER_SET)])
+            eq_(canary, [(d1, attributes.NO_VALUE)])
 
             c = C()
             d2 = D()
             c.attrib = d2
             is_(c.attrib, d2)
-            eq_(
-                canary,
-                [(d1, attributes.NEVER_SET), (d2, attributes.NEVER_SET)],
-            )
+            eq_(canary, [(d1, attributes.NO_VALUE), (d2, attributes.NO_VALUE)])
 
     def _test_propagate_fixtures(self, active_history, useobject):
         classes = [None, None, None, None]
@@ -3676,8 +3690,67 @@ class EventPropagateTest(fixtures.TestBase):
             canary[:] = []
 
 
+class CollectionInitTest(fixtures.TestBase):
+    def setup_test(self):
+        class A(object):
+            pass
+
+        class B(object):
+            pass
+
+        self.A = A
+        self.B = B
+        instrumentation.register_class(A)
+        instrumentation.register_class(B)
+        attributes.register_attribute(A, "bs", uselist=True, useobject=True)
+
+    def test_bulk_replace_resets_empty(self):
+        A = self.A
+        a1 = A()
+        state = attributes.instance_state(a1)
+
+        existing = a1.bs
+
+        is_(state._empty_collections["bs"], existing)
+        is_not(existing._sa_adapter, None)
+
+        a1.bs = []  # replaces previous "empty" collection
+        not_in("bs", state._empty_collections)  # empty is replaced
+        is_(existing._sa_adapter, None)
+
+    def test_assert_false_on_default_value(self):
+        A = self.A
+        a1 = A()
+        state = attributes.instance_state(a1)
+
+        attributes.init_state_collection(state, state.dict, "bs")
+
+        assert_raises(
+            AssertionError, A.bs.impl._default_value, state, state.dict
+        )
+
+    def test_loader_inits_collection_already_exists(self):
+        A, B = self.A, self.B
+        a1 = A()
+        b1, b2 = B(), B()
+        a1.bs = [b1, b2]
+        eq_(a1.__dict__["bs"], [b1, b2])
+
+        old = a1.__dict__["bs"]
+        is_not(old._sa_adapter, None)
+        state = attributes.instance_state(a1)
+
+        # this occurs during a load with populate_existing
+        adapter = attributes.init_state_collection(state, state.dict, "bs")
+
+        new = a1.__dict__["bs"]
+        eq_(new, [])
+        is_(new._sa_adapter, adapter)
+        is_(old._sa_adapter, None)
+
+
 class TestUnlink(fixtures.TestBase):
-    def setUp(self):
+    def setup_test(self):
         class A(object):
             pass
 
@@ -3697,7 +3770,7 @@ class TestUnlink(fixtures.TestBase):
         a1.bs.append(B())
         state = attributes.instance_state(a1)
         state._expire(state.dict, set())
-        assert_raises(Warning, coll.append, B())
+        assert_warns(Warning, coll.append, B())
 
     def test_replaced(self):
         A, B = self.A, self.B
@@ -3718,7 +3791,7 @@ class TestUnlink(fixtures.TestBase):
         a1.bs.append(B())
         state = attributes.instance_state(a1)
         state._reset(state.dict, "bs")
-        assert_raises(Warning, coll.append, B())
+        assert_warns(Warning, coll.append, B())
 
     def test_ad_hoc_lazy(self):
         A, B = self.A, self.B
@@ -3727,4 +3800,4 @@ class TestUnlink(fixtures.TestBase):
         a1.bs.append(B())
         state = attributes.instance_state(a1)
         _set_callable(state, state.dict, "bs", lambda: B())
-        assert_raises(Warning, coll.append, B())
+        assert_warns(Warning, coll.append, B())

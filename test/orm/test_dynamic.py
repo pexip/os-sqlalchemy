@@ -1,26 +1,31 @@
 from sqlalchemy import cast
+from sqlalchemy import Column
 from sqlalchemy import desc
 from sqlalchemy import exc
+from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import mapper
+from sqlalchemy.orm import noload
 from sqlalchemy.orm import Query
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
-from sqlalchemy.orm.dynamic import AppenderMixin
+from sqlalchemy.orm.session import make_transient_to_detached
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import is_
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 
 
@@ -33,7 +38,7 @@ class _DynamicFixture(object):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -42,7 +47,7 @@ class _DynamicFixture(object):
                 )
             },
         )
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
         return User, Address
 
     def _order_item_fixture(self, items_args={}):
@@ -54,7 +59,7 @@ class _DynamicFixture(object):
             self.classes.Item,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -63,14 +68,72 @@ class _DynamicFixture(object):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
         return Order, Item
+
+    def _user_order_item_fixture(self):
+        (
+            users,
+            Keyword,
+            items,
+            order_items,
+            item_keywords,
+            Item,
+            User,
+            keywords,
+            Order,
+            orders,
+        ) = (
+            self.tables.users,
+            self.classes.Keyword,
+            self.tables.items,
+            self.tables.order_items,
+            self.tables.item_keywords,
+            self.classes.Item,
+            self.classes.User,
+            self.tables.keywords,
+            self.classes.Order,
+            self.tables.orders,
+        )
+
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={
+                "orders": relationship(
+                    Order, order_by=orders.c.id, lazy="dynamic"
+                )
+            },
+        )
+        self.mapper_registry.map_imperatively(
+            Order,
+            orders,
+            properties={
+                "items": relationship(
+                    Item, secondary=order_items, order_by=items.c.id
+                ),
+            },
+        )
+        self.mapper_registry.map_imperatively(
+            Item,
+            items,
+            properties={
+                "keywords": relationship(
+                    Keyword, secondary=item_keywords
+                )  # m2m
+            },
+        )
+        self.mapper_registry.map_imperatively(Keyword, keywords)
+
+        return User, Order, Item, Keyword
 
 
 class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
+    __dialect__ = "default"
+
     def test_basic(self):
         User, Address = self._user_address_fixture()
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         eq_(
@@ -84,12 +147,61 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
         )
         eq_(self.static.user_address_result, q.all())
 
+        eq_(
+            [
+                User(
+                    id=7,
+                    addresses=[Address(id=1, email_address="jack@bean.com")],
+                )
+            ],
+            q.filter_by(id=7).all(),
+        )
+
+    def test_slice_access(self):
+        User, Address = self._user_address_fixture()
+        sess = fixture_session()
+        u1 = sess.get(User, 8)
+
+        eq_(u1.addresses.limit(1).one(), Address(id=2))
+
+        eq_(u1.addresses[0], Address(id=2))
+        eq_(u1.addresses[0:2], [Address(id=2), Address(id=3)])
+
+    def test_negative_slice_access_raises(self):
+        User, Address = self._user_address_fixture()
+        sess = fixture_session(future=True)
+        u1 = sess.get(User, 8)
+
+        with expect_raises_message(
+            IndexError,
+            "negative indexes are not accepted by SQL index / slice operators",
+        ):
+            u1.addresses[-1]
+
+        with expect_raises_message(
+            IndexError,
+            "negative indexes are not accepted by SQL index / slice operators",
+        ):
+            u1.addresses[-5:-2]
+
+        with expect_raises_message(
+            IndexError,
+            "negative indexes are not accepted by SQL index / slice operators",
+        ):
+            u1.addresses[-2]
+
+        with expect_raises_message(
+            IndexError,
+            "negative indexes are not accepted by SQL index / slice operators",
+        ):
+            u1.addresses[:-2]
+
     def test_statement(self):
         """test that the .statement accessor returns the actual statement that
         would render, without any _clones called."""
 
         User, Address = self._user_address_fixture()
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         u = q.filter(User.id == 7).first()
@@ -101,16 +213,72 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             use_default_dialect=True,
         )
 
+    def test_query_class_custom_method(self):
+        class MyClass(Query):
+            def my_filter(self, arg):
+                return self.filter(Address.email_address == arg)
+
+        User, Address = self._user_address_fixture(
+            addresses_args=dict(query_class=MyClass)
+        )
+
+        sess = fixture_session()
+        q = sess.query(User)
+
+        u = q.filter(User.id == 7).first()
+
+        assert isinstance(u.addresses, MyClass)
+
+        self.assert_compile(
+            u.addresses.my_filter("x").statement,
+            "SELECT addresses.id, addresses.user_id, addresses.email_address "
+            "FROM "
+            "addresses WHERE :param_1 = addresses.user_id AND "
+            "addresses.email_address = :email_address_1",
+            use_default_dialect=True,
+        )
+
     def test_detached_raise(self):
+        """so filtering on a detached dynamic list raises an error..."""
+
         User, Address = self._user_address_fixture()
-        sess = create_session()
-        u = sess.query(User).get(8)
+        sess = fixture_session()
+        u = sess.get(User, 8)
         sess.expunge(u)
         assert_raises(
             orm_exc.DetachedInstanceError,
             u.addresses.filter_by,
             email_address="e",
         )
+
+    def test_detached_all_empty_list(self):
+        """test #6426 - but you can call .all() on it and you get an empty
+        list.   This is legacy stuff, as this should be raising
+        DetachedInstanceError.
+
+        """
+
+        User, Address = self._user_address_fixture()
+        sess = fixture_session()
+        u = sess.get(User, 8)
+        sess.expunge(u)
+
+        with testing.expect_warnings(
+            r"Instance <User .*> is detached, dynamic relationship"
+        ):
+            eq_(u.addresses.all(), [])
+
+        with testing.expect_warnings(
+            r"Instance <User .*> is detached, dynamic relationship"
+        ):
+            eq_(list(u.addresses), [])
+
+    def test_transient_all_empty_list(self):
+        User, Address = self._user_address_fixture()
+        u1 = User()
+        eq_(u1.addresses.all(), [])
+
+        eq_(list(u1.addresses), [])
 
     def test_no_uselist_false(self):
         User, Address = self._user_address_fixture(
@@ -131,12 +299,12 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             self.tables.addresses,
             self.classes.User,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties={"user": relationship(User, lazy="dynamic")},
         )
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
         assert_raises_message(
             exc.InvalidRequestError,
             "On relationship Address.user, 'dynamic' loaders cannot be "
@@ -152,15 +320,15 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             self.tables.addresses,
             self.classes.User,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties={
                 "user": relationship(User, uselist=True, lazy="dynamic")
             },
         )
-        mapper(User, users)
-        assert_raises_message(
+        self.mapper_registry.map_imperatively(User, users)
+        assert_warns_message(
             exc.SAWarning,
             "On relationship Address.user, 'dynamic' loaders cannot be "
             "used with many-to-one/one-to-one relationships and/or "
@@ -170,8 +338,8 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
 
     def test_order_by(self):
         User, Address = self._user_address_fixture()
-        sess = create_session()
-        u = sess.query(User).get(8)
+        sess = fixture_session()
+        u = sess.get(User, 8)
         eq_(
             list(u.addresses.order_by(desc(Address.email_address))),
             [
@@ -181,14 +349,49 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             ],
         )
 
+    @testing.requires.dupe_order_by_ok
+    def test_order_by_composition_uses_immutable_tuple(self):
+        addresses = self.tables.addresses
+        User, Address = self._user_address_fixture(
+            addresses_args={"order_by": addresses.c.email_address.desc()}
+        )
+
+        sess = fixture_session()
+        u = sess.get(User, 8)
+
+        with self.sql_execution_asserter() as asserter:
+            for i in range(3):
+                eq_(
+                    list(u.addresses.order_by(desc(Address.email_address))),
+                    [
+                        Address(email_address="ed@wood.com"),
+                        Address(email_address="ed@lala.com"),
+                        Address(email_address="ed@bettyboop.com"),
+                    ],
+                )
+        asserter.assert_(
+            *[
+                CompiledSQL(
+                    "SELECT addresses.id AS addresses_id, addresses.user_id "
+                    "AS addresses_user_id, addresses.email_address "
+                    "AS addresses_email_address FROM addresses "
+                    "WHERE :param_1 = addresses.user_id "
+                    "ORDER BY addresses.email_address DESC, "
+                    "addresses.email_address DESC",
+                    [{"param_1": 8}],
+                )
+                for i in range(3)
+            ]
+        )
+
     def test_configured_order_by(self):
         addresses = self.tables.addresses
         User, Address = self._user_address_fixture(
             addresses_args={"order_by": addresses.c.email_address.desc()}
         )
 
-        sess = create_session()
-        u = sess.query(User).get(8)
+        sess = fixture_session()
+        u = sess.get(User, 8)
         eq_(
             list(u.addresses),
             [
@@ -222,7 +425,7 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
 
     def test_count(self):
         User, Address = self._user_address_fixture()
-        sess = create_session()
+        sess = fixture_session()
         u = sess.query(User).first()
         eq_(u.addresses.count(), 1)
 
@@ -234,7 +437,7 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties={
@@ -243,22 +446,22 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
                 )
             },
         )
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
-        sess = create_session()
-        ad = sess.query(Address).get(1)
+        sess = fixture_session()
+        ad = sess.get(Address, 1)
 
         def go():
             ad.user = None
 
         self.assert_sql_count(testing.db, go, 0)
         sess.flush()
-        u = sess.query(User).get(7)
+        u = sess.get(User, 7)
         assert ad not in u.addresses
 
     def test_no_count(self):
         User, Address = self._user_address_fixture()
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         # dynamic collection cannot implement __len__() (at least one that
@@ -291,12 +494,42 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             [],
         )
 
+    @testing.combinations(
+        ("star",),
+        ("attronly",),
+    )
+    def test_noload_issue(self, type_):
+        """test #6420.   a noload that hits the dynamic loader
+        should have no effect.
+
+        """
+
+        User, Address = self._user_address_fixture()
+
+        s = fixture_session()
+
+        if type_ == "star":
+            u1 = s.query(User).filter_by(id=7).options(noload("*")).first()
+            assert "name" not in u1.__dict__["name"]
+        elif type_ == "attronly":
+            u1 = (
+                s.query(User)
+                .filter_by(id=7)
+                .options(noload(User.addresses))
+                .first()
+            )
+
+            eq_(u1.__dict__["name"], "jack")
+
+        # noload doesn't affect a dynamic loader, because it has no state
+        eq_(list(u1.addresses), [Address(id=1)])
+
     def test_m2m(self):
         Order, Item = self._order_item_fixture(
             items_args={"backref": backref("orders", lazy="dynamic")}
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o1 = Order(id=15, description="order 10")
         i1 = Item(id=10, description="item 8")
         o1.items.append(i1)
@@ -321,7 +554,7 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             self.classes.Item,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -333,9 +566,9 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
-        sess = create_session()
+        sess = fixture_session()
         o = sess.query(Order).first()
 
         self.assert_compile(
@@ -362,7 +595,7 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             self.classes.Item,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -371,10 +604,16 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
                 )
             },
         )
-        mapper(Item, items)
+        item_mapper = self.mapper_registry.map_imperatively(Item, items)
 
-        sess = create_session()
+        sess = fixture_session()
+
         u1 = sess.query(User).first()
+
+        dyn = u1.items
+
+        # test for #7868
+        eq_(dyn._from_obj[0]._annotations["parententity"], item_mapper)
 
         self.assert_compile(
             u1.items,
@@ -385,6 +624,62 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             "WHERE :param_1 = orders.user_id "
             "AND items.id = order_items.item_id",
             use_default_dialect=True,
+        )
+
+    def test_secondary_as_join_complex_entity(self, registry):
+        """integration test for #7868"""
+        Base = registry.generate_base()
+
+        class GrandParent(Base):
+            __tablename__ = "grandparent"
+            id = Column(Integer, primary_key=True)
+
+            grand_children = relationship(
+                "Child", secondary="parent", lazy="dynamic", viewonly=True
+            )
+
+        class Parent(Base):
+            __tablename__ = "parent"
+            id = Column(Integer, primary_key=True)
+            grand_parent_id = Column(
+                Integer, ForeignKey("grandparent.id"), nullable=False
+            )
+
+        class Child(Base):
+            __tablename__ = "child"
+            id = Column(Integer, primary_key=True)
+            type = Column(String)
+            parent_id = Column(
+                Integer, ForeignKey("parent.id"), nullable=False
+            )
+
+            __mapper_args__ = {
+                "polymorphic_on": type,
+                "polymorphic_identity": "unknown",
+                "with_polymorphic": "*",
+            }
+
+        class SubChild(Child):
+            __tablename__ = "subchild"
+            id = Column(Integer, ForeignKey("child.id"), primary_key=True)
+
+            __mapper_args__ = {
+                "polymorphic_identity": "sub",
+            }
+
+        gp = GrandParent(id=1)
+        make_transient_to_detached(gp)
+        sess = fixture_session()
+        sess.add(gp)
+        self.assert_compile(
+            gp.grand_children.filter_by(id=1),
+            "SELECT child.id AS child_id, child.type AS child_type, "
+            "child.parent_id AS child_parent_id, subchild.id AS subchild_id "
+            "FROM parent, child LEFT OUTER JOIN subchild "
+            "ON child.id = subchild.id "
+            "WHERE :param_1 = parent.grand_parent_id "
+            "AND parent.id = child.parent_id AND child.id = :id_1",
+            {"id_1": 1},
         )
 
     def test_secondary_doesnt_interfere_w_join_to_fromlist(self):
@@ -405,7 +700,7 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
         class ItemKeyword(object):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -414,18 +709,18 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             ItemKeyword,
             item_keywords,
             primary_key=[item_keywords.c.item_id, item_keywords.c.keyword_id],
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties={"item_keywords": relationship(ItemKeyword)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         order = sess.query(Order).first()
 
         self.assert_compile(
@@ -439,6 +734,12 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
             use_default_dialect=True,
         )
 
+    @testing.combinations(
+        # lambda
+    )
+    def test_join_syntaxes(self, expr):
+        User, Order, Item, Keyword = self._user_order_item_fixture()
+
     def test_transient_count(self):
         User, Address = self._user_address_fixture()
         u1 = User()
@@ -451,67 +752,6 @@ class DynamicTest(_DynamicFixture, _fixtures.FixtureTest, AssertsCompiledSQL):
         u1.addresses.append(Address())
         eq_(u1.addresses[0], Address())
 
-    def test_custom_query(self):
-        class MyQuery(Query):
-            pass
-
-        User, Address = self._user_address_fixture(
-            addresses_args={"query_class": MyQuery}
-        )
-
-        sess = create_session()
-        u = User()
-        sess.add(u)
-
-        col = u.addresses
-        assert isinstance(col, Query)
-        assert isinstance(col, MyQuery)
-        assert hasattr(col, "append")
-        eq_(type(col).__name__, "AppenderMyQuery")
-
-        q = col.limit(1)
-        assert isinstance(q, Query)
-        assert isinstance(q, MyQuery)
-        assert not hasattr(q, "append")
-        eq_(type(q).__name__, "MyQuery")
-
-    def test_custom_query_with_custom_mixin(self):
-        class MyAppenderMixin(AppenderMixin):
-            def add(self, items):
-                if isinstance(items, list):
-                    for item in items:
-                        self.append(item)
-                else:
-                    self.append(items)
-
-        class MyQuery(Query):
-            pass
-
-        class MyAppenderQuery(MyAppenderMixin, MyQuery):
-            query_class = MyQuery
-
-        User, Address = self._user_address_fixture(
-            addresses_args={"query_class": MyAppenderQuery}
-        )
-
-        sess = create_session()
-        u = User()
-        sess.add(u)
-
-        col = u.addresses
-        assert isinstance(col, Query)
-        assert isinstance(col, MyQuery)
-        assert hasattr(col, "append")
-        assert hasattr(col, "add")
-        eq_(type(col).__name__, "MyAppenderQuery")
-
-        q = col.limit(1)
-        assert isinstance(q, Query)
-        assert isinstance(q, MyQuery)
-        assert not hasattr(q, "append")
-        assert not hasattr(q, "add")
-        eq_(type(q).__name__, "MyQuery")
-
 
 class UOWTest(
     _DynamicFixture, _fixtures.FixtureTest, testing.AssertsExecutionResults
@@ -523,36 +763,38 @@ class UOWTest(
         addresses = self.tables.addresses
         User, Address = self._user_address_fixture()
 
-        sess = create_session()
+        sess = fixture_session()
         u1 = User(name="jack")
         a1 = Address(email_address="foo")
         sess.add_all([u1, a1])
         sess.flush()
 
         eq_(
-            testing.db.scalar(
-                select([func.count(cast(1, Integer))]).where(
+            sess.connection().scalar(
+                select(func.count(cast(1, Integer))).where(
                     addresses.c.user_id != None
                 )
             ),  # noqa
             0,
         )
-        u1 = sess.query(User).get(u1.id)
+        u1 = sess.get(User, u1.id)
         u1.addresses.append(a1)
         sess.flush()
 
         eq_(
-            testing.db.execute(
-                select([addresses]).where(addresses.c.user_id != None)  # noqa
-            ).fetchall(),
+            sess.connection()
+            .execute(
+                select(addresses).where(addresses.c.user_id != None)  # noqa
+            )
+            .fetchall(),
             [(a1.id, u1.id, "foo")],
         )
 
         u1.addresses.remove(a1)
         sess.flush()
         eq_(
-            testing.db.scalar(
-                select([func.count(cast(1, Integer))]).where(
+            sess.connection().scalar(
+                select(func.count(cast(1, Integer))).where(
                     addresses.c.user_id != None
                 )
             ),  # noqa
@@ -562,9 +804,11 @@ class UOWTest(
         u1.addresses.append(a1)
         sess.flush()
         eq_(
-            testing.db.execute(
-                select([addresses]).where(addresses.c.user_id != None)  # noqa
-            ).fetchall(),
+            sess.connection()
+            .execute(
+                select(addresses).where(addresses.c.user_id != None)  # noqa
+            )
+            .fetchall(),
             [(a1.id, u1.id, "foo")],
         )
 
@@ -573,9 +817,11 @@ class UOWTest(
         u1.addresses.append(a2)
         sess.flush()
         eq_(
-            testing.db.execute(
-                select([addresses]).where(addresses.c.user_id != None)  # noqa
-            ).fetchall(),
+            sess.connection()
+            .execute(
+                select(addresses).where(addresses.c.user_id != None)  # noqa
+            )
+            .fetchall(),
             [(a2.id, u1.id, "bar")],
         )
 
@@ -584,7 +830,7 @@ class UOWTest(
         User, Address = self._user_address_fixture(
             addresses_args={"order_by": addresses.c.email_address}
         )
-        sess = create_session()
+        sess = fixture_session(autoflush=False)
         u1 = User(name="jack")
         a1 = Address(email_address="a1")
         a2 = Address(email_address="a2")
@@ -620,7 +866,7 @@ class UOWTest(
         User, Address = self._user_address_fixture(
             addresses_args={"order_by": addresses.c.email_address}
         )
-        sess = create_session(autoflush=True, autocommit=False)
+        sess = fixture_session(autoflush=True, autocommit=False)
         u1 = User(name="jack")
         a1 = Address(email_address="a1")
         a2 = Address(email_address="a2")
@@ -642,7 +888,7 @@ class UOWTest(
         # when flushing an append
         User, Address = self._user_address_fixture()
 
-        sess = Session()
+        sess = fixture_session()
         u1 = User(name="jack", addresses=[Address(email_address="a1")])
         sess.add(u1)
         sess.commit()
@@ -657,8 +903,8 @@ class UOWTest(
             sess.flush,
             CompiledSQL(
                 "SELECT users.id AS users_id, users.name AS users_name "
-                "FROM users WHERE users.id = :param_1",
-                lambda ctx: [{"param_1": u1_id}],
+                "FROM users WHERE users.id = :pk_1",
+                lambda ctx: [{"pk_1": u1_id}],
             ),
             CompiledSQL(
                 "INSERT INTO addresses (user_id, email_address) "
@@ -672,7 +918,7 @@ class UOWTest(
         # when flushing a remove
         User, Address = self._user_address_fixture()
 
-        sess = Session()
+        sess = fixture_session()
         u1 = User(name="jack", addresses=[Address(email_address="a1")])
         a2 = Address(email_address="a2")
         u1.addresses.append(a2)
@@ -691,8 +937,8 @@ class UOWTest(
             CompiledSQL(
                 "SELECT addresses.id AS addresses_id, addresses.email_address "
                 "AS addresses_email_address FROM addresses "
-                "WHERE addresses.id = :param_1",
-                lambda ctx: [{"param_1": a2_id}],
+                "WHERE addresses.id = :pk_1",
+                lambda ctx: [{"pk_1": a2_id}],
             ),
             CompiledSQL(
                 "UPDATE addresses SET user_id=:user_id WHERE addresses.id = "
@@ -701,14 +947,14 @@ class UOWTest(
             ),
             CompiledSQL(
                 "SELECT users.id AS users_id, users.name AS users_name "
-                "FROM users WHERE users.id = :param_1",
-                lambda ctx: [{"param_1": u1_id}],
+                "FROM users WHERE users.id = :pk_1",
+                lambda ctx: [{"pk_1": u1_id}],
             ),
         )
 
     def test_rollback(self):
         User, Address = self._user_address_fixture()
-        sess = create_session(
+        sess = fixture_session(
             expire_on_commit=False, autocommit=False, autoflush=True
         )
         u1 = User(name="jack")
@@ -737,7 +983,7 @@ class UOWTest(
             }
         )
 
-        sess = create_session(autoflush=True, autocommit=False)
+        sess = fixture_session(autoflush=True, autocommit=False)
         u = User(name="ed")
         u.addresses.extend(
             [Address(email_address=letter) for letter in "abcdef"]
@@ -745,15 +991,19 @@ class UOWTest(
         sess.add(u)
         sess.commit()
         eq_(
-            testing.db.scalar(
-                select([func.count("*")]).where(addresses.c.user_id == None)
-            ),  # noqa
+            sess.connection()
+            .execute(
+                select(func.count("*")).where(addresses.c.user_id == None)
+            )
+            .scalar(),  # noqa
             0,
         )
         eq_(
-            testing.db.scalar(
-                select([func.count("*")]).where(addresses.c.user_id != None)
-            ),  # noqa
+            sess.connection()
+            .execute(
+                select(func.count("*")).where(addresses.c.user_id != None)
+            )
+            .scalar(),  # noqa
             6,
         )
 
@@ -763,26 +1013,30 @@ class UOWTest(
 
         if expected:
             eq_(
-                testing.db.scalar(
-                    select([func.count("*")]).where(
+                sess.connection()
+                .execute(
+                    select(func.count("*")).where(
                         addresses.c.user_id == None
                     )  # noqa
-                ),
+                )
+                .scalar(),
                 6,
             )
             eq_(
-                testing.db.scalar(
-                    select([func.count("*")]).where(
+                sess.connection()
+                .execute(
+                    select(func.count("*")).where(
                         addresses.c.user_id != None
                     )  # noqa
-                ),
+                )
+                .scalar(),
                 0,
             )
         else:
             eq_(
-                testing.db.scalar(
-                    select([func.count("*")]).select_from(addresses)
-                ),
+                sess.connection()
+                .execute(select(func.count("*")).select_from(addresses))
+                .scalar(),
                 0,
             )
 
@@ -795,7 +1049,7 @@ class UOWTest(
     def test_self_referential(self):
         Node, nodes = self.classes.Node, self.tables.nodes
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             nodes,
             properties={
@@ -805,7 +1059,7 @@ class UOWTest(
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         n2, n3 = Node(), Node()
         n1 = Node(children=[n2, n3])
         sess.add(n1)
@@ -823,7 +1077,7 @@ class UOWTest(
             }
         )
 
-        sess = create_session(autoflush=True, autocommit=False)
+        sess = fixture_session(autoflush=True, autocommit=False)
         u = User(name="ed")
         u.addresses.extend(
             [Address(email_address=letter) for letter in "abcdef"]
@@ -844,7 +1098,7 @@ class UOWTest(
         User, Address = self._user_address_fixture(
             addresses_args={"backref": "user"}
         )
-        sess = create_session(autoflush=autoflush, autocommit=False)
+        sess = fixture_session(autoflush=autoflush, autocommit=False)
 
         u = User(name="buffy")
 
@@ -899,29 +1153,28 @@ class UOWTest(
             addresses_args={"backref": "user"}
         )
 
-        session = create_session()
-        user = User()
-        user.name = "joe"
-        user.fullname = "Joe User"
-        user.password = "Joe's secret"
-        address = Address()
-        address.email_address = "joe@joesdomain.example"
-        address.user = user
-        session.add(user)
-        session.flush()
-        session.expunge_all()
+        with fixture_session() as session:
+            user = User()
+            user.name = "joe"
+            user.fullname = "Joe User"
+            user.password = "Joe's secret"
+            address = Address()
+            address.email_address = "joe@joesdomain.example"
+            address.user = user
+            session.add(user)
+            session.commit()
 
         def query1():
-            session = create_session(testing.db)
+            session = fixture_session()
             user = session.query(User).first()
             return user.addresses.all()
 
         def query2():
-            session = create_session(testing.db)
+            session = fixture_session()
             return session.query(User).first().addresses.all()
 
         def query3():
-            session = create_session(testing.db)
+            session = fixture_session()
             return session.query(User).first().addresses.all()
 
         eq_(query1(), [Address(email_address="joe@joesdomain.example")])
@@ -948,7 +1201,7 @@ class HistoryTest(_DynamicFixture, _fixtures.FixtureTest):
 
         u1 = User(name="u1")
         a1 = Address(email_address="a1")
-        s = Session(autoflush=autoflush)
+        s = fixture_session(autoflush=autoflush)
         s.add(u1)
         s.flush()
         return u1, a1, s
@@ -958,7 +1211,7 @@ class HistoryTest(_DynamicFixture, _fixtures.FixtureTest):
 
         o1 = Order()
         i1 = Item(description="i1")
-        s = Session(autoflush=autoflush)
+        s = fixture_session(autoflush=autoflush)
         s.add(o1)
         s.flush()
         return o1, i1, s
@@ -969,17 +1222,25 @@ class HistoryTest(_DynamicFixture, _fixtures.FixtureTest):
         elif isinstance(obj, self.classes.Order):
             attrname = "items"
 
-        eq_(attributes.get_history(obj, attrname), compare)
+        sess = inspect(obj).session
 
-        if compare_passive is None:
-            compare_passive = compare
+        if sess:
+            sess.autoflush = False
+        try:
+            eq_(attributes.get_history(obj, attrname), compare)
 
-        eq_(
-            attributes.get_history(
-                obj, attrname, attributes.LOAD_AGAINST_COMMITTED
-            ),
-            compare_passive,
-        )
+            if compare_passive is None:
+                compare_passive = compare
+
+            eq_(
+                attributes.get_history(
+                    obj, attrname, attributes.LOAD_AGAINST_COMMITTED
+                ),
+                compare_passive,
+            )
+        finally:
+            if sess:
+                sess.autoflush = True
 
     def test_append_transient(self):
         u1, a1 = self._transient_fixture()

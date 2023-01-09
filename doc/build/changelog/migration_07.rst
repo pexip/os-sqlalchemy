@@ -204,7 +204,7 @@ scenarios. Highlights of this release include:
 
 A demonstration of callcount reduction including a sample
 benchmark script is at
-http://techspot.zzzeek.org/2010/12/12/a-tale-of-three-
+https://techspot.zzzeek.org/2010/12/12/a-tale-of-three-
 profiles/
 
 Composites Rewritten
@@ -224,7 +224,7 @@ regular attributes.  Composites can also act as a proxy for
 The major backwards-incompatible change of composites is
 that they no longer use the ``mutable=True`` system to
 detect in-place mutations.   Please use the `Mutation
-Tracking <http://www.sqlalchemy.org/docs/07/orm/extensions/m
+Tracking <https://www.sqlalchemy.org/docs/07/orm/extensions/m
 utable.html>`_ extension to establish in-place change events
 to existing composite usage.
 
@@ -244,7 +244,7 @@ with an explicit onclause is now:
 
 ::
 
-    query.join(SomeClass, SomeClass.id==ParentClass.some_id)
+    query.join(SomeClass, SomeClass.id == ParentClass.some_id)
 
 In 0.6, this usage was considered to be an error, because
 ``join()`` accepts multiple arguments corresponding to
@@ -273,7 +273,7 @@ unchanged:
     # ... etc
 
 `Querying with Joins
-<http://www.sqlalchemy.org/docs/07/orm/tutorial.html
+<https://www.sqlalchemy.org/docs/07/orm/tutorial.html
 #querying-with-joins>`_
 
 :ticket:`1923`
@@ -319,10 +319,10 @@ to the ``distinct`` keyword argument of ``select()``, the
 accept positional arguments which are rendered as DISTINCT
 ON when a PostgreSQL backend is used.
 
-`distinct() <http://www.sqlalchemy.org/docs/07/core/expressi
+`distinct() <https://www.sqlalchemy.org/docs/07/core/expressi
 on_api.html#sqlalchemy.sql.expression.Select.distinct>`_
 
-`Query.distinct() <http://www.sqlalchemy.org/docs/07/orm/que
+`Query.distinct() <https://www.sqlalchemy.org/docs/07/orm/que
 ry.html#sqlalchemy.orm.query.Query.distinct>`_
 
 :ticket:`1069`
@@ -336,10 +336,12 @@ to the creation of the index outside of the Table.  That is:
 
 ::
 
-    Table('mytable', metadata,
-            Column('id',Integer, primary_key=True),
-            Column('name', String(50), nullable=False),
-            Index('idx_name', 'name')
+    Table(
+        "mytable",
+        metadata,
+        Column("id", Integer, primary_key=True),
+        Column("name", String(50), nullable=False),
+        Index("idx_name", "name"),
     )
 
 The primary rationale here is for the benefit of declarative
@@ -348,16 +350,18 @@ The primary rationale here is for the benefit of declarative
 ::
 
     class HasNameMixin(object):
-        name = Column('name', String(50), nullable=False)
+        name = Column("name", String(50), nullable=False)
+
         @declared_attr
         def __table_args__(cls):
-            return (Index('name'), {})
+            return (Index("name"), {})
+
 
     class User(HasNameMixin, Base):
-        __tablename__ = 'user'
-        id = Column('id', Integer, primary_key=True)
+        __tablename__ = "user"
+        id = Column("id", Integer, primary_key=True)
 
-`Indexes <http://www.sqlalchemy.org/docs/07/core/schema.html
+`Indexes <https://www.sqlalchemy.org/docs/07/core/schema.html
 #indexes>`_
 
 Window Function SQL Construct
@@ -373,8 +377,7 @@ The best introduction to window functions is on PostgreSQL's
 site, where window functions have been supported since
 version 8.4:
 
-http://www.postgresql.org/docs/9.0/static/tutorial-
-window.html
+https://www.postgresql.org/docs/current/static/tutorial-window.html
 
 SQLAlchemy provides a simple construct typically invoked via
 an existing function clause, using the ``over()`` method,
@@ -386,17 +389,16 @@ tutorial:
 
     from sqlalchemy.sql import table, column, select, func
 
-    empsalary = table('empsalary',
-                    column('depname'),
-                    column('empno'),
-                    column('salary'))
+    empsalary = table("empsalary", column("depname"), column("empno"), column("salary"))
 
-    s = select([
+    s = select(
+        [
             empsalary,
-            func.avg(empsalary.c.salary).
-                  over(partition_by=empsalary.c.depname).
-                  label('avg')
-        ])
+            func.avg(empsalary.c.salary)
+            .over(partition_by=empsalary.c.depname)
+            .label("avg"),
+        ]
+    )
 
     print(s)
 
@@ -408,7 +410,7 @@ SQL:
     avg(empsalary.salary) OVER (PARTITION BY empsalary.depname) AS avg
     FROM empsalary
 
-`sqlalchemy.sql.expression.over <http://www.sqlalchemy.org/d
+`sqlalchemy.sql.expression.over <https://www.sqlalchemy.org/d
 ocs/07/core/expression_api.html#sqlalchemy.sql.expression.ov
 er>`_
 
@@ -427,7 +429,7 @@ The default isolation level is set using the
 Transaction isolation support is currently only supported by
 the PostgreSQL and SQLite backends.
 
-`execution_options() <http://www.sqlalchemy.org/docs/07/core
+`execution_options() <https://www.sqlalchemy.org/docs/07/core
 /connections.html#sqlalchemy.engine.base.Connection.executio
 n_options>`_
 
@@ -461,14 +463,14 @@ Dialects have been added:
 * a MySQLdb driver for the Drizzle database:
 
 
-  `Drizzle <http://www.sqlalchemy.org/docs/07/dialects/drizz
+  `Drizzle <https://www.sqlalchemy.org/docs/07/dialects/drizz
   le.html>`_
 
 * support for the pymysql DBAPI:
 
 
   `pymsql Notes
-  <http://www.sqlalchemy.org/docs/07/dialects/mysql.html
+  <https://www.sqlalchemy.org/docs/07/dialects/mysql.html
   #module-sqlalchemy.dialects.mysql.pymysql>`_
 
 * psycopg2 now works with Python 3
@@ -496,7 +498,7 @@ equivalent to:
 
 ::
 
-    query.from_self(func.count(literal_column('1'))).scalar()
+    query.from_self(func.count(literal_column("1"))).scalar()
 
 Previously, internal logic attempted to rewrite the columns
 clause of the query itself, and upon detection of a
@@ -535,6 +537,7 @@ be used:
 ::
 
     from sqlalchemy import func
+
     session.query(func.count(MyClass.id)).scalar()
 
 or for ``count(*)``:
@@ -542,7 +545,8 @@ or for ``count(*)``:
 ::
 
     from sqlalchemy import func, literal_column
-    session.query(func.count(literal_column('*'))).select_from(MyClass).scalar()
+
+    session.query(func.count(literal_column("*"))).select_from(MyClass).scalar()
 
 LIMIT/OFFSET clauses now use bind parameters
 --------------------------------------------
@@ -691,8 +695,11 @@ function, can be mapped.
     from sqlalchemy import select, func
     from sqlalchemy.orm import mapper
 
+
     class Subset(object):
         pass
+
+
     selectable = select(["x", "y", "z"]).select_from(func.some_db_function()).alias()
     mapper(Subset, selectable, primary_key=[selectable.c.x])
 
@@ -719,9 +726,9 @@ implement their own ``get_bind()`` method and arguments to
 use those custom arguments with both the ``execute()`` and
 ``connection()`` methods equally.
 
-`Session.connection <http://www.sqlalchemy.org/docs/07/orm/s
+`Session.connection <https://www.sqlalchemy.org/docs/07/orm/s
 ession.html#sqlalchemy.orm.session.Session.connection>`_
-`Session.execute <http://www.sqlalchemy.org/docs/07/orm/sess
+`Session.execute <https://www.sqlalchemy.org/docs/07/orm/sess
 ion.html#sqlalchemy.orm.session.Session.execute>`_
 
 :ticket:`1996`
@@ -774,14 +781,15 @@ mutations, the type object must be constructed with
 
 ::
 
-    Table('mytable', metadata,
+    Table(
+        "mytable",
+        metadata,
         # ....
-
-        Column('pickled_data', PickleType(mutable=True))
+        Column("pickled_data", PickleType(mutable=True)),
     )
 
 The ``mutable=True`` flag is being phased out, in favor of
-the new `Mutation Tracking <http://www.sqlalchemy.org/docs/0
+the new `Mutation Tracking <https://www.sqlalchemy.org/docs/0
 7/orm/extensions/mutable.html>`_ extension.  This extension
 provides a mechanism by which user-defined datatypes can
 provide change events back to the owning parent or parents.
@@ -808,14 +816,14 @@ Mutability detection of ``composite()`` requires the Mutation Tracking Extension
 
 So-called "composite" mapped attributes, those configured
 using the technique described at `Composite Column Types
-<http://www.sqlalchemy.org/docs/07/orm/mapper_config.html
+<https://www.sqlalchemy.org/docs/07/orm/mapper_config.html
 #composite-column-types>`_, have been re-implemented such
 that the ORM internals are no longer aware of them (leading
 to shorter and more efficient codepaths in critical
 sections).   While composite types are generally intended to
 be treated as immutable value objects, this was never
 enforced.   For applications that use composites with
-mutability, the `Mutation Tracking <http://www.sqlalchemy.or
+mutability, the `Mutation Tracking <https://www.sqlalchemy.or
 g/docs/07/orm/extensions/mutable.html>`_ extension offers a
 base class which establishes a mechanism for user-defined
 composite types to send change event messages back to the
@@ -851,7 +859,7 @@ connections are used.
 Note that this change **breaks temporary tables used across
 Session commits**, due to the way SQLite handles temp
 tables. See the note at
-http://www.sqlalchemy.org/docs/dialects/sqlite.html#using-
+https://www.sqlalchemy.org/docs/dialects/sqlite.html#using-
 temporary-tables-with-sqlite if temporary tables beyond the
 scope of one pool connection are desired.
 
@@ -1037,7 +1045,7 @@ key column ``id``, the following now produces an error:
 ::
 
 
-    foobar = foo.join(bar, foo.c.id==bar.c.foo_id)
+    foobar = foo.join(bar, foo.c.id == bar.c.foo_id)
     mapper(FooBar, foobar)
 
 This because the ``mapper()`` refuses to guess what column
@@ -1048,10 +1056,8 @@ explicit:
 ::
 
 
-    foobar = foo.join(bar, foo.c.id==bar.c.foo_id)
-    mapper(FooBar, foobar, properties={
-        'id':[foo.c.id, bar.c.id]
-    })
+    foobar = foo.join(bar, foo.c.id == bar.c.foo_id)
+    mapper(FooBar, foobar, properties={"id": [foo.c.id, bar.c.id]})
 
 :ticket:`1896`
 
@@ -1232,14 +1238,14 @@ backend:
 
 ::
 
-    select([mytable], distinct='ALL', prefixes=['HIGH_PRIORITY'])
+    select([mytable], distinct="ALL", prefixes=["HIGH_PRIORITY"])
 
 The ``prefixes`` keyword or ``prefix_with()`` method should
 be used for non-standard or unusual prefixes:
 
 ::
 
-    select([mytable]).prefix_with('HIGH_PRIORITY', 'ALL')
+    select([mytable]).prefix_with("HIGH_PRIORITY", "ALL")
 
 ``useexisting`` superseded by ``extend_existing`` and ``keep_existing``
 -----------------------------------------------------------------------

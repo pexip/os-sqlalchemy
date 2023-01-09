@@ -9,6 +9,7 @@ from sqlalchemy import CheckConstraint
 from sqlalchemy import CLOB
 from sqlalchemy import Column
 from sqlalchemy import Computed
+from sqlalchemy import create_engine
 from sqlalchemy import DATE
 from sqlalchemy import Date
 from sqlalchemy import DATETIME
@@ -40,6 +41,7 @@ from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import TEXT
+from sqlalchemy import text
 from sqlalchemy import TIME
 from sqlalchemy import Time
 from sqlalchemy import TIMESTAMP
@@ -49,33 +51,97 @@ from sqlalchemy import UnicodeText
 from sqlalchemy import VARCHAR
 from sqlalchemy.dialects.mysql import base as mysql
 from sqlalchemy.dialects.mysql import insert
+from sqlalchemy.dialects.mysql import match
 from sqlalchemy.sql import column
 from sqlalchemy.sql import table
+from sqlalchemy.sql.expression import bindparam
 from sqlalchemy.sql.expression import literal_column
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import mock
 
 
-class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
+class ReservedWordFixture(AssertsCompiledSQL):
+    @testing.fixture()
+    def mysql_mariadb_reserved_words(self):
+        table = Table(
+            "rw_table",
+            MetaData(),
+            Column("mysql_reserved", Integer),
+            Column("mdb_mysql_reserved", Integer),
+            Column("mdb_reserved", Integer),
+        )
+
+        expected_mysql = (
+            "SELECT rw_table.`mysql_reserved`, "
+            "rw_table.`mdb_mysql_reserved`, "
+            "rw_table.mdb_reserved FROM rw_table"
+        )
+        expected_mdb = (
+            "SELECT rw_table.mysql_reserved, "
+            "rw_table.`mdb_mysql_reserved`, "
+            "rw_table.`mdb_reserved` FROM rw_table"
+        )
+
+        from sqlalchemy.dialects.mysql import reserved_words
+
+        reserved_words.RESERVED_WORDS_MARIADB.add("mdb_reserved")
+        reserved_words.RESERVED_WORDS_MYSQL.add("mysql_reserved")
+        reserved_words.RESERVED_WORDS_MYSQL.add("mdb_mysql_reserved")
+        reserved_words.RESERVED_WORDS_MARIADB.add("mdb_mysql_reserved")
+
+        try:
+            yield table, expected_mysql, expected_mdb
+        finally:
+
+            reserved_words.RESERVED_WORDS_MARIADB.discard("mdb_reserved")
+            reserved_words.RESERVED_WORDS_MYSQL.discard("mysql_reserved")
+            reserved_words.RESERVED_WORDS_MYSQL.discard("mdb_mysql_reserved")
+            reserved_words.RESERVED_WORDS_MARIADB.discard("mdb_mysql_reserved")
+
+
+class CompileTest(ReservedWordFixture, fixtures.TestBase, AssertsCompiledSQL):
 
     __dialect__ = mysql.dialect()
 
-    def test_reserved_words(self):
-        table = Table(
-            "mysql_table",
-            MetaData(),
-            Column("col1", Integer),
-            Column("master_ssl_verify_server_cert", Integer),
-        )
-        x = select([table.c.col1, table.c.master_ssl_verify_server_cert])
+    @testing.combinations(
+        ("mariadb", True),
+        ("mysql", False),
+        (mysql.dialect(), False),
+        (mysql.dialect(is_mariadb=True), True),
+        (
+            create_engine(
+                "mysql+pymysql://", module=mock.Mock(paramstyle="format")
+            ).dialect,
+            False,
+        ),
+        (
+            create_engine(
+                "mariadb+pymysql://", module=mock.Mock(paramstyle="format")
+            ).dialect,
+            True,
+        ),
+        argnames="dialect, expect_mariadb",
+    )
+    def test_reserved_words_mysql_vs_mariadb(
+        self, dialect, expect_mariadb, mysql_mariadb_reserved_words
+    ):
+        """test #7167 - compiler level
 
+        We want to make sure that the "is mariadb" flag as well as the
+        correct identifier preparer are set up for dialects no matter how they
+        determine their "is_mariadb" flag.
+
+        """
+
+        table, expected_mysql, expected_mdb = mysql_mariadb_reserved_words
         self.assert_compile(
-            x,
-            "SELECT mysql_table.col1, "
-            "mysql_table.`master_ssl_verify_server_cert` FROM mysql_table",
+            select(table),
+            expected_mdb if expect_mariadb else expected_mysql,
+            dialect=dialect,
         )
 
     def test_create_index_simple(self):
@@ -97,6 +163,45 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             schema.CreateIndex(idx),
             "CREATE FULLTEXT INDEX test_idx1 " "ON testtbl (data(10))",
+        )
+
+    def test_create_index_with_text(self):
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", String(255)))
+        idx = Index("test_idx1", text("created_at desc"), _table=tbl)
+
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX test_idx1 ON testtbl (created_at desc)",
+        )
+
+    def test_create_index_with_arbitrary_column_element(self):
+        from sqlalchemy.ext.compiler import compiles
+
+        class _textual_index_element(sql.ColumnElement):
+            """alembic's wrapper"""
+
+            __visit_name__ = "_textual_idx_element"
+
+            def __init__(self, table, text):
+                self.table = table
+                self.text = text
+
+        @compiles(_textual_index_element)
+        def _render_textual_index_column(element, compiler, **kw):
+            return compiler.process(element.text, **kw)
+
+        m = MetaData()
+        tbl = Table("testtbl", m, Column("data", String(255)))
+        idx = Index(
+            "test_idx1",
+            _textual_index_element(tbl, text("created_at desc")),
+            _table=tbl,
+        )
+
+        self.assert_compile(
+            schema.CreateIndex(idx),
+            "CREATE INDEX test_idx1 ON testtbl (created_at desc)",
         )
 
     def test_create_index_with_parser(self):
@@ -150,13 +255,11 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         constraint_name = "constraint"
         constraint = CheckConstraint("data IS NOT NULL", name=constraint_name)
         Table(table_name, m, Column("data", String(255)), constraint)
-        dialect = mysql.dialect()
-        dialect.server_version_info = (10, 1, 1, "MariaDB")
         self.assert_compile(
             schema.DropConstraint(constraint),
             "ALTER TABLE %s DROP CONSTRAINT `%s`"
             % (table_name, constraint_name),
-            dialect=dialect,
+            dialect="mariadb",
         )
 
     def test_create_index_with_length_quoted(self):
@@ -377,51 +480,24 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect=mysql.dialect(),
         )
 
-    def test_match(self):
-        matchtable = table("matchtable", column("title", String))
-        self.assert_compile(
-            matchtable.c.title.match("somstr"),
-            "MATCH (matchtable.title) AGAINST (%s IN BOOLEAN MODE)",
-        )
-
-    def test_match_compile_kw(self):
-        expr = literal("x").match(literal("y"))
-        self.assert_compile(
-            expr,
-            "MATCH ('x') AGAINST ('y' IN BOOLEAN MODE)",
-            literal_binds=True,
-        )
-
     def test_concat_compile_kw(self):
         expr = literal("x", type_=String) + literal("y", type_=String)
         self.assert_compile(expr, "concat('x', 'y')", literal_binds=True)
 
     def test_mariadb_for_update(self):
-        dialect = mysql.dialect()
-        dialect.server_version_info = (10, 1, 1, "MariaDB")
-
         table1 = table(
             "mytable", column("myid"), column("name"), column("description")
         )
 
         self.assert_compile(
-            table1.select(table1.c.myid == 7).with_for_update(of=table1),
+            table1.select()
+            .where(table1.c.myid == 7)
+            .with_for_update(of=table1),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE",
-            dialect=dialect,
+            dialect="mariadb",
         )
-
-        with testing.expect_warnings("SKIP LOCKED ignored on non-supporting"):
-            self.assert_compile(
-                table1.select(table1.c.myid == 7).with_for_update(
-                    skip_locked=True
-                ),
-                "SELECT mytable.myid, mytable.name, mytable.description "
-                "FROM mytable WHERE mytable.myid = %s "
-                "FOR UPDATE",
-                dialect=dialect,
-            )
 
     def test_delete_extra_froms(self):
         t1 = table("t1", column("c1"))
@@ -473,12 +549,13 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
         dialect = self.__dialect__
 
         def gen(distinct=None, prefixes=None):
-            kw = {}
-            if distinct is not None:
-                kw["distinct"] = distinct
+            stmt = select(column("q"))
+            if distinct:
+                stmt = stmt.distinct()
             if prefixes is not None:
-                kw["prefixes"] = prefixes
-            return str(select([column("q")], **kw).compile(dialect=dialect))
+                stmt = stmt.prefix_with(*prefixes)
+
+            return str(stmt.compile(dialect=dialect))
 
         eq_(gen(None), "SELECT q")
         eq_(gen(True), "SELECT DISTINCT q")
@@ -515,18 +592,18 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
         t = sql.table("t", sql.column("col1"), sql.column("col2"))
 
         self.assert_compile(
-            select([t]).limit(10).offset(20),
+            select(t).limit(10).offset(20),
             "SELECT t.col1, t.col2 FROM t  LIMIT %s, %s",
             {"param_1": 20, "param_2": 10},
         )
         self.assert_compile(
-            select([t]).limit(10),
+            select(t).limit(10),
             "SELECT t.col1, t.col2 FROM t  LIMIT %s",
             {"param_1": 10},
         )
 
         self.assert_compile(
-            select([t]).offset(10),
+            select(t).offset(10),
             "SELECT t.col1, t.col2 FROM t  LIMIT %s, 18446744073709551615",
             {"param_1": 10},
         )
@@ -562,18 +639,25 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
         t = sql.table("t", sql.column("col1"), sql.column("col2"))
 
         self.assert_compile(
-            t.update(values={"col1": 123}), "UPDATE t SET col1=%s"
+            t.update().values({"col1": 123}), "UPDATE t SET col1=%s"
         )
         self.assert_compile(
-            t.update(values={"col1": 123}, mysql_limit=5),
+            t.update()
+            .values({"col1": 123})
+            .with_dialect_options(mysql_limit=5),
             "UPDATE t SET col1=%s LIMIT 5",
         )
         self.assert_compile(
-            t.update(values={"col1": 123}, mysql_limit=None),
+            t.update()
+            .values({"col1": 123})
+            .with_dialect_options(mysql_limit=None),
             "UPDATE t SET col1=%s",
         )
         self.assert_compile(
-            t.update(t.c.col2 == 456, values={"col1": 123}, mysql_limit=1),
+            t.update()
+            .where(t.c.col2 == 456)
+            .values({"col1": 123})
+            .with_dialect_options(mysql_limit=1),
             "UPDATE t SET col1=%s WHERE t.col2 = %s LIMIT 1",
         )
 
@@ -661,6 +745,7 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_cast_type_decorator(self):
         class MyInteger(sqltypes.TypeDecorator):
             impl = Integer
+            cache_ok = True
 
         type_ = MyInteger()
         t = sql.table("t", sql.column("col"))
@@ -678,20 +763,10 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_unsupported_cast_literal_bind(self):
         expr = cast(column("foo", Integer) + 5, Float)
 
-        with expect_warnings("Datatype FLOAT does not support CAST on MySQL;"):
+        with expect_warnings(
+            "Datatype FLOAT does not support CAST on MySQL/MariaDb;"
+        ):
             self.assert_compile(expr, "(foo + 5)", literal_binds=True)
-
-        dialect = mysql.MySQLDialect()
-        dialect.server_version_info = (3, 9, 8)
-        with expect_warnings("Current MySQL version does not support CAST"):
-            eq_(
-                str(
-                    expr.compile(
-                        dialect=dialect, compile_kwargs={"literal_binds": True}
-                    )
-                ),
-                "(foo + 5)",
-            )
 
     m = mysql
 
@@ -714,34 +789,37 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_unsupported_casts(self, type_, expected):
 
         t = sql.table("t", sql.column("col"))
-        with expect_warnings("Datatype .* does not support CAST on MySQL;"):
+        with expect_warnings(
+            "Datatype .* does not support CAST on MySQL/MariaDb;"
+        ):
             self.assert_compile(cast(t.c.col, type_), expected)
 
-    def test_no_cast_pre_4(self):
-        self.assert_compile(
-            cast(Column("foo", Integer), String), "CAST(foo AS CHAR)"
-        )
+    @testing.combinations(
+        (m.FLOAT, "CAST(t.col AS FLOAT)"),
+        (Float, "CAST(t.col AS FLOAT)"),
+        (FLOAT, "CAST(t.col AS FLOAT)"),
+        (m.DOUBLE, "CAST(t.col AS DOUBLE)"),
+        (m.FLOAT, "CAST(t.col AS FLOAT)"),
+        argnames="type_,expected",
+    )
+    @testing.combinations(True, False, argnames="maria_db")
+    def test_float_cast(self, type_, expected, maria_db):
+
         dialect = mysql.dialect()
-        dialect.server_version_info = (3, 2, 3)
-        with expect_warnings("Current MySQL version does not support CAST;"):
-            self.assert_compile(
-                cast(Column("foo", Integer), String), "foo", dialect=dialect
-            )
+        if maria_db:
+            dialect.is_mariadb = maria_db
+            dialect.server_version_info = (10, 4, 5)
+        else:
+            dialect.server_version_info = (8, 0, 17)
+        t = sql.table("t", sql.column("col"))
+        self.assert_compile(cast(t.c.col, type_), expected, dialect=dialect)
 
     def test_cast_grouped_expression_non_castable(self):
-        with expect_warnings("Datatype FLOAT does not support CAST on MySQL;"):
+        with expect_warnings(
+            "Datatype FLOAT does not support CAST on MySQL/MariaDb;"
+        ):
             self.assert_compile(
                 cast(sql.column("x") + sql.column("y"), Float), "(x + y)"
-            )
-
-    def test_cast_grouped_expression_pre_4(self):
-        dialect = mysql.dialect()
-        dialect.server_version_info = (3, 2, 3)
-        with expect_warnings("Current MySQL version does not support CAST;"):
-            self.assert_compile(
-                cast(sql.column("x") + sql.column("y"), Integer),
-                "(x + y)",
-                dialect=dialect,
             )
 
     def test_extract(self):
@@ -749,13 +827,13 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
 
         for field in "year", "month", "day":
             self.assert_compile(
-                select([extract(field, t.c.col1)]),
+                select(extract(field, t.c.col1)),
                 "SELECT EXTRACT(%s FROM t.col1) AS anon_1 FROM t" % field,
             )
 
-        # millsecondS to millisecond
+        # milliseconds to millisecond
         self.assert_compile(
-            select([extract("milliseconds", t.c.col1)]),
+            select(extract("milliseconds", t.c.col1)),
             "SELECT EXTRACT(millisecond FROM t.col1) AS anon_1 FROM t",
         )
 
@@ -966,7 +1044,7 @@ class SQLTest(fixtures.TestBase, AssertsCompiledSQL):
 class InsertOnDuplicateTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = mysql.dialect()
 
-    def setup(self):
+    def setup_test(self):
         self.table = Table(
             "foos",
             MetaData(),
@@ -974,6 +1052,22 @@ class InsertOnDuplicateTest(fixtures.TestBase, AssertsCompiledSQL):
             Column("bar", String(10)),
             Column("baz", String(10)),
         )
+
+    def test_no_call_twice(self):
+        stmt = insert(self.table).values(
+            [{"id": 1, "bar": "ab"}, {"id": 2, "bar": "b"}]
+        )
+        stmt = stmt.on_duplicate_key_update(
+            bar=stmt.inserted.bar, baz=stmt.inserted.baz
+        )
+        with testing.expect_raises_message(
+            exc.InvalidRequestError,
+            "This Insert construct already has an "
+            "ON DUPLICATE KEY clause present",
+        ):
+            stmt = stmt.on_duplicate_key_update(
+                bar=stmt.inserted.bar, baz=stmt.inserted.baz
+            )
 
     def test_from_values(self):
         stmt = insert(self.table).values(
@@ -1016,12 +1110,12 @@ class InsertOnDuplicateTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         stmt = stmt.on_duplicate_key_update(
             bar=func.coalesce(stmt.inserted.bar),
-            baz=stmt.inserted.baz + "some literal",
+            baz=stmt.inserted.baz + "some literal" + stmt.inserted.bar,
         )
         expected_sql = (
             "INSERT INTO foos (id, bar) VALUES (%s, %s), (%s, %s) ON "
             "DUPLICATE KEY UPDATE bar = coalesce(VALUES(bar)), "
-            "baz = (concat(VALUES(baz), %s))"
+            "baz = (concat(concat(VALUES(baz), %s), VALUES(bar)))"
         )
         self.assert_compile(
             stmt,
@@ -1033,4 +1127,303 @@ class InsertOnDuplicateTest(fixtures.TestBase, AssertsCompiledSQL):
                 "bar_m1": "b",
                 "baz_1": "some literal",
             },
+        )
+
+
+class RegexpCommon(testing.AssertsCompiledSQL):
+    def setup_test(self):
+        self.table = table(
+            "mytable", column("myid", Integer), column("name", String)
+        )
+
+    def test_regexp_match(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern"),
+            "mytable.myid REGEXP %s",
+            checkpositional=("pattern",),
+        )
+
+    def test_regexp_match_column(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match(self.table.c.name),
+            "mytable.myid REGEXP mytable.name",
+            checkpositional=(),
+        )
+
+    def test_regexp_match_str(self):
+        self.assert_compile(
+            literal("string").regexp_match(self.table.c.name),
+            "%s REGEXP mytable.name",
+            checkpositional=("string",),
+        )
+
+    def test_not_regexp_match(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match("pattern"),
+            "mytable.myid NOT REGEXP %s",
+            checkpositional=("pattern",),
+        )
+
+    def test_not_regexp_match_column(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match(self.table.c.name),
+            "mytable.myid NOT REGEXP mytable.name",
+            checkpositional=(),
+        )
+
+    def test_not_regexp_match_str(self):
+        self.assert_compile(
+            ~literal("string").regexp_match(self.table.c.name),
+            "%s NOT REGEXP mytable.name",
+            checkpositional=("string",),
+        )
+
+    def test_regexp_replace(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace("pattern", "replacement"),
+            "REGEXP_REPLACE(mytable.myid, %s, %s)",
+            checkpositional=("pattern", "replacement"),
+        )
+
+    def test_regexp_replace_column(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace("pattern", self.table.c.name),
+            "REGEXP_REPLACE(mytable.myid, %s, mytable.name)",
+            checkpositional=("pattern",),
+        )
+
+    def test_regexp_replace_column2(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(self.table.c.name, "replacement"),
+            "REGEXP_REPLACE(mytable.myid, mytable.name, %s)",
+            checkpositional=("replacement",),
+        )
+
+    def test_regexp_replace_string(self):
+        self.assert_compile(
+            literal("string").regexp_replace("pattern", self.table.c.name),
+            "REGEXP_REPLACE(%s, %s, mytable.name)",
+            checkpositional=("string", "pattern"),
+        )
+
+
+class RegexpTestMySql(fixtures.TestBase, RegexpCommon):
+    __dialect__ = "mysql"
+
+    def test_regexp_match_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "REGEXP_LIKE(mytable.myid, %s, %s)",
+            checkpositional=("pattern", "ig"),
+        )
+
+    def test_not_regexp_match_flags(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "NOT REGEXP_LIKE(mytable.myid, %s, %s)",
+            checkpositional=("pattern", "ig"),
+        )
+
+    def test_regexp_replace_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(
+                "pattern", "replacement", flags="ig"
+            ),
+            "REGEXP_REPLACE(mytable.myid, %s, %s, %s)",
+            checkpositional=("pattern", "replacement", "ig"),
+        )
+
+
+class RegexpTestMariaDb(fixtures.TestBase, RegexpCommon):
+    __dialect__ = "mariadb"
+
+    def test_regexp_match_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "mytable.myid REGEXP CONCAT('(?', %s, ')', %s)",
+            checkpositional=("ig", "pattern"),
+        )
+
+    def test_not_regexp_match_flags(self):
+        self.assert_compile(
+            ~self.table.c.myid.regexp_match("pattern", flags="ig"),
+            "mytable.myid NOT REGEXP CONCAT('(?', %s, ')', %s)",
+            checkpositional=("ig", "pattern"),
+        )
+
+    def test_regexp_replace_flags(self):
+        self.assert_compile(
+            self.table.c.myid.regexp_replace(
+                "pattern", "replacement", flags="ig"
+            ),
+            "REGEXP_REPLACE(mytable.myid, CONCAT('(?', %s, ')', %s), %s)",
+            checkpositional=("ig", "pattern", "replacement"),
+        )
+
+
+class MatchExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
+
+    __dialect__ = mysql.dialect()
+
+    match_table = table(
+        "user",
+        column("firstname", String),
+        column("lastname", String),
+    )
+
+    @testing.combinations(
+        (
+            lambda title: title.match("somstr", mysql_boolean_mode=False),
+            "MATCH (matchtable.title) AGAINST (%s)",
+        ),
+        (
+            lambda title: title.match(
+                "somstr",
+                mysql_boolean_mode=False,
+                mysql_natural_language=True,
+            ),
+            "MATCH (matchtable.title) AGAINST (%s IN NATURAL LANGUAGE MODE)",
+        ),
+        (
+            lambda title: title.match(
+                "somstr",
+                mysql_boolean_mode=False,
+                mysql_query_expansion=True,
+            ),
+            "MATCH (matchtable.title) AGAINST (%s WITH QUERY EXPANSION)",
+        ),
+        (
+            lambda title: title.match(
+                "somstr",
+                mysql_boolean_mode=False,
+                mysql_natural_language=True,
+                mysql_query_expansion=True,
+            ),
+            "MATCH (matchtable.title) AGAINST "
+            "(%s IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION)",
+        ),
+    )
+    def test_match_expression_single_col(self, case, expected):
+        matchtable = table("matchtable", column("title", String))
+        title = matchtable.c.title
+
+        expr = case(title)
+        self.assert_compile(expr, expected)
+
+    @testing.combinations(
+        (
+            lambda expr: expr,
+            "MATCH (user.firstname, user.lastname) AGAINST (%s)",
+        ),
+        (
+            lambda expr: expr.in_boolean_mode(),
+            "MATCH (user.firstname, user.lastname) AGAINST "
+            "(%s IN BOOLEAN MODE)",
+        ),
+        (
+            lambda expr: expr.in_natural_language_mode(),
+            "MATCH (user.firstname, user.lastname) AGAINST "
+            "(%s IN NATURAL LANGUAGE MODE)",
+        ),
+        (
+            lambda expr: expr.with_query_expansion(),
+            "MATCH (user.firstname, user.lastname) AGAINST "
+            "(%s WITH QUERY EXPANSION)",
+        ),
+        (
+            lambda expr: (
+                expr.in_natural_language_mode().with_query_expansion()
+            ),
+            "MATCH (user.firstname, user.lastname) AGAINST "
+            "(%s IN NATURAL LANGUAGE MODE WITH QUERY EXPANSION)",
+        ),
+    )
+    def test_match_expression_multiple_cols(self, case, expected):
+        firstname = self.match_table.c.firstname
+        lastname = self.match_table.c.lastname
+
+        expr = match(firstname, lastname, against="Firstname Lastname")
+
+        expr = case(expr)
+        self.assert_compile(expr, expected)
+
+    @testing.combinations(
+        (bindparam("against_expr"), "%s"),
+        (
+            column("some col") + column("some other col"),
+            "`some col` + `some other col`",
+        ),
+        (column("some col") + bindparam("against_expr"), "`some col` + %s"),
+    )
+    def test_match_expression_against_expr(self, against, expected_segment):
+        firstname = self.match_table.c.firstname
+        lastname = self.match_table.c.lastname
+
+        expr = match(firstname, lastname, against=against)
+
+        expected = (
+            "MATCH (user.firstname, user.lastname) AGAINST (%s)"
+            % expected_segment
+        )
+        self.assert_compile(expr, expected)
+
+    def test_cols_required(self):
+        assert_raises_message(
+            exc.ArgumentError,
+            "columns are required",
+            match,
+            against="Firstname Lastname",
+        )
+
+    @testing.combinations(
+        (True, False, True), (True, True, False), (True, True, True)
+    )
+    def test_invalid_combinations(
+        self, boolean_mode, natural_language, query_expansion
+    ):
+        firstname = self.match_table.c.firstname
+        lastname = self.match_table.c.lastname
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "columns are required",
+            match,
+            against="Firstname Lastname",
+        )
+
+        expr = match(
+            firstname,
+            lastname,
+            against="Firstname Lastname",
+            in_boolean_mode=boolean_mode,
+            in_natural_language_mode=natural_language,
+            with_query_expansion=query_expansion,
+        )
+        msg = (
+            "Invalid MySQL match flags: "
+            "in_boolean_mode=%s, "
+            "in_natural_language_mode=%s, "
+            "with_query_expansion=%s"
+        ) % (boolean_mode, natural_language, query_expansion)
+
+        assert_raises_message(
+            exc.CompileError,
+            msg,
+            expr.compile,
+            dialect=self.__dialect__,
+        )
+
+    def test_match_operator(self):
+        matchtable = table("matchtable", column("title", String))
+        self.assert_compile(
+            matchtable.c.title.match("somstr"),
+            "MATCH (matchtable.title) AGAINST (%s IN BOOLEAN MODE)",
+        )
+
+    def test_literal_binds(self):
+        expr = literal("x").match(literal("y"))
+        self.assert_compile(
+            expr,
+            "MATCH ('x') AGAINST ('y' IN BOOLEAN MODE)",
+            literal_binds=True,
         )

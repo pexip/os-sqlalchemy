@@ -10,8 +10,8 @@ It's helpful to know the states which an instance can have within a session:
 
 * **Transient** - an instance that's not in a session, and is not saved to the
   database; i.e. it has no database identity. The only relationship such an
-  object has to the ORM is that its class has a ``mapper()`` associated with
-  it.
+  object has to the ORM is that its class has a :class:`_orm.Mapper` associated
+  with it.
 
 * **Pending** - when you :meth:`~.Session.add` a transient
   instance, it becomes pending. It still wasn't actually flushed to the
@@ -50,7 +50,19 @@ Getting the Current State of an Object
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The actual state of any mapped object can be viewed at any time using
-the :func:`_sa.inspect` system::
+the :func:`_sa.inspect` function on a mapped instance; this function will
+return the corresponding :class:`.InstanceState` object which manages the
+internal ORM state for the object.  :class:`.InstanceState` provides, among
+other accessors, boolean attributes indicating the persistence state
+of the object, including:
+
+* :attr:`.InstanceState.transient`
+* :attr:`.InstanceState.pending`
+* :attr:`.InstanceState.persistent`
+* :attr:`.InstanceState.deleted`
+* :attr:`.InstanceState.detached`
+
+E.g.::
 
   >>> from sqlalchemy import inspect
   >>> insp = inspect(my_object)
@@ -59,15 +71,8 @@ the :func:`_sa.inspect` system::
 
 .. seealso::
 
-    :attr:`.InstanceState.transient`
-
-    :attr:`.InstanceState.pending`
-
-    :attr:`.InstanceState.persistent`
-
-    :attr:`.InstanceState.deleted`
-
-    :attr:`.InstanceState.detached`
+  :ref:`orm_mapper_inspection_instancestate` - further examples of
+  :class:`.InstanceState`
 
 .. _session_attributes:
 
@@ -137,25 +142,25 @@ the :term:`persistent` state is as follows::
 
     from sqlalchemy import event
 
+
     def strong_reference_session(session):
         @event.listens_for(session, "pending_to_persistent")
         @event.listens_for(session, "deleted_to_persistent")
         @event.listens_for(session, "detached_to_persistent")
         @event.listens_for(session, "loaded_as_persistent")
         def strong_ref_object(sess, instance):
-            if 'refs' not in sess.info:
-                sess.info['refs'] = refs = set()
+            if "refs" not in sess.info:
+                sess.info["refs"] = refs = set()
             else:
-                refs = sess.info['refs']
+                refs = sess.info["refs"]
 
             refs.add(instance)
-
 
         @event.listens_for(session, "persistent_to_detached")
         @event.listens_for(session, "persistent_to_deleted")
         @event.listens_for(session, "persistent_to_transient")
         def deref_object(sess, instance):
-            sess.info['refs'].discard(instance)
+            sess.info["refs"].discard(instance)
 
 Above, we intercept the :meth:`.SessionEvents.pending_to_persistent`,
 :meth:`.SessionEvents.detached_to_persistent`,
@@ -181,7 +186,6 @@ It may also be called for any :class:`.sessionmaker`::
     maker = sessionmaker()
     strong_reference_session(maker)
 
-
 .. _unitofwork_merging:
 
 Merging
@@ -204,11 +208,14 @@ When given an instance, it follows these steps:
   key if not located locally.
 * If the given instance has no primary key, or if no instance can be found
   with the primary key given, a new instance is created.
-* The state of the given instance is then copied onto the located/newly
-  created instance.    For attributes which are present on the source
-  instance, the value is transferred to the target instance.  For mapped
-  attributes which aren't present on the source, the attribute is
-  expired on the target instance, discarding its existing value.
+* The state of the given instance is then copied onto the located/newly created
+  instance. For attribute values which are present on the source instance, the
+  value is transferred to the target instance. For attribute values that aren't
+  present on the source instance, the corresponding attribute on the target
+  instance is :term:`expired` from memory, which discards any locally
+  present value from the target instance for that attribute, but no
+  direct modification is made to the database-persisted value for that
+  attribute.
 
   If the ``load=True`` flag is left at its default,
   this copy process emits events and will load the target object's
@@ -282,22 +289,23 @@ some unexpected state regarding the object being passed to :meth:`~.Session.merg
 Lets use the canonical example of the User and Address objects::
 
     class User(Base):
-        __tablename__ = 'user'
+        __tablename__ = "user"
 
         id = Column(Integer, primary_key=True)
         name = Column(String(50), nullable=False)
         addresses = relationship("Address", backref="user")
 
+
     class Address(Base):
-        __tablename__ = 'address'
+        __tablename__ = "address"
 
         id = Column(Integer, primary_key=True)
         email_address = Column(String(50), nullable=False)
-        user_id = Column(Integer, ForeignKey('user.id'), nullable=False)
+        user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
 
 Assume a ``User`` object with one ``Address``, already persistent::
 
-    >>> u1 = User(name='ed', addresses=[Address(email_address='ed@ed.com')])
+    >>> u1 = User(name="ed", addresses=[Address(email_address="ed@ed.com")])
     >>> session.add(u1)
     >>> session.commit()
 
@@ -349,27 +357,15 @@ Further detail on cascade operation is at :ref:`unitofwork_cascades`.
 Another example of unexpected state::
 
     >>> a1 = Address(id=existing_a1.id, user_id=u1.id)
-    >>> assert a1.user is None
-    True
+    >>> a1.user = None
     >>> a1 = session.merge(a1)
     >>> session.commit()
     sqlalchemy.exc.IntegrityError: (IntegrityError) address.user_id
     may not be NULL
 
-Here, we accessed a1.user, which returned its default value
-of ``None``, which as a result of this access, has been placed in the ``__dict__`` of
-our object ``a1``.  Normally, this operation creates no change event,
-so the ``user_id`` attribute takes precedence during a
-flush.  But when we merge the ``Address`` object into the session, the operation
-is equivalent to::
-
-    >>> existing_a1.id = existing_a1.id
-    >>> existing_a1.user_id = u1.id
-    >>> existing_a1.user = None
-
-Where above, both ``user_id`` and ``user`` are assigned to, and change events
-are emitted for both.  The ``user`` association
-takes precedence, and None is applied to ``user_id``, causing a failure.
+Above, the assignment of ``user`` takes precedence over the foreign key
+assignment of ``user_id``, with the end result that ``None`` is applied
+to ``user_id``, causing a failure.
 
 Most :meth:`~.Session.merge` issues can be examined by first checking -
 is the object prematurely in the session ?
@@ -423,7 +419,7 @@ When we talk about expiration of data we are usually talking about an object
 that is in the :term:`persistent` state.   For example, if we load an object
 as follows::
 
-    user = session.query(User).filter_by(name='user1').first()
+    user = session.query(User).filter_by(name="user1").first()
 
 The above ``User`` object is persistent, and has a series of attributes
 present; if we were to look inside its ``__dict__``, we'd see that state
@@ -485,7 +481,7 @@ Another key behavior of both :meth:`~.Session.expire` and :meth:`~.Session.refre
 is that all un-flushed changes on an object are discarded.  That is,
 if we were to modify an attribute on our ``User``::
 
-    >>> user.name = 'user2'
+    >>> user.name = "user2"
 
 but then we call :meth:`~.Session.expire` without first calling :meth:`~.Session.flush`,
 our pending value of ``'user2'`` is discarded::
@@ -504,7 +500,7 @@ it can also be passed a list of string attribute names, referring to specific
 attributes to be marked as expired::
 
     # expire only attributes obj1.attr1, obj1.attr2
-    session.expire(obj1, ['attr1', 'attr2'])
+    session.expire(obj1, ["attr1", "attr2"])
 
 The :meth:`.Session.expire_all` method allows us to essentially call
 :meth:`.Session.expire` on all objects contained within the :class:`.Session`
@@ -523,15 +519,27 @@ but unlike :meth:`~.Session.expire`, expects at least one name to
 be that of a column-mapped attribute::
 
     # reload obj1.attr1, obj1.attr2
-    session.refresh(obj1, ['attr1', 'attr2'])
+    session.refresh(obj1, ["attr1", "attr2"])
 
-An alternative method of refreshing which is often more flexible is to
-use the :meth:`_orm.Query.populate_existing` method of :class:`_orm.Query`.
-With this option, all of the ORM objects returned by the :class:`_orm.Query`
-will be refreshed with the contents of what was loaded in the SELECT::
+.. tip::
 
-    for user in session.query(User).populate_existing().filter(User.name.in_(['a', 'b', 'c'])):
-        print(user)  # will be refreshed for those columns that came back from the query
+    An alternative method of refreshing which is often more flexible is to
+    use the :ref:`orm_queryguide_populate_existing` feature of the ORM,
+    available for :term:`2.0 style` queries with :func:`_sql.select` as well
+    as from the :meth:`_orm.Query.populate_existing` method of :class:`_orm.Query`
+    within :term:`1.x style` queries.  Using this execution option,
+    all of the ORM objects returned in the result set of the statement
+    will be refreshed with data from the database::
+
+        stmt = (
+            select(User).
+            execution_options(populate_existing=True).
+            where((User.name.in_(['a', 'b', 'c']))
+        )
+        for user in session.execute(stmt).scalars():
+            print(user)  # will be refreshed for those columns that came back from the query
+
+    See :ref:`orm_queryguide_populate_existing` for further detail.
 
 
 What Actually Loads
@@ -640,12 +648,13 @@ transactions, an understanding of the isolation behavior in effect is essential.
 
     :meth:`.Session.refresh`
 
-    :meth:`_orm.Query.populate_existing` - :class:`_orm.Query` method that refreshes
+    :ref:`orm_queryguide_populate_existing` - allows any ORM query
+    to refresh objects as they would be loaded normally, refreshing
     all matching objects in the identity map against the results of a
     SELECT statement.
 
     :term:`isolation` - glossary explanation of isolation which includes links
     to Wikipedia.
 
-    `The SQLAlchemy Session In-Depth <http://techspot.zzzeek.org/2012/11/14/pycon-canada-the-sqlalchemy-session-in-depth/>`_ - a video + slides with an in-depth discussion of the object
+    `The SQLAlchemy Session In-Depth <https://techspot.zzzeek.org/2012/11/14/pycon-canada-the-sqlalchemy-session-in-depth/>`_ - a video + slides with an in-depth discussion of the object
     lifecycle including the role of data expiration.

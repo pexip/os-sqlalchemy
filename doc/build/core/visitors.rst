@@ -23,3 +23,5 @@ as well as when building out custom SQL expressions using the
 
 .. automodule:: sqlalchemy.sql.visitors
    :members:
+   :private-members:
+

@@ -5,15 +5,17 @@ import decimal
 from sqlalchemy import ARRAY
 from sqlalchemy import bindparam
 from sqlalchemy import Boolean
+from sqlalchemy import cast
 from sqlalchemy import Column
 from sqlalchemy import Date
 from sqlalchemy import DateTime
 from sqlalchemy import extract
+from sqlalchemy import Float
 from sqlalchemy import func
 from sqlalchemy import Integer
+from sqlalchemy import JSON
 from sqlalchemy import literal
 from sqlalchemy import literal_column
-from sqlalchemy import MetaData
 from sqlalchemy import Numeric
 from sqlalchemy import select
 from sqlalchemy import Sequence
@@ -21,15 +23,20 @@ from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy import types as sqltypes
+from sqlalchemy import Text
+from sqlalchemy import true
 from sqlalchemy import util
 from sqlalchemy.dialects import mysql
 from sqlalchemy.dialects import oracle
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects import sqlite
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import column
 from sqlalchemy.sql import functions
+from sqlalchemy.sql import LABEL_STYLE_TABLENAME_PLUS_COL
+from sqlalchemy.sql import operators
 from sqlalchemy.sql import quoted_name
+from sqlalchemy.sql import sqltypes
 from sqlalchemy.sql import table
 from sqlalchemy.sql.compiler import BIND_TEMPLATES
 from sqlalchemy.sql.functions import FunctionElement
@@ -37,7 +44,6 @@ from sqlalchemy.sql.functions import GenericFunction
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
-from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
@@ -56,15 +62,11 @@ table1 = table(
 class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
-    def setup(self):
+    def setup_test(self):
         self._registry = deepcopy(functions._registry)
-        self._case_sensitive_registry = deepcopy(
-            functions._case_sensitive_registry
-        )
 
-    def teardown(self):
+    def teardown_test(self):
         functions._registry = self._registry
-        functions._case_sensitive_registry = self._case_sensitive_registry
 
     def test_compile(self):
         for dialect in all_dialects(exclude=("sybase",)):
@@ -84,6 +86,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
             # test generic function compile
             class fake_func(GenericFunction):
+                inherit_cache = True
                 __return_type__ = sqltypes.Integer
 
                 def __init__(self, arg, **kwargs):
@@ -98,11 +101,56 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             )
 
             functions._registry["_default"].pop("fake_func")
-            functions._case_sensitive_registry["_default"].pop("fake_func")
+
+    @testing.combinations(
+        (operators.in_op, [1, 2, 3], "myfunc() IN (1, 2, 3)"),
+        (operators.add, 5, "myfunc() + 5"),
+        (operators.eq, column("q"), "myfunc() = q"),
+        argnames="op,other,expected",
+    )
+    @testing.combinations((True,), (False,), argnames="use_custom")
+    def test_operators_custom(self, op, other, expected, use_custom):
+        if use_custom:
+
+            class MyFunc(FunctionElement):
+                inherit_cache = True
+                name = "myfunc"
+                type = Integer()
+
+            @compiles(MyFunc)
+            def visit_myfunc(element, compiler, **kw):
+                return "myfunc(%s)" % compiler.process(element.clauses, **kw)
+
+            expr = op(MyFunc(), other)
+        else:
+            expr = op(func.myfunc(type_=Integer), other)
+
+        self.assert_compile(
+            select(1).where(expr),
+            "SELECT 1 WHERE %s" % (expected,),
+            literal_binds=True,
+            render_postcompile=True,
+            dialect="default_enhanced",
+        )
 
     def test_use_labels(self):
         self.assert_compile(
-            select([func.foo()], use_labels=True), "SELECT foo() AS foo_1"
+            select(func.foo()).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
+            "SELECT foo() AS foo_1",
+        )
+
+    def test_use_labels_function_element(self):
+        class max_(FunctionElement):
+            name = "max"
+            inherit_cache = True
+
+        @compiles(max_)
+        def visit_max(element, compiler, **kw):
+            return "max(%s)" % compiler.process(element.clauses, **kw)
+
+        self.assert_compile(
+            select(max_(5, 6)).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
+            "SELECT max(:max_2, :max_3) AS max_1",
         )
 
     def test_underscores(self):
@@ -179,7 +227,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             column("q"),
         )
 
-        stmt = select([func.sum(t.c.value)])
+        stmt = select(func.sum(t.c.value))
 
         self.assert_compile(
             stmt.group_by(func.cube(t.c.x, t.c.y)),
@@ -211,9 +259,16 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         fn = func.coalesce("x", "y")._annotate({"foo": "bar"})
         self.assert_compile(fn, "coalesce(:coalesce_1, :coalesce_2)")
 
+    def test_annotation_dialect_specific(self):
+        fn = func.current_date()
+        self.assert_compile(fn, "CURRENT_DATE", dialect="sqlite")
+
+        fn = fn._annotate({"foo": "bar"})
+        self.assert_compile(fn, "CURRENT_DATE", dialect="sqlite")
+
     def test_custom_default_namespace(self):
         class myfunc(GenericFunction):
-            pass
+            inherit_cache = True
 
         assert isinstance(func.myfunc(), myfunc)
         self.assert_compile(func.myfunc(), "myfunc()")
@@ -221,6 +276,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_custom_type(self):
         class myfunc(GenericFunction):
             type = DateTime
+            inherit_cache = True
 
         assert isinstance(func.myfunc().type, DateTime)
         self.assert_compile(func.myfunc(), "myfunc()")
@@ -228,12 +284,14 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_custom_legacy_type(self):
         # in case someone was using this system
         class myfunc(GenericFunction):
+            inherit_cache = True
             __return_type__ = DateTime
 
         assert isinstance(func.myfunc().type, DateTime)
 
     def test_case_sensitive(self):
         class MYFUNC(GenericFunction):
+            inherit_cache = True
             type = DateTime
 
         assert isinstance(func.MYFUNC().type, DateTime)
@@ -264,8 +322,32 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         assert isinstance(func.RePlAcEaBlE_fUnC().type, DateTime)
         assert isinstance(func.replaceable_func().type, DateTime)
 
+    def test_replace_function_case_insensitive(self):
+        class replaceable_func(GenericFunction):
+            type = Integer
+            identifier = "replaceable_func"
+
+        assert isinstance(func.Replaceable_Func().type, Integer)
+        assert isinstance(func.RePlAcEaBlE_fUnC().type, Integer)
+        assert isinstance(func.replaceable_func().type, Integer)
+
+        with expect_warnings(
+            "The GenericFunction 'replaceable_func' is already registered and "
+            "is going to be overridden.",
+            regex=False,
+        ):
+
+            class replaceable_func_override(GenericFunction):
+                type = DateTime
+                identifier = "REPLACEABLE_Func"
+
+        assert isinstance(func.Replaceable_Func().type, DateTime)
+        assert isinstance(func.RePlAcEaBlE_fUnC().type, DateTime)
+        assert isinstance(func.replaceable_func().type, DateTime)
+
     def test_custom_w_custom_name(self):
         class myfunc(GenericFunction):
+            inherit_cache = True
             name = "notmyfunc"
 
         assert isinstance(func.notmyfunc(), myfunc)
@@ -273,6 +355,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_custom_w_quoted_name(self):
         class myfunc(GenericFunction):
+            inherit_cache = True
             name = quoted_name("NotMyFunc", quote=True)
             identifier = "myfunc"
 
@@ -280,6 +363,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_custom_w_quoted_name_no_identifier(self):
         class myfunc(GenericFunction):
+            inherit_cache = True
             name = quoted_name("NotMyFunc", quote=True)
 
         # note this requires that the quoted name be lower cased for
@@ -289,6 +373,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_custom_package_namespace(self):
         def cls1(pk_name):
             class myfunc(GenericFunction):
+                inherit_cache = True
                 package = pk_name
 
             return myfunc
@@ -302,6 +387,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_custom_name(self):
         class MyFunction(GenericFunction):
             name = "my_func"
+            inherit_cache = True
 
             def __init__(self, *args):
                 args = args + (3,)
@@ -317,20 +403,24 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             package = "geo"
             name = "BufferOne"
             identifier = "buf1"
+            inherit_cache = True
 
         class GeoBuffer2(GenericFunction):
             type = Integer
             name = "BufferTwo"
             identifier = "buf2"
+            inherit_cache = True
 
         class BufferThree(GenericFunction):
             type = Integer
             identifier = "buf3"
+            inherit_cache = True
 
         class GeoBufferFour(GenericFunction):
             type = Integer
             name = "BufferFour"
             identifier = "Buf4"
+            inherit_cache = True
 
         self.assert_compile(func.geo.buf1(), "BufferOne()")
         self.assert_compile(func.buf2(), "BufferTwo()")
@@ -343,7 +433,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_custom_args(self):
         class myfunc(GenericFunction):
-            pass
+            inherit_cache = True
 
         self.assert_compile(
             myfunc(1, 2, 3), "myfunc(:myfunc_1, :myfunc_2, :myfunc_3)"
@@ -409,20 +499,20 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
         # test it in a SELECT
         self.assert_compile(
-            select([func.count(table1.c.myid)]),
+            select(func.count(table1.c.myid)),
             "SELECT count(mytable.myid) AS count_1 FROM mytable",
         )
 
         # test a "dotted" function name
         self.assert_compile(
-            select([func.foo.bar.lala(table1.c.myid)]),
+            select(func.foo.bar.lala(table1.c.myid)),
             "SELECT foo.bar.lala(mytable.myid) AS lala_1 FROM mytable",
         )
 
         # test the bind parameter name with a "dotted" function name is
         # only the name (limits the length of the bind param name)
         self.assert_compile(
-            select([func.foo.bar.lala(12)]),
+            select(func.foo.bar.lala(12)),
             "SELECT foo.bar.lala(:lala_2) AS lala_1",
         )
 
@@ -435,9 +525,12 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "my_func(:my_func_1, :my_func_2, NULL, :my_func_3)",
         )
 
+        f1 = func.my_func(1, 2, None, 3)
+        f1._generate_cache_key()
+
         # test pickling
         self.assert_compile(
-            util.pickle.loads(util.pickle.dumps(func.my_func(1, 2, None, 3))),
+            util.pickle.loads(util.pickle.dumps(f1)),
             "my_func(:my_func_1, :my_func_2, NULL, :my_func_3)",
         )
 
@@ -464,27 +557,52 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             "row_number() OVER ()",
         )
 
+    def test_pickle_within_group(self):
+        """test #6520"""
+
+        # TODO: the test/sql package lacks a comprehensive pickling
+        # test suite even though there are __reduce__ methods in several
+        # places in sql/elements.py.   likely as part of
+        # test/sql/test_compare.py might be a place this can happen but
+        # this still relies upon a strategy for table metadata as we have
+        # in serializer.
+
+        f1 = func.percentile_cont(literal(1)).within_group()
+
+        self.assert_compile(
+            util.pickle.loads(util.pickle.dumps(f1)),
+            "percentile_cont(:param_1) WITHIN GROUP (ORDER BY )",
+        )
+
+        f1 = func.percentile_cont(literal(1)).within_group(
+            column("q"), column("p").desc()
+        )
+        self.assert_compile(
+            util.pickle.loads(util.pickle.dumps(f1)),
+            "percentile_cont(:param_1) WITHIN GROUP (ORDER BY q, p DESC)",
+        )
+
     def test_functions_with_cols(self):
         users = table(
             "users", column("id"), column("name"), column("fullname")
         )
-        calculate = select(
-            [column("q"), column("z"), column("r")],
-            from_obj=[
+        calculate = (
+            select(column("q"), column("z"), column("r"))
+            .select_from(
                 func.calculate(bindparam("x", None), bindparam("y", None))
-            ],
+            )
+            .subquery()
         )
 
         self.assert_compile(
-            select([users], users.c.id > calculate.c.z),
+            select(users).where(users.c.id > calculate.c.z),
             "SELECT users.id, users.name, users.fullname "
             "FROM users, (SELECT q, z, r "
-            "FROM calculate(:x, :y)) "
-            "WHERE users.id > z",
+            "FROM calculate(:x, :y)) AS anon_1 "
+            "WHERE users.id > anon_1.z",
         )
 
-        s = select(
-            [users],
+        s = select(users).where(
             users.c.id.between(
                 calculate.alias("c1").unique_params(x=17, y=45).c.z,
                 calculate.alias("c2").unique_params(x=5, y=12).c.z,
@@ -519,21 +637,21 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_select_method_two(self):
         expr = func.rows("foo")
         self.assert_compile(
-            select(["*"]).select_from(expr.select()),
-            "SELECT * FROM (SELECT rows(:rows_2) AS rows_1)",
+            select("*").select_from(expr.select().subquery()),
+            "SELECT * FROM (SELECT rows(:rows_2) AS rows_1) AS anon_1",
         )
 
     def test_select_method_three(self):
         expr = func.rows("foo")
         self.assert_compile(
-            select([column("foo")]).select_from(expr),
+            select(column("foo")).select_from(expr),
             "SELECT foo FROM rows(:rows_1)",
         )
 
     def test_alias_method_two(self):
         expr = func.rows("foo")
         self.assert_compile(
-            select(["*"]).select_from(expr.alias("bar")),
+            select("*").select_from(expr.alias("bar")),
             "SELECT * FROM rows(:rows_1) AS bar",
         )
 
@@ -545,7 +663,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         # testing here that the expression exports its column
         # list in a way that at least doesn't break.
         self.assert_compile(
-            select([expr]), "SELECT bar.rows_1 FROM rows(:rows_2) AS bar"
+            select(expr), "SELECT bar.rows_1 FROM rows(:rows_2) AS bar"
         )
 
     def test_alias_method_columns_two(self):
@@ -582,11 +700,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_funcfilter_label(self):
         self.assert_compile(
             select(
-                [
-                    func.count(1)
-                    .filter(table1.c.description != None)  # noqa
-                    .label("foo")
-                ]
+                func.count(1)
+                .filter(table1.c.description != None)  # noqa
+                .label("foo")
             ),
             "SELECT count(:count_1) FILTER (WHERE mytable.description "
             "IS NOT NULL) AS foo FROM mytable",
@@ -597,11 +713,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         # from func:
         self.assert_compile(
             select(
-                [
-                    func.max(table1.c.name).filter(
-                        literal_column("description") != None  # noqa
-                    )
-                ]
+                func.max(table1.c.name).filter(
+                    literal_column("description") != None  # noqa
+                )
             ),
             "SELECT max(mytable.name) FILTER (WHERE description "
             "IS NOT NULL) AS anon_1 FROM mytable",
@@ -610,7 +724,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_funcfilter_fromobj_fromcriterion(self):
         # from criterion:
         self.assert_compile(
-            select([func.count(1).filter(table1.c.name == "name")]),
+            select(func.count(1).filter(table1.c.name == "name")),
             "SELECT count(:count_1) FILTER (WHERE mytable.name = :name_1) "
             "AS anon_1 FROM mytable",
         )
@@ -619,11 +733,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         # test chaining:
         self.assert_compile(
             select(
-                [
-                    func.count(1)
-                    .filter(table1.c.name == "name")
-                    .filter(table1.c.description == "description")
-                ]
+                func.count(1)
+                .filter(table1.c.name == "name")
+                .filter(table1.c.description == "description")
             ),
             "SELECT count(:count_1) FILTER (WHERE "
             "mytable.name = :name_1 AND mytable.description = :description_1) "
@@ -634,11 +746,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         # test filtered windowing:
         self.assert_compile(
             select(
-                [
-                    func.rank()
-                    .filter(table1.c.name > "foo")
-                    .over(order_by=table1.c.name)
-                ]
+                func.rank()
+                .filter(table1.c.name > "foo")
+                .over(order_by=table1.c.name)
             ),
             "SELECT rank() FILTER (WHERE mytable.name > :name_1) "
             "OVER (ORDER BY mytable.name) AS anon_1 FROM mytable",
@@ -647,11 +757,9 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_funcfilter_windowing_orderby_partitionby(self):
         self.assert_compile(
             select(
-                [
-                    func.rank()
-                    .filter(table1.c.name > "foo")
-                    .over(order_by=table1.c.name, partition_by=["description"])
-                ]
+                func.rank()
+                .filter(table1.c.name > "foo")
+                .over(order_by=table1.c.name, partition_by=["description"])
             ),
             "SELECT rank() FILTER (WHERE mytable.name > :name_1) "
             "OVER (PARTITION BY mytable.description ORDER BY mytable.name) "
@@ -661,26 +769,38 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_funcfilter_windowing_range(self):
         self.assert_compile(
             select(
-                [
-                    func.rank()
-                    .filter(table1.c.name > "foo")
-                    .over(range_=(1, 5), partition_by=["description"])
-                ]
+                func.rank()
+                .filter(table1.c.name > "foo")
+                .over(range_=(1, 5), partition_by=["description"])
             ),
             "SELECT rank() FILTER (WHERE mytable.name > :name_1) "
             "OVER (PARTITION BY mytable.description RANGE BETWEEN :param_1 "
             "FOLLOWING AND :param_2 FOLLOWING) "
             "AS anon_1 FROM mytable",
+            checkparams={"name_1": "foo", "param_1": 1, "param_2": 5},
+        )
+
+    def test_funcfilter_windowing_range_positional(self):
+        self.assert_compile(
+            select(
+                func.rank()
+                .filter(table1.c.name > "foo")
+                .over(range_=(1, 5), partition_by=["description"])
+            ),
+            "SELECT rank() FILTER (WHERE mytable.name > ?) "
+            "OVER (PARTITION BY mytable.description RANGE BETWEEN ? "
+            "FOLLOWING AND ? FOLLOWING) "
+            "AS anon_1 FROM mytable",
+            checkpositional=("foo", 1, 5),
+            dialect="default_qmark",
         )
 
     def test_funcfilter_windowing_rows(self):
         self.assert_compile(
             select(
-                [
-                    func.rank()
-                    .filter(table1.c.name > "foo")
-                    .over(rows=(1, 5), partition_by=["description"])
-                ]
+                func.rank()
+                .filter(table1.c.name > "foo")
+                .over(rows=(1, 5), partition_by=["description"])
             ),
             "SELECT rank() FILTER (WHERE mytable.name > :name_1) "
             "OVER (PARTITION BY mytable.description ROWS BETWEEN :param_1 "
@@ -690,10 +810,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_funcfilter_within_group(self):
         stmt = select(
-            [
-                table1.c.myid,
-                func.percentile_cont(0.5).within_group(table1.c.name),
-            ]
+            table1.c.myid,
+            func.percentile_cont(0.5).within_group(table1.c.name),
         )
         self.assert_compile(
             stmt,
@@ -706,12 +824,10 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_funcfilter_within_group_multi(self):
         stmt = select(
-            [
-                table1.c.myid,
-                func.percentile_cont(0.5).within_group(
-                    table1.c.name, table1.c.description
-                ),
-            ]
+            table1.c.myid,
+            func.percentile_cont(0.5).within_group(
+                table1.c.name, table1.c.description
+            ),
         )
         self.assert_compile(
             stmt,
@@ -724,10 +840,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_funcfilter_within_group_desc(self):
         stmt = select(
-            [
-                table1.c.myid,
-                func.percentile_cont(0.5).within_group(table1.c.name.desc()),
-            ]
+            table1.c.myid,
+            func.percentile_cont(0.5).within_group(table1.c.name.desc()),
         )
         self.assert_compile(
             stmt,
@@ -740,12 +854,10 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_funcfilter_within_group_w_over(self):
         stmt = select(
-            [
-                table1.c.myid,
-                func.percentile_cont(0.5)
-                .within_group(table1.c.name.desc())
-                .over(partition_by=table1.c.description),
-            ]
+            table1.c.myid,
+            func.percentile_cont(0.5)
+            .within_group(table1.c.name.desc())
+            .over(partition_by=table1.c.description),
         )
         self.assert_compile(
             stmt,
@@ -757,6 +869,8 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_incorrect_none_type(self):
+        from sqlalchemy.sql.expression import FunctionElement
+
         class MissingType(FunctionElement):
             name = "mt"
             type = None
@@ -765,7 +879,7 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
             TypeError,
             "Object None associated with '.type' attribute is "
             "not a TypeEngine class or object",
-            MissingType().compile,
+            lambda: column("x", MissingType()) == 5,
         )
 
     def test_as_comparison(self):
@@ -924,32 +1038,29 @@ class ReturnTypeTest(AssertsCompiledSQL, fixtures.TestBase):
 class ExecuteTest(fixtures.TestBase):
     __backend__ = True
 
-    @engines.close_first
-    def tearDown(self):
+    def teardown_test(self):
         pass
 
-    def test_conn_execute(self):
+    def test_conn_execute(self, connection):
         from sqlalchemy.sql.expression import FunctionElement
         from sqlalchemy.ext.compiler import compiles
 
         class myfunc(FunctionElement):
+            inherit_cache = True
             type = Date()
 
         @compiles(myfunc)
         def compile_(elem, compiler, **kw):
             return compiler.process(func.current_date())
 
-        conn = testing.db.connect()
-        try:
-            x = conn.execute(func.current_date()).scalar()
-            y = conn.execute(func.current_date().select()).scalar()
-            z = conn.scalar(func.current_date())
-            q = conn.scalar(myfunc())
-        finally:
-            conn.close()
+        x = connection.execute(func.current_date()).scalar()
+        y = connection.execute(func.current_date().select()).scalar()
+        z = connection.scalar(func.current_date())
+        q = connection.scalar(myfunc())
+
         assert (x == y == z == q) is True
 
-    def test_exec_options(self):
+    def test_exec_options(self, connection):
         f = func.foo()
         eq_(f._execution_options, {})
 
@@ -958,13 +1069,12 @@ class ExecuteTest(fixtures.TestBase):
         s = f.select()
         eq_(s._execution_options, {"foo": "bar"})
 
-        ret = testing.db.execute(func.now().execution_options(foo="bar"))
+        ret = connection.execute(func.now().execution_options(foo="bar"))
         eq_(ret.context.execution_options, {"foo": "bar"})
         ret.close()
 
-    @engines.close_first
     @testing.provide_metadata
-    def test_update(self):
+    def test_update(self, connection):
         """
         Tests sending functions and SQL expressions to the VALUES and SET
         clauses of INSERT/UPDATE instances, and that column-level defaults
@@ -995,71 +1105,80 @@ class ExecuteTest(fixtures.TestBase):
             Column("value", Integer, default=7),
             Column("stuff", String(20), onupdate="thisisstuff"),
         )
-        meta.create_all()
-        t.insert(values=dict(value=func.length("one"))).execute()
-        assert t.select().execute().first()["value"] == 3
-        t.update(values=dict(value=func.length("asfda"))).execute()
-        assert t.select().execute().first()["value"] == 5
+        meta.create_all(connection)
+        connection.execute(t.insert().values(value=func.length("one")))
+        eq_(connection.execute(t.select()).first().value, 3)
+        connection.execute(t.update().values(value=func.length("asfda")))
+        eq_(connection.execute(t.select()).first().value, 5)
 
-        r = t.insert(values=dict(value=func.length("sfsaafsda"))).execute()
+        r = connection.execute(
+            t.insert().values(value=func.length("sfsaafsda"))
+        )
         id_ = r.inserted_primary_key[0]
-        assert t.select(t.c.id == id_).execute().first()["value"] == 9
-        t.update(values={t.c.value: func.length("asdf")}).execute()
-        assert t.select().execute().first()["value"] == 4
-        t2.insert().execute()
-        t2.insert(values=dict(value=func.length("one"))).execute()
-        t2.insert(values=dict(value=func.length("asfda") + -19)).execute(
-            stuff="hi"
+        eq_(
+            connection.execute(t.select().where(t.c.id == id_)).first().value,
+            9,
+        )
+        connection.execute(t.update().values({t.c.value: func.length("asdf")}))
+        eq_(connection.execute(t.select()).first().value, 4)
+        connection.execute(t2.insert())
+        connection.execute(t2.insert().values(value=func.length("one")))
+        connection.execute(
+            t2.insert().values(value=func.length("asfda") + -19),
+            dict(stuff="hi"),
         )
 
-        res = exec_sorted(select([t2.c.value, t2.c.stuff]))
+        res = sorted(connection.execute(select(t2.c.value, t2.c.stuff)))
         eq_(res, [(-14, "hi"), (3, None), (7, None)])
 
-        t2.update(values=dict(value=func.length("asdsafasd"))).execute(
-            stuff="some stuff"
+        connection.execute(
+            t2.update().values(value=func.length("asdsafasd")),
+            dict(stuff="some stuff"),
         )
-        assert select([t2.c.value, t2.c.stuff]).execute().fetchall() == [
-            (9, "some stuff"),
-            (9, "some stuff"),
-            (9, "some stuff"),
-        ]
-
-        t2.delete().execute()
-
-        t2.insert(values=dict(value=func.length("one") + 8)).execute()
-        assert t2.select().execute().first()["value"] == 11
-
-        t2.update(values=dict(value=func.length("asfda"))).execute()
         eq_(
-            select([t2.c.value, t2.c.stuff]).execute().first(),
+            connection.execute(select(t2.c.value, t2.c.stuff)).fetchall(),
+            [(9, "some stuff"), (9, "some stuff"), (9, "some stuff")],
+        )
+
+        connection.execute(t2.delete())
+
+        connection.execute(t2.insert().values(value=func.length("one") + 8))
+        eq_(connection.execute(t2.select()).first().value, 11)
+
+        connection.execute(t2.update().values(value=func.length("asfda")))
+        eq_(
+            connection.execute(select(t2.c.value, t2.c.stuff)).first(),
             (5, "thisisstuff"),
         )
 
-        t2.update(
-            values={t2.c.value: func.length("asfdaasdf"), t2.c.stuff: "foo"}
-        ).execute()
+        connection.execute(
+            t2.update().values(
+                {t2.c.value: func.length("asfdaasdf"), t2.c.stuff: "foo"}
+            )
+        )
 
-        eq_(select([t2.c.value, t2.c.stuff]).execute().first(), (9, "foo"))
+        eq_(
+            connection.execute(select(t2.c.value, t2.c.stuff)).first(),
+            (9, "foo"),
+        )
 
     @testing.fails_on_everything_except("postgresql")
-    def test_as_from(self):
+    def test_as_from(self, connection):
         # TODO: shouldn't this work on oracle too ?
-        x = func.current_date(bind=testing.db).execute().scalar()
-        y = func.current_date(bind=testing.db).select().execute().scalar()
-        z = func.current_date(bind=testing.db).scalar()
-        w = select(
-            ["*"], from_obj=[func.current_date(bind=testing.db)]
-        ).scalar()
+        x = connection.execute(func.current_date()).scalar()
+        y = connection.execute(func.current_date().select()).scalar()
+        z = connection.scalar(func.current_date())
+        w = connection.scalar(select("*").select_from(func.current_date()))
 
         assert x == y == z == w
 
-    def test_extract_bind(self):
+    def test_extract_bind(self, connection):
         """Basic common denominator execution tests for extract()"""
 
         date = datetime.date(2010, 5, 1)
 
         def execute(field):
-            return testing.db.execute(select([extract(field, date)])).scalar()
+            return connection.execute(select(extract(field, date))).scalar()
 
         assert execute("year") == 2010
         assert execute("month") == 5
@@ -1071,43 +1190,34 @@ class ExecuteTest(fixtures.TestBase):
         assert execute("month") == 5
         assert execute("day") == 1
 
-    def test_extract_expression(self):
-        meta = MetaData(testing.db)
+    @testing.provide_metadata
+    def test_extract_expression(self, connection):
+        meta = self.metadata
         table = Table("test", meta, Column("dt", DateTime), Column("d", Date))
-        meta.create_all()
-        try:
-            table.insert().execute(
-                {
-                    "dt": datetime.datetime(2010, 5, 1, 12, 11, 10),
-                    "d": datetime.date(2010, 5, 1),
-                }
-            )
-            rs = select(
-                [extract("year", table.c.dt), extract("month", table.c.d)]
-            ).execute()
-            row = rs.first()
-            assert row[0] == 2010
-            assert row[1] == 5
-            rs.close()
-        finally:
-            meta.drop_all()
-
-
-def exec_sorted(statement, *args, **kw):
-    """Executes a statement and returns a sorted list plain tuple rows."""
-
-    return sorted(
-        [tuple(row) for row in statement.execute(*args, **kw).fetchall()]
-    )
+        meta.create_all(connection)
+        connection.execute(
+            table.insert(),
+            {
+                "dt": datetime.datetime(2010, 5, 1, 12, 11, 10),
+                "d": datetime.date(2010, 5, 1),
+            },
+        )
+        rs = connection.execute(
+            select(extract("year", table.c.dt), extract("month", table.c.d))
+        )
+        row = rs.first()
+        assert row[0] == 2010
+        assert row[1] == 5
+        rs.close()
 
 
 class RegisterTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
-    def setup(self):
+    def setup_test(self):
         self._registry = deepcopy(functions._registry)
 
-    def teardown(self):
+    def teardown_test(self):
         functions._registry = self._registry
 
     def test_GenericFunction_is_registered(self):
@@ -1139,3 +1249,540 @@ class RegisterTest(fixtures.TestBase, AssertsCompiledSQL):
 
         assert "not_registered_func" not in functions._registry["_default"]
         assert isinstance(func.not_registered_func_child().type, Integer)
+
+
+class TableValuedCompileTest(fixtures.TestBase, AssertsCompiledSQL):
+    """test the full set of functions as FROM developed in [ticket:3566]"""
+
+    __dialect__ = "default_enhanced"
+
+    def test_aggregate_scalar_over_table_valued(self):
+        test = table("test", column("id"), column("data", JSON))
+
+        elem = (
+            func.json_array_elements_text(test.c.data["key"])
+            .table_valued("value")
+            .alias("elem")
+        )
+
+        maxdepth = select(func.max(cast(elem.c.value, Float))).label(
+            "maxdepth"
+        )
+
+        stmt = select(test.c.id.label("test_id"), maxdepth).order_by(
+            "maxdepth"
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT test.id AS test_id, "
+            "(SELECT max(CAST(elem.value AS FLOAT)) AS max_1 "
+            "FROM json_array_elements_text(test.data[:data_1]) AS elem) "
+            "AS maxdepth "
+            "FROM test ORDER BY maxdepth",
+        )
+
+    def test_scalar_table_valued(self):
+        assets_transactions = table(
+            "assets_transactions", column("id"), column("contents", JSON)
+        )
+
+        stmt = select(
+            assets_transactions.c.id,
+            func.jsonb_each(
+                assets_transactions.c.contents
+            ).scalar_table_valued("key"),
+            func.jsonb_each(
+                assets_transactions.c.contents
+            ).scalar_table_valued("value"),
+        )
+        self.assert_compile(
+            stmt,
+            "SELECT assets_transactions.id, "
+            "(jsonb_each(assets_transactions.contents)).key, "
+            "(jsonb_each(assets_transactions.contents)).value "
+            "FROM assets_transactions",
+        )
+
+    def test_table_valued_one(self):
+        assets_transactions = table(
+            "assets_transactions", column("id"), column("contents", JSON)
+        )
+
+        jb = func.jsonb_each(assets_transactions.c.contents).table_valued(
+            "key", "value"
+        )
+
+        stmt = select(assets_transactions.c.id, jb.c.key, jb.c.value).join(
+            jb, true()
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT assets_transactions.id, anon_1.key, anon_1.value "
+            "FROM assets_transactions "
+            "JOIN jsonb_each(assets_transactions.contents) AS anon_1 ON true",
+        )
+
+    def test_table_valued_two(self):
+        """
+        SELECT vi.id, vv.value
+        FROM value_ids() AS vi JOIN values AS vv ON vv.id = vi.id
+
+        """
+
+        values = table(
+            "values",
+            column(
+                "id",
+                Integer,
+            ),
+            column("value", String),
+        )
+        vi = func.value_ids().table_valued(column("id", Integer)).alias("vi")
+        vv = values.alias("vv")
+
+        stmt = select(vi.c.id, vv.c.value).select_from(  # noqa
+            vi.join(vv, vv.c.id == vi.c.id)
+        )
+        self.assert_compile(
+            stmt,
+            "SELECT vi.id, vv.value FROM value_ids() AS vi "
+            "JOIN values AS vv ON vv.id = vi.id",
+        )
+
+    def test_table_as_table_valued(self):
+        a = table(
+            "a",
+            column("id"),
+            column("x"),
+            column("y"),
+        )
+
+        stmt = select(func.row_to_json(a.table_valued()))
+
+        self.assert_compile(
+            stmt, "SELECT row_to_json(a) AS row_to_json_1 FROM a"
+        )
+
+    def test_subquery_as_table_valued(self):
+        """
+        SELECT row_to_json(anon_1) AS row_to_json_1
+        FROM (SELECT a.id AS id, a.x AS x, a.y AS y
+        FROM a) AS anon_1
+
+        """
+
+        a = table(
+            "a",
+            column("id"),
+            column("x"),
+            column("y"),
+        )
+
+        stmt = select(func.row_to_json(a.select().subquery().table_valued()))
+
+        self.assert_compile(
+            stmt,
+            "SELECT row_to_json(anon_1) AS row_to_json_1 FROM "
+            "(SELECT a.id AS id, a.x AS x, a.y AS y FROM a) AS anon_1",
+        )
+
+    def test_scalar_subquery(self):
+
+        a = table(
+            "a",
+            column("id"),
+            column("x"),
+            column("y"),
+        )
+
+        stmt = select(func.row_to_json(a.select().scalar_subquery()))
+
+        self.assert_compile(
+            stmt,
+            "SELECT row_to_json((SELECT a.id, a.x, a.y FROM a)) "
+            "AS row_to_json_1",
+        )
+
+    def test_named_with_ordinality(self):
+        """
+        SELECT a.id AS a_id, a.refs AS a_refs,
+        unnested.unnested AS unnested_unnested,
+        unnested.ordinality AS unnested_ordinality,
+        b.id AS b_id, b.ref AS b_ref
+        FROM a LEFT OUTER JOIN unnest(a.refs)
+        `WITH ORDINALITY AS unnested(unnested, ordinality) ON true
+        LEFT OUTER JOIN b ON unnested.unnested = b.ref
+
+        """  # noqa: 501
+
+        a = table("a", column("id"), column("refs"))
+        b = table("b", column("id"), column("ref"))
+
+        unnested = (
+            func.unnest(a.c.refs)
+            .table_valued("unnested", with_ordinality="ordinality")
+            .render_derived()
+            .alias("unnested")
+        )
+
+        stmt = (
+            select(
+                a.c.id, a.c.refs, unnested.c.unnested, unnested.c.ordinality
+            )
+            .outerjoin(unnested, true())
+            .outerjoin(
+                b,
+                unnested.c.unnested == b.c.ref,
+            )
+        )
+        self.assert_compile(
+            stmt,
+            "SELECT a.id, a.refs, unnested.unnested, unnested.ordinality "
+            "FROM a "
+            "LEFT OUTER JOIN unnest(a.refs) "
+            "WITH ORDINALITY AS unnested(unnested, ordinality) ON true "
+            "LEFT OUTER JOIN b ON unnested.unnested = b.ref",
+        )
+
+    def test_render_derived_maintains_tableval_type(self):
+        fn = func.json_something()
+
+        tv = fn.table_valued(column("x", String))
+
+        eq_(tv.column.type, testing.eq_type_affinity(sqltypes.TableValueType))
+        eq_(tv.column.type._elements[0].type, testing.eq_type_affinity(String))
+
+        tv = tv.render_derived()
+        eq_(tv.column.type, testing.eq_type_affinity(sqltypes.TableValueType))
+        eq_(tv.column.type._elements[0].type, testing.eq_type_affinity(String))
+
+    def test_alias_maintains_tableval_type(self):
+        fn = func.json_something()
+
+        tv = fn.table_valued(column("x", String))
+
+        eq_(tv.column.type, testing.eq_type_affinity(sqltypes.TableValueType))
+        eq_(tv.column.type._elements[0].type, testing.eq_type_affinity(String))
+
+        tv = tv.alias()
+        eq_(tv.column.type, testing.eq_type_affinity(sqltypes.TableValueType))
+        eq_(tv.column.type._elements[0].type, testing.eq_type_affinity(String))
+
+    def test_star_with_ordinality(self):
+        """
+        SELECT * FROM generate_series(4,1,-1) WITH ORDINALITY;
+        """
+
+        stmt = select("*").select_from(  # noqa
+            func.generate_series(4, 1, -1).table_valued(
+                with_ordinality="ordinality"
+            )
+        )
+        self.assert_compile(
+            stmt,
+            "SELECT * FROM generate_series"
+            "(:generate_series_1, :generate_series_2, :generate_series_3) "
+            "WITH ORDINALITY AS anon_1",
+        )
+
+    def test_json_object_keys_with_ordinality(self):
+        """
+        SELECT * FROM json_object_keys('{"a1":"1","a2":"2","a3":"3"}')
+        WITH ORDINALITY AS t(keys, n);
+        """
+        stmt = select("*").select_from(
+            func.json_object_keys(
+                literal({"a1": "1", "a2": "2", "a3": "3"}, type_=JSON)
+            )
+            .table_valued("keys", with_ordinality="n")
+            .render_derived()
+            .alias("t")
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT * FROM json_object_keys(:param_1) "
+            "WITH ORDINALITY AS t(keys, n)",
+        )
+
+    def test_alias_column(self):
+        """
+
+        ::
+
+            SELECT x, y
+            FROM
+                generate_series(:generate_series_1, :generate_series_2) AS x,
+                generate_series(:generate_series_3, :generate_series_4) AS y
+
+        """
+
+        x = func.generate_series(1, 2).alias("x")
+        y = func.generate_series(3, 4).alias("y")
+        stmt = select(x.column, y.column)
+
+        self.assert_compile(
+            stmt,
+            "SELECT x, y FROM "
+            "generate_series(:generate_series_1, :generate_series_2) AS x, "
+            "generate_series(:generate_series_3, :generate_series_4) AS y",
+        )
+
+    def test_column_valued_one(self):
+        fn = func.unnest(["one", "two", "three", "four"]).column_valued()
+
+        stmt = select(fn)
+
+        self.assert_compile(
+            stmt, "SELECT anon_1 FROM unnest(:unnest_1) AS anon_1"
+        )
+
+    def test_column_valued_two(self):
+        """
+
+        ::
+
+            SELECT x, y
+            FROM
+                generate_series(:generate_series_1, :generate_series_2) AS x,
+                generate_series(:generate_series_3, :generate_series_4) AS y
+
+        """
+
+        x = func.generate_series(1, 2).column_valued("x")
+        y = func.generate_series(3, 4).column_valued("y")
+        stmt = select(x, y)
+
+        self.assert_compile(
+            stmt,
+            "SELECT x, y FROM "
+            "generate_series(:generate_series_1, :generate_series_2) AS x, "
+            "generate_series(:generate_series_3, :generate_series_4) AS y",
+        )
+
+    def test_column_valued_subquery(self):
+        x = func.generate_series(1, 2).column_valued("x")
+        y = func.generate_series(3, 4).column_valued("y")
+        subq = select(x, y).subquery()
+        stmt = select(subq).where(subq.c.x > 2)
+
+        self.assert_compile(
+            stmt,
+            "SELECT anon_1.x, anon_1.y FROM "
+            "(SELECT x, y FROM "
+            "generate_series(:generate_series_1, :generate_series_2) AS x, "
+            "generate_series(:generate_series_3, :generate_series_4) AS y"
+            ") AS anon_1 "
+            "WHERE anon_1.x > :x_1",
+        )
+
+    @testing.combinations((True,), (False,))
+    def test_render_derived_with_lateral(self, apply_alias_after_lateral):
+        """
+        # this is the "record" type
+
+        SELECT
+            table1.user_id AS table1_user_id,
+            table2.name AS table2_name,
+            jsonb_table.name AS jsonb_table_name,
+            count(jsonb_table.time) AS count_1
+            FROM table1
+            JOIN table2 ON table1.user_id = table2.id
+            JOIN LATERAL jsonb_to_recordset(table1.jsonb)
+            AS jsonb_table(name TEXT, time FLOAT) ON true
+            WHERE table2.route_id = %(route_id_1)s
+            AND jsonb_table.name IN (%(name_1)s, %(name_2)s, %(name_3)s)
+            GROUP BY table1.user_id, table2.name, jsonb_table.name
+            ORDER BY table2.name
+
+        """  # noqa
+
+        table1 = table("table1", column("user_id"), column("jsonb"))
+        table2 = table(
+            "table2", column("id"), column("name"), column("route_id")
+        )
+        jsonb_table = func.jsonb_to_recordset(table1.c.jsonb).table_valued(
+            column("name", Text), column("time", Float)
+        )
+
+        # I'm a little concerned about the naming, that lateral() and
+        # alias() both make a new name unconditionally.  lateral() already
+        # works this way, so try to just make sure .alias() after the
+        # fact works too
+        if apply_alias_after_lateral:
+            jsonb_table = (
+                jsonb_table.render_derived(with_types=True)
+                .lateral()
+                .alias("jsonb_table")
+            )
+        else:
+            jsonb_table = jsonb_table.render_derived(with_types=True).lateral(
+                "jsonb_table"
+            )
+
+        stmt = (
+            select(
+                table1.c.user_id,
+                table2.c.name,
+                jsonb_table.c.name.label("jsonb_table_name"),
+                func.count(jsonb_table.c.time),
+            )
+            .select_from(table1)
+            .join(table2, table1.c.user_id == table2.c.id)
+            .join(jsonb_table, true())
+            .where(table2.c.route_id == 5)
+            .where(jsonb_table.c.name.in_(["n1", "n2", "n3"]))
+            .group_by(table1.c.user_id, table2.c.name, jsonb_table.c.name)
+            .order_by(table2.c.name)
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT table1.user_id, table2.name, "
+            "jsonb_table.name AS jsonb_table_name, "
+            "count(jsonb_table.time) AS count_1 "
+            "FROM table1 "
+            "JOIN table2 ON table1.user_id = table2.id "
+            "JOIN LATERAL jsonb_to_recordset(table1.jsonb) "
+            "AS jsonb_table(name TEXT, time FLOAT) ON true "
+            "WHERE table2.route_id = 5 "
+            "AND jsonb_table.name IN ('n1', 'n2', 'n3') "
+            "GROUP BY table1.user_id, table2.name, jsonb_table.name "
+            "ORDER BY table2.name",
+            literal_binds=True,
+            render_postcompile=True,
+        )
+
+    def test_function_alias(self):
+        """
+        ::
+
+            SELECT result_elem -> 'Field' as field
+            FROM "check" AS check_, json_array_elements(
+            (
+                SELECT check_inside.response -> 'Results'
+                FROM "check" as check_inside
+                WHERE check_inside.id = check_.id
+            )
+            ) AS result_elem
+            WHERE result_elem ->> 'Name' = 'FooBar'
+
+        """
+        check = table("check", column("id"), column("response", JSON))
+
+        check_inside = check.alias("check_inside")
+        check_outside = check.alias("_check")
+
+        subq = (
+            select(check_inside.c.response["Results"])
+            .where(check_inside.c.id == check_outside.c.id)
+            .scalar_subquery()
+        )
+
+        fn = func.json_array_elements(subq, type_=JSON).alias("result_elem")
+
+        stmt = (
+            select(fn.column["Field"].label("field"))
+            .where(fn.column["Name"] == "FooBar")
+            .select_from(check_outside)
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT result_elem[:result_elem_1] AS field "
+            "FROM json_array_elements("
+            "(SELECT check_inside.response[:response_1] AS anon_1 "
+            'FROM "check" AS check_inside '
+            "WHERE check_inside.id = _check.id)"
+            ') AS result_elem, "check" AS _check '
+            "WHERE result_elem[:result_elem_2] = :param_1",
+        )
+
+    def test_named_table_valued(self):
+
+        fn = (
+            func.json_to_recordset(  # noqa
+                '[{"a":1,"b":"foo"},{"a":"2","c":"bar"}]'
+            )
+            .table_valued(column("a", Integer), column("b", String))
+            .render_derived(with_types=True)
+        )
+
+        stmt = select(fn.c.a, fn.c.b)
+
+        self.assert_compile(
+            stmt,
+            "SELECT anon_1.a, anon_1.b "
+            "FROM json_to_recordset(:json_to_recordset_1) "
+            "AS anon_1(a INTEGER, b VARCHAR)",
+        )
+
+    def test_named_table_valued_w_quoting(self):
+
+        fn = (
+            func.json_to_recordset(  # noqa
+                '[{"CaseSensitive":1,"the % value":"foo"}, '
+                '{"CaseSensitive":"2","the % value":"bar"}]'
+            )
+            .table_valued(
+                column("CaseSensitive", Integer), column("the % value", String)
+            )
+            .render_derived(with_types=True)
+        )
+
+        stmt = select(fn.c.CaseSensitive, fn.c["the % value"])
+
+        self.assert_compile(
+            stmt,
+            'SELECT anon_1."CaseSensitive", anon_1."the % value" '
+            "FROM json_to_recordset(:json_to_recordset_1) "
+            'AS anon_1("CaseSensitive" INTEGER, "the % value" VARCHAR)',
+        )
+
+    def test_named_table_valued_subquery(self):
+
+        fn = (
+            func.json_to_recordset(  # noqa
+                '[{"a":1,"b":"foo"},{"a":"2","c":"bar"}]'
+            )
+            .table_valued(column("a", Integer), column("b", String))
+            .render_derived(with_types=True)
+        )
+
+        stmt = select(fn.c.a, fn.c.b).subquery()
+
+        stmt = select(stmt)
+
+        self.assert_compile(
+            stmt,
+            "SELECT anon_1.a, anon_1.b FROM "
+            "(SELECT anon_2.a AS a, anon_2.b AS b "
+            "FROM json_to_recordset(:json_to_recordset_1) "
+            "AS anon_2(a INTEGER, b VARCHAR)"
+            ") AS anon_1",
+        )
+
+    def test_named_table_valued_alias(self):
+
+        """select * from json_to_recordset
+        ('[{"a":1,"b":"foo"},{"a":"2","c":"bar"}]') as x(a int, b text);"""
+
+        fn = (
+            func.json_to_recordset(  # noqa
+                '[{"a":1,"b":"foo"},{"a":"2","c":"bar"}]'
+            )
+            .table_valued(column("a", Integer), column("b", String))
+            .render_derived(with_types=True)
+            .alias("jbr")
+        )
+
+        stmt = select(fn.c.a, fn.c.b)
+
+        self.assert_compile(
+            stmt,
+            "SELECT jbr.a, jbr.b "
+            "FROM json_to_recordset(:json_to_recordset_1) "
+            "AS jbr(a INTEGER, b VARCHAR)",
+        )

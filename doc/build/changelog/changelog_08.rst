@@ -7,6 +7,7 @@
     .. include:: changelog_07.rst
         :start-line: 5
 
+
 .. changelog::
     :version: 0.8.7
     :released: July 22, 2014
@@ -969,7 +970,7 @@
 
             del_ = delete(SomeMappedClass).where(SomeMappedClass.id == 5)
 
-            upd = update(SomeMappedClass).where(SomeMappedClass.id == 5).values(name='ed')
+            upd = update(SomeMappedClass).where(SomeMappedClass.id == 5).values(name="ed")
 
     .. change::
         :tags: bug, orm
@@ -1037,7 +1038,7 @@
         :tags: requirements
         :versions: 0.9.0b1
 
-        The Python `mock <https://pypi.python.org/pypi/mock>`_ library
+        The Python `mock <https://pypi.org/project/mock>`_ library
         is now required in order to run the unit test suite.  While part
         of the standard library as of Python 3.3, previous Python installations
         will need to install this in order to run unit tests or to
@@ -2078,8 +2079,7 @@
       to the original, older use case for :meth:`_query.Query.select_from`, which is that
       of restating the mapped entity in terms of a different selectable::
 
-        session.query(User.name).\
-          select_from(user_table.select().where(user_table.c.id > 5))
+        session.query(User.name).select_from(user_table.select().where(user_table.c.id > 5))
 
       Which produces::
 
@@ -2280,11 +2280,11 @@
       original.   Allows symmetry when using :class:`_engine.Engine` and
       :class:`_engine.Connection` objects as context managers::
 
-        with conn.connect() as c: # leaves the Connection open
-          c.execute("...")
+        with conn.connect() as c:  # leaves the Connection open
+            c.execute("...")
 
         with engine.connect() as c:  # closes the Connection
-          c.execute("...")
+            c.execute("...")
 
     .. change::
         :tags: engine

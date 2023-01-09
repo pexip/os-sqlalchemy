@@ -10,7 +10,7 @@ runnable and can be found in the ``/examples`` directory of the
 distribution.   Descriptions and source code for all can be found here.
 
 Additional SQLAlchemy examples, some user contributed, are available on the
-wiki at `<http://www.sqlalchemy.org/trac/wiki/UsageRecipes>`_.
+wiki at `<https://www.sqlalchemy.org/trac/wiki/UsageRecipes>`_.
 
 
 Mapping Recipes
@@ -29,6 +29,13 @@ Associations
 ------------
 
 .. automodule:: examples.association
+
+.. _examples_asyncio:
+
+Asyncio Integration
+-------------------
+
+.. automodule:: examples.asyncio
 
 Directed Graphs
 ---------------
@@ -146,6 +153,13 @@ Horizontal Sharding
 
 Extending the ORM
 =================
+
+.. _examples_session_orm_events:
+
+ORM Query Events
+-----------------
+
+.. automodule:: examples.extending_query
 
 .. _examples_caching:
 

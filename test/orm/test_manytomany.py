@@ -5,13 +5,11 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -121,7 +119,7 @@ class M2MTest(fixtures.MappedTest):
             self.tables.transition,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Place,
             place,
             properties={
@@ -130,7 +128,7 @@ class M2MTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Transition,
             transition,
             properties={
@@ -153,7 +151,7 @@ class M2MTest(fixtures.MappedTest):
             self.tables.place_place,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Place,
             place,
             properties={
@@ -167,7 +165,7 @@ class M2MTest(fixtures.MappedTest):
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         p1 = Place("place1")
         p2 = Place("place2")
         p3 = Place("place3")
@@ -201,7 +199,7 @@ class M2MTest(fixtures.MappedTest):
             self.tables.place_place,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Place,
             place,
             properties={
@@ -216,7 +214,7 @@ class M2MTest(fixtures.MappedTest):
             },
         )
 
-        sess = Session()
+        sess = fixture_session()
         p1 = Place("place1")
         p2 = Place("place2")
         p2.parent_places = [p1]
@@ -228,8 +226,9 @@ class M2MTest(fixtures.MappedTest):
         assert p2 in p1.parent_places
 
     def test_joinedload_on_double(self):
-        """test that a mapper can have two eager relationships to the same table, via
-        two different association tables.  aliases are required."""
+        """test that a mapper can have two eager relationships to the same
+        table, via two different association tables.  aliases are required.
+        """
 
         (
             place_input,
@@ -251,14 +250,14 @@ class M2MTest(fixtures.MappedTest):
             self.tables.place_output,
         )
 
-        mapper(PlaceThingy, place_thingy)
-        mapper(
+        self.mapper_registry.map_imperatively(PlaceThingy, place_thingy)
+        self.mapper_registry.map_imperatively(
             Place,
             place,
             properties={"thingies": relationship(PlaceThingy, lazy="joined")},
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Transition,
             transition,
             properties=dict(
@@ -271,7 +270,7 @@ class M2MTest(fixtures.MappedTest):
         tran.inputs.append(Place("place1"))
         tran.outputs.append(Place("place2"))
         tran.outputs.append(Place("place3"))
-        sess = Session()
+        sess = fixture_session()
         sess.add(tran)
         sess.commit()
 
@@ -296,8 +295,8 @@ class M2MTest(fixtures.MappedTest):
             self.tables.place_output,
         )
 
-        mapper(Place, place)
-        mapper(
+        self.mapper_registry.map_imperatively(Place, place)
+        self.mapper_registry.map_imperatively(
             Transition,
             transition,
             properties=dict(
@@ -327,7 +326,7 @@ class M2MTest(fixtures.MappedTest):
         p2 = Place("place2")
         p3 = Place("place3")
 
-        sess = Session()
+        sess = fixture_session()
         sess.add_all([p3, p1, t1, t2, p2, t3])
 
         t1.inputs.append(p1)
@@ -366,7 +365,7 @@ class M2MTest(fixtures.MappedTest):
             self.tables.transition,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Place,
             place,
             properties={
@@ -375,19 +374,19 @@ class M2MTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(Transition, transition)
+        self.mapper_registry.map_imperatively(Transition, transition)
 
         p1 = Place("place1")
         t1 = Transition("t1")
         p1.transitions.append(t1)
-        sess = sessionmaker()()
+        sess = fixture_session()
         sess.add_all([p1, t1])
         sess.commit()
 
         p1.place_id
         p1.transitions
 
-        sess.execute("delete from place_input", mapper=Place)
+        sess.execute(place_input.delete())
         p1.place_id = 7
 
         assert_raises_message(
@@ -400,7 +399,7 @@ class M2MTest(fixtures.MappedTest):
 
         p1.place_id
         p1.transitions
-        sess.execute("delete from place_input", mapper=Place)
+        sess.execute(place_input.delete())
         p1.transitions.remove(t1)
         assert_raises_message(
             orm_exc.StaleDataError,
@@ -457,7 +456,7 @@ class AssortedPersistenceTests(fixtures.MappedTest):
             self.tables.right,
         )
         A, B = self.classes.A, self.classes.B
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             left,
             properties={
@@ -466,7 +465,7 @@ class AssortedPersistenceTests(fixtures.MappedTest):
                 )
             },
         )
-        mapper(B, right)
+        self.mapper_registry.map_imperatively(B, right)
 
     def _bidirectional_onescalar_fixture(self):
         left, secondary, right = (
@@ -475,7 +474,7 @@ class AssortedPersistenceTests(fixtures.MappedTest):
             self.tables.right,
         )
         A, B = self.classes.A, self.classes.B
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             left,
             properties={
@@ -487,14 +486,14 @@ class AssortedPersistenceTests(fixtures.MappedTest):
                 )
             },
         )
-        mapper(B, right)
+        self.mapper_registry.map_imperatively(B, right)
 
     def test_session_delete(self):
         self._standard_bidirectional_fixture()
         A, B = self.classes.A, self.classes.B
         secondary = self.tables.secondary
 
-        sess = Session()
+        sess = fixture_session()
         sess.add_all(
             [A(data="a1", bs=[B(data="b1")]), A(data="a2", bs=[B(data="b2")])]
         )
@@ -516,7 +515,7 @@ class AssortedPersistenceTests(fixtures.MappedTest):
         A, B = self.classes.A, self.classes.B
         secondary = self.tables.secondary
 
-        sess = Session()
+        sess = fixture_session()
         sess.add_all([A(data="a1", bs=[B(data="b1"), B(data="b2")])])
         sess.commit()
 

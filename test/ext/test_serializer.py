@@ -16,7 +16,6 @@ from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import column_property
 from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.orm import sessionmaker
@@ -67,8 +66,8 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
     @classmethod
     def setup_mappers(cls):
         global Session
-        Session = scoped_session(sessionmaker())
-        mapper(
+        Session = scoped_session(sessionmaker(testing.db))
+        cls.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -77,7 +76,7 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
                 )
             },
         )
-        mapper(Address, addresses)
+        cls.mapper_registry.map_imperatively(Address, addresses)
         configure_mappers()
 
     @classmethod
@@ -136,14 +135,13 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
         )
 
     def test_expression(self):
-        expr = select([users]).select_from(users.join(addresses)).limit(5)
+        expr = select(users).select_from(users.join(addresses)).limit(5)
         re_expr = serializer.loads(
             serializer.dumps(expr, -1), users.metadata, None
         )
         eq_(str(expr), str(re_expr))
-        assert re_expr.bind is testing.db
         eq_(
-            re_expr.execute().fetchall(),
+            Session.connection().execute(re_expr).fetchall(),
             [(7, "jack"), (8, "ed"), (8, "ed"), (8, "ed"), (9, "fred")],
         )
 
@@ -176,10 +174,12 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
         eq_(
             q2.join(User.addresses)
             .filter(Address.email == "ed@bettyboop.com")
-            .value(func.count(literal_column("*"))),
+            .enable_eagerloads(False)
+            .with_entities(func.count(literal_column("*")))
+            .scalar(),
             1,
         )
-        u1 = Session.query(User).get(8)
+        u1 = Session.get(User, 8)
         q = (
             Session.query(Address)
             .filter(Address.user == u1)
@@ -204,7 +204,7 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
         )
         q2 = serializer.loads(serializer.dumps(q, -1), users.metadata, Session)
         eq_(q2.all(), [User(name="fred")])
-        eq_(list(q2.values(User.id, User.name)), [(9, "fred")])
+        eq_(list(q2.with_entities(User.id, User.name)), [(9, "fred")])
 
     @testing.requires.non_broken_pickle
     def test_query_three(self):
@@ -221,12 +221,12 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
             eq_(q2.all(), [User(name="fred")])
 
             # try to pull out the aliased entity here...
-            ua_2 = q2._entities[0].entity_zero.entity
-            eq_(list(q2.values(ua_2.id, ua_2.name)), [(9, "fred")])
+            ua_2 = q2._compile_state()._entities[0].entity_zero.entity
+            eq_(list(q2.with_entities(ua_2.id, ua_2.name)), [(9, "fred")])
 
     def test_annotated_one(self):
         j = join(users, addresses)._annotate({"foo": "bar"})
-        query = select([addresses]).select_from(j)
+        query = select(addresses).select_from(j)
 
         str(query)
         for prot in pickle_protocols():
@@ -277,7 +277,7 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
             ue("\u6e2c\u8a66"), m, Column(ue("\u6e2c\u8a66_id"), Integer)
         )
 
-        expr = select([t]).where(t.c[ue("\u6e2c\u8a66_id")] == 5)
+        expr = select(t).where(t.c[ue("\u6e2c\u8a66_id")] == 5)
 
         expr2 = serializer.loads(serializer.dumps(expr, -1), m)
 

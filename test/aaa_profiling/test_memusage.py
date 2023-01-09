@@ -6,6 +6,7 @@ import weakref
 
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey
+from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -14,20 +15,20 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import Unicode
 from sqlalchemy import util
+from sqlalchemy.engine import result
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm import attributes
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import join as orm_join
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Load
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import subqueryload
-from sqlalchemy.orm.mapper import _mapper_registry
 from sqlalchemy.orm.session import _sessions
 from sqlalchemy.processors import to_decimal_processor_factory
 from sqlalchemy.processors import to_unicode_processor_factory
@@ -38,6 +39,7 @@ from sqlalchemy.sql.visitors import replacement_traverse
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.testing.util import gc_collect
@@ -112,62 +114,101 @@ def profile_memory(
             max_grew_for = 0
             success = False
             until_maxtimes = 0
-            while True:
-                if until_maxtimes >= maxtimes // 5:
-                    break
-                for x in range(5):
-                    func(*func_args)
-                    gc_collect()
-                    samples.append(
-                        get_num_objects()
-                        if get_num_objects is not None
-                        else len(get_objects_skipping_sqlite_issue())
-                    )
-
-                if assert_no_sessions:
-                    assert len(_sessions) == 0
-
-                # queue.put(('samples', samples))
-
-                latest_max = max(samples[-5:])
-                if latest_max > max_:
-                    queue.put(
-                        (
-                            "status",
-                            "Max grew from %s to %s, max has "
-                            "grown for %s samples"
-                            % (max_, latest_max, max_grew_for),
-                        )
-                    )
-                    max_ = latest_max
-                    max_grew_for += 1
-                    until_maxtimes += 1
-                    continue
-                else:
-                    queue.put(
-                        (
-                            "status",
-                            "Max remained at %s, %s more attempts left"
-                            % (max_, max_grew_for),
-                        )
-                    )
-                    max_grew_for -= 1
-                    if max_grew_for == 0:
-                        success = True
+            try:
+                while True:
+                    if until_maxtimes >= maxtimes // 5:
                         break
+                    for x in range(5):
+                        try:
+                            func(*func_args)
+                        except Exception as err:
+                            queue.put(
+                                (
+                                    "result",
+                                    False,
+                                    "Test raised an exception: %r" % err,
+                                )
+                            )
 
-            if not success:
-                queue.put(
-                    (
-                        "result",
-                        False,
-                        "Ran for a total of %d times, memory kept "
-                        "growing: %r" % (maxtimes, samples),
-                    )
-                )
+                            raise
 
+                        gc_collect()
+
+                        samples.append(
+                            get_num_objects()
+                            if get_num_objects is not None
+                            else len(get_objects_skipping_sqlite_issue())
+                        )
+
+                    if assert_no_sessions:
+                        assert len(_sessions) == 0, "%d sessions remain" % (
+                            len(_sessions),
+                        )
+
+                    # queue.put(('samples', samples))
+
+                    latest_max = max(samples[-5:])
+                    if latest_max > max_:
+                        queue.put(
+                            (
+                                "status",
+                                "Max grew from %s to %s, max has "
+                                "grown for %s samples"
+                                % (max_, latest_max, max_grew_for),
+                            )
+                        )
+                        max_ = latest_max
+                        max_grew_for += 1
+                        until_maxtimes += 1
+                        continue
+                    else:
+                        queue.put(
+                            (
+                                "status",
+                                "Max remained at %s, %s more attempts left"
+                                % (max_, max_grew_for),
+                            )
+                        )
+                        max_grew_for -= 1
+                        if max_grew_for == 0:
+                            success = True
+                            break
+            except Exception as err:
+                queue.put(("result", False, "got exception: %s" % err))
             else:
-                queue.put(("result", True, "success"))
+                if not success:
+                    queue.put(
+                        (
+                            "result",
+                            False,
+                            "Ran for a total of %d times, memory kept "
+                            "growing: %r" % (maxtimes, samples),
+                        )
+                    )
+
+                else:
+                    queue.put(("result", True, "success"))
+
+        def run_plain(*func_args):
+            import queue as _queue
+
+            q = _queue.Queue()
+            profile(q, func_args)
+
+            while True:
+                row = q.get()
+                typ = row[0]
+                if typ == "samples":
+                    print("sample gc sizes:", row[1])
+                elif typ == "status":
+                    print(row[1])
+                elif typ == "result":
+                    break
+                else:
+                    assert False, "can't parse row"
+            assert row[1], row[2]
+
+        # return run_plain
 
         def run_in_process(*func_args):
             queue = multiprocessing.Queue()
@@ -197,19 +238,26 @@ def profile_memory(
 def assert_no_mappers():
     clear_mappers()
     gc_collect()
-    assert len(_mapper_registry) == 0
 
 
 class EnsureZeroed(fixtures.ORMTest):
-    def setup(self):
+    def setup_test(self):
         _sessions.clear()
-        _mapper_registry.clear()
-        self.engine = engines.testing_engine(options={"use_reaper": False})
+        clear_mappers()
+
+        # enable query caching, however make the cache small so that
+        # the tests don't take too long.  issues w/ caching include making
+        # sure sessions don't get stuck inside of it.  However it will
+        # make tests like test_mapper_reset take a long time because mappers
+        # are very much a part of what's in the cache.
+        self.engine = engines.testing_engine(
+            options={"use_reaper": False, "query_cache_size": 10}
+        )
 
 
 class MemUsageTest(EnsureZeroed):
     __tags__ = ("memory_intensive",)
-    __requires__ = ("cpython",)
+    __requires__ = ("cpython", "no_windows")
 
     def test_type_compile(self):
         from sqlalchemy.dialects.sqlite.base import dialect as SQLiteDialect
@@ -244,6 +292,24 @@ class MemUsageTest(EnsureZeroed):
         @profile_memory()
         def go():
             to_unicode_processor_factory("utf8")
+
+        go()
+
+    @testing.requires.cextensions
+    def test_cycles_in_row(self):
+
+        tup = result.result_tuple(["a", "b", "c"])
+
+        @profile_memory()
+        def go():
+            obj = {"foo": {}}
+            obj["foo"]["bar"] = obj
+
+            row = tup([1, 2, obj])
+
+            obj["foo"]["row"] = row
+
+            del row
 
         go()
 
@@ -291,11 +357,38 @@ class MemUsageTest(EnsureZeroed):
 
         go()
 
+    def test_clone_expression(self):
+        # this test is for the memory issue "fixed" in #7823, where clones
+        # no longer carry along all past elements.
+        # However, due to #7903, we can't at the moment use a
+        # BindParameter here - these have to continue to carry along all
+        # the previous clones for now.  So the test here only works with
+        # expressions that dont have BindParameter objects in them.
 
-class MemUsageWBackendTest(EnsureZeroed):
+        root_expr = column("x", Integer) == column("y", Integer)
+        expr = [root_expr]
+
+        @profile_memory()
+        def go():
+            expr[0] = cloned_traverse(expr[0], {}, {})
+
+        go()
+
+    def test_tv_render_derived(self):
+        root_expr = func.some_fn().table_valued()
+        expr = [root_expr]
+
+        @profile_memory()
+        def go():
+            expr[0] = expr[0].render_derived()
+
+        go()
+
+
+class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
 
     __tags__ = ("memory_intensive",)
-    __requires__ = "cpython", "memory_process_intensive"
+    __requires__ = "cpython", "memory_process_intensive", "no_asyncio"
     __sparse_backend__ = True
 
     # ensure a pure growing test trips the assertion
@@ -313,7 +406,7 @@ class MemUsageWBackendTest(EnsureZeroed):
         go()
 
     def test_session(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         table1 = Table(
             "mytable",
@@ -340,9 +433,9 @@ class MemUsageWBackendTest(EnsureZeroed):
             Column("col3", Integer, ForeignKey("mytable.col1")),
         )
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
 
-        m1 = mapper(
+        m1 = self.mapper_registry.map_imperatively(
             A,
             table1,
             properties={
@@ -351,39 +444,38 @@ class MemUsageWBackendTest(EnsureZeroed):
                 )
             },
         )
-        m2 = mapper(B, table2)
+        m2 = self.mapper_registry.map_imperatively(B, table2)
 
         @profile_memory()
         def go():
-            sess = create_session()
-            a1 = A(col2="a1")
-            a2 = A(col2="a2")
-            a3 = A(col2="a3")
-            a1.bs.append(B(col2="b1"))
-            a1.bs.append(B(col2="b2"))
-            a3.bs.append(B(col2="b3"))
-            for x in [a1, a2, a3]:
-                sess.add(x)
-            sess.flush()
-            sess.expunge_all()
+            with Session(self.engine) as sess:
+                a1 = A(col2="a1")
+                a2 = A(col2="a2")
+                a3 = A(col2="a3")
+                a1.bs.append(B(col2="b1"))
+                a1.bs.append(B(col2="b2"))
+                a3.bs.append(B(col2="b3"))
+                for x in [a1, a2, a3]:
+                    sess.add(x)
+                sess.commit()
 
-            alist = sess.query(A).order_by(A.col1).all()
-            eq_(
-                [
-                    A(col2="a1", bs=[B(col2="b1"), B(col2="b2")]),
-                    A(col2="a2", bs=[]),
-                    A(col2="a3", bs=[B(col2="b3")]),
-                ],
-                alist,
-            )
+                alist = sess.query(A).order_by(A.col1).all()
+                eq_(
+                    [
+                        A(col2="a1", bs=[B(col2="b1"), B(col2="b2")]),
+                        A(col2="a2", bs=[]),
+                        A(col2="a3", bs=[B(col2="b3")]),
+                    ],
+                    alist,
+                )
 
-            for a in alist:
-                sess.delete(a)
-            sess.flush()
+                for a in alist:
+                    sess.delete(a)
+                sess.commit()
 
         go()
 
-        metadata.drop_all()
+        metadata.drop_all(self.engine)
         del m1, m2
         assert_no_mappers()
 
@@ -392,7 +484,7 @@ class MemUsageWBackendTest(EnsureZeroed):
         def go():
             sessmaker = sessionmaker(bind=self.engine)
             sess = sessmaker()
-            r = sess.execute(select([1]))
+            r = sess.execute(select(1))
             r.close()
             sess.close()
             del sess
@@ -433,7 +525,7 @@ class MemUsageWBackendTest(EnsureZeroed):
 
         metadata.create_all()
 
-        m1 = mapper(
+        m1 = self.mapper_registry.map_imperatively(
             A,
             table1,
             properties={
@@ -443,7 +535,9 @@ class MemUsageWBackendTest(EnsureZeroed):
             },
             _compiled_cache_size=50,
         )
-        m2 = mapper(B, table2, _compiled_cache_size=50)
+        m2 = self.mapper_registry.map_imperatively(
+            B, table2, _compiled_cache_size=50
+        )
 
         @profile_memory()
         def go():
@@ -454,33 +548,31 @@ class MemUsageWBackendTest(EnsureZeroed):
                     "use_reaper": False,
                 }
             )
-            sess = create_session(bind=engine)
+            with Session(engine) as sess:
+                a1 = A(col2="a1")
+                a2 = A(col2="a2")
+                a3 = A(col2="a3")
+                a1.bs.append(B(col2="b1"))
+                a1.bs.append(B(col2="b2"))
+                a3.bs.append(B(col2="b3"))
+                for x in [a1, a2, a3]:
+                    sess.add(x)
+                sess.commit()
 
-            a1 = A(col2="a1")
-            a2 = A(col2="a2")
-            a3 = A(col2="a3")
-            a1.bs.append(B(col2="b1"))
-            a1.bs.append(B(col2="b2"))
-            a3.bs.append(B(col2="b3"))
-            for x in [a1, a2, a3]:
-                sess.add(x)
-            sess.flush()
-            sess.expunge_all()
+                alist = sess.query(A).order_by(A.col1).all()
+                eq_(
+                    [
+                        A(col2="a1", bs=[B(col2="b1"), B(col2="b2")]),
+                        A(col2="a2", bs=[]),
+                        A(col2="a3", bs=[B(col2="b3")]),
+                    ],
+                    alist,
+                )
 
-            alist = sess.query(A).order_by(A.col1).all()
-            eq_(
-                [
-                    A(col2="a1", bs=[B(col2="b1"), B(col2="b2")]),
-                    A(col2="a2", bs=[]),
-                    A(col2="a3", bs=[B(col2="b3")]),
-                ],
-                alist,
-            )
+                for a in alist:
+                    sess.delete(a)
+                sess.commit()
 
-            for a in alist:
-                sess.delete(a)
-            sess.flush()
-            sess.close()
             engine.dispose()
 
         go()
@@ -491,7 +583,7 @@ class MemUsageWBackendTest(EnsureZeroed):
 
     @testing.emits_warning("Compiled statement cache for.*")
     def test_many_updates(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         wide_table = Table(
             "t",
@@ -505,43 +597,42 @@ class MemUsageWBackendTest(EnsureZeroed):
         class Wide(object):
             pass
 
-        mapper(Wide, wide_table, _compiled_cache_size=10)
+        self.mapper_registry.map_imperatively(
+            Wide, wide_table, _compiled_cache_size=10
+        )
 
-        metadata.create_all()
-        session = create_session()
-        w1 = Wide()
-        session.add(w1)
-        session.flush()
-        session.close()
+        metadata.create_all(self.engine)
+        with Session(self.engine) as session:
+            w1 = Wide()
+            session.add(w1)
+            session.commit()
         del session
         counter = [1]
 
         @profile_memory()
         def go():
-            session = create_session()
-            w1 = session.query(Wide).first()
-            x = counter[0]
-            dec = 10
-            while dec > 0:
-                # trying to count in binary here,
-                # works enough to trip the test case
-                if pow(2, dec) < x:
-                    setattr(w1, "col%d" % dec, counter[0])
-                    x -= pow(2, dec)
-                dec -= 1
-            session.flush()
-            session.close()
+            with Session(self.engine) as session:
+                w1 = session.query(Wide).first()
+                x = counter[0]
+                dec = 10
+                while dec > 0:
+                    # trying to count in binary here,
+                    # works enough to trip the test case
+                    if pow(2, dec) < x:
+                        setattr(w1, "col%d" % dec, counter[0])
+                        x -= pow(2, dec)
+                    dec -= 1
+                session.commit()
             counter[0] += 1
 
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
 
     @testing.requires.savepoints
-    @testing.provide_metadata
     def test_savepoints(self):
-        metadata = self.metadata
+        metadata = MetaData()
 
         some_table = Table(
             "t",
@@ -554,36 +645,34 @@ class MemUsageWBackendTest(EnsureZeroed):
         class SomeClass(object):
             pass
 
-        mapper(SomeClass, some_table)
+        self.mapper_registry.map_imperatively(SomeClass, some_table)
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
 
-        session = Session(testing.db)
-
-        target_strings = (
-            session.connection().dialect.identifier_preparer._strings
-        )
-
-        session.close()
+        with Session(self.engine) as session:
+            target_strings = (
+                session.connection().dialect.identifier_preparer._strings
+            )
 
         @profile_memory(
             assert_no_sessions=False,
             get_num_objects=lambda: len(target_strings),
         )
         def go():
-            session = Session(testing.db)
-            with session.transaction:
-
+            with Session(self.engine) as session, session.begin():
                 sc = SomeClass()
                 session.add(sc)
                 with session.begin_nested():
                     session.query(SomeClass).first()
 
-        go()
+        try:
+            go()
+        finally:
+            metadata.drop_all(self.engine)
 
     @testing.crashes("mysql+cymysql", "blocking")
     def test_unicode_warnings(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
         table1 = Table(
             "mytable",
             metadata,
@@ -595,7 +684,7 @@ class MemUsageWBackendTest(EnsureZeroed):
             ),
             Column("col2", Unicode(30)),
         )
-        metadata.create_all()
+        metadata.create_all(self.engine)
         i = [1]
 
         # the times here is cranked way up so that we can see
@@ -608,15 +697,16 @@ class MemUsageWBackendTest(EnsureZeroed):
             # execute with a non-unicode object. a warning is emitted,
             # this warning shouldn't clog up memory.
 
-            self.engine.execute(
-                table1.select().where(table1.c.col2 == "foo%d" % i[0])
-            )
+            with self.engine.connect() as conn:
+                conn.execute(
+                    table1.select().where(table1.c.col2 == "foo%d" % i[0])
+                )
             i[0] += 1
 
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
 
     def test_warnings_util(self):
         counter = itertools.count()
@@ -634,7 +724,7 @@ class MemUsageWBackendTest(EnsureZeroed):
         go()
 
     def test_mapper_reset(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         table1 = Table(
             "mytable",
@@ -663,14 +753,14 @@ class MemUsageWBackendTest(EnsureZeroed):
 
         @profile_memory()
         def go():
-            mapper(
+            self.mapper_registry.map_imperatively(
                 A,
                 table1,
                 properties={"bs": relationship(B, order_by=table2.c.col1)},
             )
-            mapper(B, table2)
+            self.mapper_registry.map_imperatively(B, table2)
 
-            sess = create_session()
+            sess = Session(self.engine, autoflush=False)
             a1 = A(col2="a1")
             a2 = A(col2="a2")
             a3 = A(col2="a3")
@@ -698,15 +788,15 @@ class MemUsageWBackendTest(EnsureZeroed):
             sess.close()
             clear_mappers()
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
         assert_no_mappers()
 
     def test_alias_pathing(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         a = Table(
             "a",
@@ -732,12 +822,18 @@ class MemUsageWBackendTest(EnsureZeroed):
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
             ),
         )
-        mapper(A, a, polymorphic_identity="a", polymorphic_on=a.c.type)
-        mapper(ASub, asub, inherits=A, polymorphic_identity="asub")
-        mapper(B, b, properties={"as_": relationship(A)})
+        self.mapper_registry.map_imperatively(
+            A, a, polymorphic_identity="a", polymorphic_on=a.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            ASub, asub, inherits=A, polymorphic_identity="asub"
+        )
+        self.mapper_registry.map_imperatively(
+            B, b, properties={"as_": relationship(A)}
+        )
 
-        metadata.create_all()
-        sess = Session()
+        metadata.create_all(self.engine)
+        sess = Session(self.engine)
         a1 = ASub(data="a1")
         a2 = ASub(data="a2")
         a3 = ASub(data="a3")
@@ -751,14 +847,15 @@ class MemUsageWBackendTest(EnsureZeroed):
         # "dip" again
         @profile_memory(maxtimes=120)
         def go():
-            sess = Session()
+            sess = Session(self.engine)
             sess.query(B).options(subqueryload(B.as_.of_type(ASub))).all()
             sess.close()
+            del sess
 
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
         clear_mappers()
 
     def test_path_registry(self):
@@ -776,8 +873,10 @@ class MemUsageWBackendTest(EnsureZeroed):
             Column("id", Integer, primary_key=True),
             Column("a_id", ForeignKey("a.id")),
         )
-        m1 = mapper(A, a, properties={"bs": relationship(B)})
-        mapper(B, b)
+        m1 = self.mapper_registry.map_imperatively(
+            A, a, properties={"bs": relationship(B)}
+        )
+        self.mapper_registry.map_imperatively(B, b)
 
         @profile_memory()
         def go():
@@ -788,7 +887,7 @@ class MemUsageWBackendTest(EnsureZeroed):
         clear_mappers()
 
     def test_with_inheritance(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         table1 = Table(
             "mytable",
@@ -823,15 +922,18 @@ class MemUsageWBackendTest(EnsureZeroed):
             class B(A):
                 pass
 
-            mapper(
+            clear_mappers()
+            self.mapper_registry.map_imperatively(
                 A,
                 table1,
                 polymorphic_on=table1.c.col2,
                 polymorphic_identity="a",
             )
-            mapper(B, table2, inherits=A, polymorphic_identity="b")
+            self.mapper_registry.map_imperatively(
+                B, table2, inherits=A, polymorphic_identity="b"
+            )
 
-            sess = create_session()
+            sess = Session(self.engine, autoflush=False)
             a1 = A()
             a2 = A()
             b1 = B(col3="b1")
@@ -852,15 +954,15 @@ class MemUsageWBackendTest(EnsureZeroed):
             del B
             del A
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
         assert_no_mappers()
 
     def test_with_manytomany(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         table1 = Table(
             "mytable",
@@ -901,7 +1003,7 @@ class MemUsageWBackendTest(EnsureZeroed):
             class B(fixtures.ComparableEntity):
                 pass
 
-            mapper(
+            self.mapper_registry.map_imperatively(
                 A,
                 table1,
                 properties={
@@ -910,9 +1012,9 @@ class MemUsageWBackendTest(EnsureZeroed):
                     )
                 },
             )
-            mapper(B, table2)
+            self.mapper_registry.map_imperatively(B, table2)
 
-            sess = create_session()
+            sess = Session(self.engine, autoflush=False)
             a1 = A(col2="a1")
             a2 = A(col2="a2")
             b1 = B(col2="b1")
@@ -931,21 +1033,23 @@ class MemUsageWBackendTest(EnsureZeroed):
                 sess.delete(a)
             sess.flush()
 
-            # don't need to clear_mappers()
+            # mappers necessarily find themselves in the compiled cache,
+            # so to allow them to be GC'ed clear out the cache
+            self.engine.clear_compiled_cache()
             del B
             del A
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
         assert_no_mappers()
 
-    @testing.provide_metadata
+    @testing.uses_deprecated()
     def test_key_fallback_result(self):
+        m = MetaData()
         e = self.engine
-        m = self.metadata
         t = Table("t", m, Column("x", Integer), Column("y", Integer))
         m.create_all(e)
         e.execute(t.insert(), {"x": 1, "y": 1})
@@ -956,7 +1060,10 @@ class MemUsageWBackendTest(EnsureZeroed):
             for row in r:
                 row[t.c.x]
 
-        go()
+        try:
+            go()
+        finally:
+            m.drop_all(e)
 
     def test_many_discarded_relationships(self):
         """a use case that really isn't supported, nonetheless we can
@@ -974,7 +1081,7 @@ class MemUsageWBackendTest(EnsureZeroed):
         class T1(object):
             pass
 
-        t1_mapper = mapper(T1, t1)
+        t1_mapper = self.mapper_registry.map_imperatively(T1, t1)
 
         @testing.emits_warning()
         @profile_memory()
@@ -982,9 +1089,9 @@ class MemUsageWBackendTest(EnsureZeroed):
             class T2(object):
                 pass
 
-            t2_mapper = mapper(T2, t2)
+            t2_mapper = self.mapper_registry.map_imperatively(T2, t2)
             t1_mapper.add_property("bar", relationship(t2_mapper))
-            s1 = Session()
+            s1 = Session(testing.db)
             # this causes the path_registry to be invoked
             s1.query(t1_mapper)._compile_context()
 
@@ -992,11 +1099,11 @@ class MemUsageWBackendTest(EnsureZeroed):
 
     # fails on newer versions of pysqlite due to unusual memory behavior
     # in pysqlite itself. background at:
-    # http://thread.gmane.org/gmane.comp.python.db.pysqlite.user/2290
+    # https://thread.gmane.org/gmane.comp.python.db.pysqlite.user/2290
 
     @testing.crashes("mysql+cymysql", "blocking")
-    def test_join_cache(self):
-        metadata = MetaData(self.engine)
+    def test_join_cache_deprecated_coercion(self):
+        metadata = MetaData()
         table1 = Table(
             "table1",
             metadata,
@@ -1021,28 +1128,88 @@ class MemUsageWBackendTest(EnsureZeroed):
         class Bar(object):
             pass
 
-        mapper(
-            Foo, table1, properties={"bars": relationship(mapper(Bar, table2))}
+        self.mapper_registry.map_imperatively(
+            Foo,
+            table1,
+            properties={
+                "bars": relationship(
+                    self.mapper_registry.map_imperatively(Bar, table2)
+                )
+            },
         )
-        metadata.create_all()
-        session = sessionmaker()
+        metadata.create_all(self.engine)
+        session = sessionmaker(self.engine)
 
         @profile_memory()
         def go():
             s = table2.select()
             sess = session()
-            sess.query(Foo).join((s, Foo.bars)).all()
+            with testing.expect_deprecated(
+                "Implicit coercion of SELECT and " "textual SELECT constructs"
+            ):
+                sess.query(Foo).join(s, Foo.bars).all()
             sess.rollback()
 
         try:
             go()
         finally:
-            metadata.drop_all()
+            metadata.drop_all(self.engine)
+
+    @testing.crashes("mysql+cymysql", "blocking")
+    def test_join_cache(self):
+        metadata = MetaData()
+        table1 = Table(
+            "table1",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(30)),
+        )
+        table2 = Table(
+            "table2",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(30)),
+            Column("t1id", Integer, ForeignKey("table1.id")),
+        )
+
+        class Foo(object):
+            pass
+
+        class Bar(object):
+            pass
+
+        self.mapper_registry.map_imperatively(
+            Foo,
+            table1,
+            properties={
+                "bars": relationship(
+                    self.mapper_registry.map_imperatively(Bar, table2)
+                )
+            },
+        )
+        metadata.create_all(self.engine)
+        session = sessionmaker(self.engine)
+
+        @profile_memory()
+        def go():
+            s = aliased(Bar, table2.select().subquery())
+            sess = session()
+            sess.query(Foo).join(s, Foo.bars).all()
+            sess.rollback()
+
+        try:
+            go()
+        finally:
+            metadata.drop_all(self.engine)
 
 
 class CycleTest(_fixtures.FixtureTest):
     __tags__ = ("memory_intensive",)
-    __requires__ = ("cpython",)
+    __requires__ = ("cpython", "no_windows")
 
     run_setup_mappers = "once"
     run_inserts = "once"
@@ -1056,11 +1223,57 @@ class CycleTest(_fixtures.FixtureTest):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         @assert_cycles()
         def go():
             return s.query(User).all()
+
+        go()
+
+    def test_session_execute_orm(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        s = fixture_session()
+
+        @assert_cycles()
+        def go():
+            stmt = select(User)
+            s.execute(stmt)
+
+        go()
+
+    def test_cache_key(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        @assert_cycles()
+        def go():
+            stmt = select(User)
+            stmt._generate_cache_key()
+
+        go()
+
+    def test_proxied_attribute(self):
+        from sqlalchemy.ext import hybrid
+
+        users = self.tables.users
+
+        class Foo(object):
+            @hybrid.hybrid_property
+            def user_name(self):
+                return self.name
+
+        self.mapper_registry.map_imperatively(Foo, users)
+
+        # unfortunately there's a lot of cycles with an aliased()
+        # for now, however calling upon clause_element does not seem
+        # to make it worse which is what this was looking to test
+        @assert_cycles(69)
+        def go():
+            a1 = aliased(Foo)
+            a1.user_name.__clause_element__()
 
         go()
 
@@ -1082,7 +1295,7 @@ class CycleTest(_fixtures.FixtureTest):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         u1 = aliased(User)
 
@@ -1107,7 +1320,7 @@ class CycleTest(_fixtures.FixtureTest):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         def generate():
             objects = s.query(User).filter(User.id == 7).all()
@@ -1123,7 +1336,7 @@ class CycleTest(_fixtures.FixtureTest):
     def test_orm_objects_from_query_w_selectinload(self):
         User, Address = self.classes("User", "Address")
 
-        s = Session()
+        s = fixture_session()
 
         def generate():
             objects = s.query(User).options(selectinload(User.addresses)).all()
@@ -1179,14 +1392,15 @@ class CycleTest(_fixtures.FixtureTest):
 
         @assert_cycles()
         def go():
-            Load(User).joinedload(User.addresses)
+            l1 = Load(User).joinedload(User.addresses)
+            l1._generate_cache_key()
 
         go()
 
     def test_orm_objects_from_query_w_joinedload(self):
         User, Address = self.classes("User", "Address")
 
-        s = Session()
+        s = fixture_session()
 
         def generate():
             objects = s.query(User).options(joinedload(User.addresses)).all()
@@ -1202,7 +1416,7 @@ class CycleTest(_fixtures.FixtureTest):
     def test_query_filtered(self):
         User, Address = self.classes("User", "Address")
 
-        s = Session()
+        s = fixture_session()
 
         @assert_cycles()
         def go():
@@ -1213,10 +1427,11 @@ class CycleTest(_fixtures.FixtureTest):
     def test_query_joins(self):
         User, Address = self.classes("User", "Address")
 
-        s = Session()
+        s = fixture_session()
 
-        # cycles here are due to ClauseElement._cloned_set
-        @assert_cycles(3)
+        # cycles here are due to ClauseElement._cloned_set, others
+        # as of cache key
+        @assert_cycles(4)
         def go():
             s.query(User).join(User.addresses).all()
 
@@ -1225,13 +1440,16 @@ class CycleTest(_fixtures.FixtureTest):
     def test_query_joinedload(self):
         User, Address = self.classes("User", "Address")
 
-        s = Session()
+        s = fixture_session()
 
         def generate():
             s.query(User).options(joinedload(User.addresses)).all()
 
-        # cycles here are due to ClauseElement._cloned_set and Load.context
-        @assert_cycles(28)
+        # cycles here are due to ClauseElement._cloned_set and Load.context,
+        # others as of cache key.  The orm.instances() function now calls
+        # dispose() on both the context and the compiled state to try
+        # to reduce these cycles.
+        @assert_cycles(18)
         def go():
             generate()
 
@@ -1242,18 +1460,20 @@ class CycleTest(_fixtures.FixtureTest):
 
         @assert_cycles()
         def go():
-            str(users.join(addresses))
+            str(users.join(addresses).compile(testing.db))
 
         go()
 
     def test_plain_join_select(self):
         users, addresses = self.tables("users", "addresses")
 
-        # cycles here are due to ClauseElement._cloned_set
-        @assert_cycles(6)
+        # cycles here are due to ClauseElement._cloned_set, others
+        # as of cache key
+        @assert_cycles(7)
         def go():
-            s = select([users]).select_from(users.join(addresses))
-            s._froms
+            s = select(users).select_from(users.join(addresses))
+            state = s._compile_state_factory(s, s.compile(testing.db))
+            state.froms
 
         go()
 
@@ -1262,7 +1482,7 @@ class CycleTest(_fixtures.FixtureTest):
 
         @assert_cycles()
         def go():
-            str(orm_join(User, Address, User.addresses))
+            str(orm_join(User, Address, User.addresses).compile(testing.db))
 
         go()
 
@@ -1270,7 +1490,7 @@ class CycleTest(_fixtures.FixtureTest):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         @assert_cycles()
         def go():
@@ -1282,7 +1502,7 @@ class CycleTest(_fixtures.FixtureTest):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         @assert_cycles()
         def go():
@@ -1290,15 +1510,83 @@ class CycleTest(_fixtures.FixtureTest):
 
         go()
 
-    def test_core_select(self):
+    def test_result_fetchone(self):
         User, Address = self.classes("User", "Address")
         configure_mappers()
 
-        s = Session()
+        s = fixture_session()
 
         stmt = s.query(User).join(User.addresses).statement
 
-        @assert_cycles()
+        @assert_cycles(4)
+        def go():
+            result = s.connection(mapper=User).execute(stmt)
+            while True:
+                row = result.fetchone()
+                if row is None:
+                    break
+
+        go()
+
+    def test_result_fetchall(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        s = fixture_session()
+
+        stmt = s.query(User).join(User.addresses).statement
+
+        @assert_cycles(4)
+        def go():
+            result = s.execute(stmt)
+            rows = result.fetchall()  # noqa
+
+        go()
+
+    def test_result_fetchmany(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        s = fixture_session()
+
+        stmt = s.query(User).join(User.addresses).statement
+
+        @assert_cycles(4)
+        def go():
+            result = s.execute(stmt)
+            for partition in result.partitions(3):
+                pass
+
+        go()
+
+    def test_result_fetchmany_unique(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        s = fixture_session()
+
+        stmt = s.query(User).join(User.addresses).statement
+
+        @assert_cycles(4)
+        def go():
+            result = s.execute(stmt)
+            for partition in result.unique().partitions(3):
+                pass
+
+        go()
+
+    def test_core_select_from_orm_query(self):
+        User, Address = self.classes("User", "Address")
+        configure_mappers()
+
+        s = fixture_session()
+
+        stmt = s.query(User).join(User.addresses).statement
+
+        # ORM query using future select for .statement is adding
+        # some ORMJoin cycles here during compilation.  not worth trying to
+        # find it
+        @assert_cycles(4)
         def go():
             s.execute(stmt)
 
@@ -1307,7 +1595,7 @@ class CycleTest(_fixtures.FixtureTest):
     def test_adapt_statement_replacement_traversal(self):
         User, Address = self.classes("User", "Address")
 
-        statement = select([User]).select_from(
+        statement = select(User).select_from(
             orm_join(User, Address, User.addresses)
         )
 
@@ -1320,7 +1608,7 @@ class CycleTest(_fixtures.FixtureTest):
     def test_adapt_statement_cloned_traversal(self):
         User, Address = self.classes("User", "Address")
 
-        statement = select([User]).select_from(
+        statement = select(User).select_from(
             orm_join(User, Address, User.addresses)
         )
 
@@ -1352,7 +1640,7 @@ class CycleTest(_fixtures.FixtureTest):
 
         go()
 
-    @testing.fails
+    @testing.fails()
     def test_the_counter(self):
         @assert_cycles()
         def go():
@@ -1375,8 +1663,6 @@ class CycleTest(_fixtures.FixtureTest):
 
     @testing.provide_metadata
     def test_optimized_get(self):
-
-        from sqlalchemy.ext.declarative import declarative_base
 
         Base = declarative_base(metadata=self.metadata)
 
@@ -1425,3 +1711,102 @@ class CycleTest(_fixtures.FixtureTest):
             visit_binary_product(visit, expr)
 
         go()
+
+    def test_session_transaction(self):
+        @assert_cycles()
+        def go():
+            s = Session(testing.db)
+            s.connection()
+            s.close()
+
+        go()
+
+    def test_session_commit_rollback(self):
+        # this is enabled by #5074
+        @assert_cycles()
+        def go():
+            s = Session(testing.db)
+            s.connection()
+            s.commit()
+
+        go()
+
+        @assert_cycles()
+        def go():
+            s = Session(testing.db)
+            s.connection()
+            s.rollback()
+
+        go()
+
+    def test_session_multi_transaction(self):
+        @assert_cycles()
+        def go():
+            s = Session(testing.db)
+            assert s._transaction is None
+
+            s.connection()
+
+            s.close()
+            assert s._transaction is None
+
+            s.connection()
+            assert s._transaction is not None
+
+            s.close()
+
+        go()
+
+
+class MiscMemoryIntensiveTests(fixtures.TestBase):
+    __tags__ = ("memory_intensive",)
+
+    @testing.fixture
+    def user_fixture(self, decl_base):
+        class User(decl_base):
+            __tablename__ = "user"
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+        decl_base.metadata.create_all(testing.db)
+        yield User
+
+    @testing.requires.predictable_gc
+    def test_gced_delete_on_rollback(self, user_fixture):
+        User = user_fixture
+
+        s = fixture_session()
+        u1 = User(name="ed")
+        s.add(u1)
+        s.commit()
+
+        s.delete(u1)
+        u1_state = attributes.instance_state(u1)
+        assert u1_state in s.identity_map.all_states()
+        assert u1_state in s._deleted
+        s.flush()
+        assert u1_state not in s.identity_map.all_states()
+        assert u1_state not in s._deleted
+        del u1
+        gc_collect()
+        gc_collect()
+        gc_collect()
+        assert u1_state.obj() is None
+
+        s.rollback()
+        # new in 1.1, not in identity map if the object was
+        # gc'ed and we restore snapshot; we've changed update_impl
+        # to just skip this object
+        assert u1_state not in s.identity_map.all_states()
+
+        # in any version, the state is replaced by the query
+        # because the identity map would switch it
+        u1 = s.query(User).filter_by(name="ed").one()
+        assert u1_state not in s.identity_map.all_states()
+
+        eq_(s.scalar(select(func.count("*")).select_from(User.__table__)), 1)
+        s.delete(u1)
+        s.flush()
+        eq_(s.scalar(select(func.count("*")).select_from(User.__table__)), 0)
+        s.commit()

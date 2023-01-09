@@ -2,9 +2,12 @@
 
 """Tests exceptions and DB-API exception wrapping."""
 
+from itertools import product
+import pickle
 
 from sqlalchemy import exc as sa_exceptions
 from sqlalchemy.engine import default
+from sqlalchemy.testing import combinations_list
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.util import compat
@@ -83,7 +86,7 @@ class WrapTest(fixtures.TestBase):
                 str(exc),
                 "(test.base.test_except.OperationalError) \n"
                 "[SQL: this is a message]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
 
@@ -101,7 +104,7 @@ class WrapTest(fixtures.TestBase):
                 "(test.base.test_except.OperationalError) \n"
                 "[SQL: this is a message\nthis is the next line\n"
                 "the last line]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
 
@@ -135,7 +138,7 @@ class WrapTest(fixtures.TestBase):
                 "(sqlalchemy.exc.InvalidRequestError) hello\n"
                 "[SQL: select * from table]\n"
                 "[parameters: [{'x': 1}]]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/abcd)"
+                "(Background on this error at: https://sqlalche.me/e/%s/abcd)"
                 % sa_exceptions._version_token,
             )
             eq_(err.args, ("(sqlalchemy.exc.InvalidRequestError) hello",))
@@ -147,7 +150,7 @@ class WrapTest(fixtures.TestBase):
         eq_(
             str(orig),
             "(2006, 'Test raise operational error')\n"
-            "(Background on this error at: http://sqlalche.me/e/%s/dbapi)"
+            "(Background on this error at: https://sqlalche.me/e/%s/dbapi)"
             % sa_exceptions._version_token,
         )
 
@@ -159,7 +162,8 @@ class WrapTest(fixtures.TestBase):
             compat.text_type(orig),
             compat.u(
                 "méil\n(Background on this error at: "
-                "http://sqlalche.me/e/%s/dbapi)" % sa_exceptions._version_token
+                "https://sqlalche.me/e/%s/dbapi)"
+                % sa_exceptions._version_token
             ),
         )
         eq_(orig.args, (u("méil"),))
@@ -232,7 +236,7 @@ class WrapTest(fixtures.TestBase):
                 "[SQL: this is a message]\n"
                 "[parameters: [{1: 1}, {1: 1}, {1: 1}, {1: 1}, {1: 1},"
                 " {1: 1}, {1: 1}, {1: 1}, {1: 1}, {1: 1}]]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
             eq_(
@@ -268,7 +272,7 @@ class WrapTest(fixtures.TestBase):
                 "{1: 1}, {1: 1}, {1: 1}, {1: 1}, {1: 1}, "
                 "{1: 1}, {1: 1}  ... displaying 10 of 11 total "
                 "bound parameter sets ...  {1: 1}, {1: 1}]]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
         try:
@@ -286,7 +290,7 @@ class WrapTest(fixtures.TestBase):
                 "[SQL: this is a message]\n"
                 "[parameters: [(1,), "
                 "(1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,), (1,)]]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
         try:
@@ -318,7 +322,7 @@ class WrapTest(fixtures.TestBase):
                 "(1,), (1,), (1,), (1,), (1,), (1,), (1,)  "
                 "... displaying 10 of 11 total bound "
                 "parameter sets ...  (1,), (1,)]]\n"
-                "(Background on this error at: http://sqlalche.me/e/%s/e3q8)"
+                "(Background on this error at: https://sqlalche.me/e/%s/e3q8)"
                 % sa_exceptions._version_token,
             )
 
@@ -413,3 +417,134 @@ class WrapTest(fixtures.TestBase):
             self.assert_(False)
         except SystemExit:
             self.assert_(True)
+
+
+def details(cls):
+    inst = cls("msg", "stmt", (), "orig")
+    inst.add_detail("d1")
+    inst.add_detail("d2")
+    return inst
+
+
+ALL_EXC = [
+    (
+        [sa_exceptions.SQLAlchemyError],
+        [lambda cls: cls(1, 2, code="42")],
+    ),
+    ([sa_exceptions.ObjectNotExecutableError], [lambda cls: cls("xx")]),
+    (
+        [
+            sa_exceptions.ArgumentError,
+            sa_exceptions.NoSuchModuleError,
+            sa_exceptions.NoForeignKeysError,
+            sa_exceptions.AmbiguousForeignKeysError,
+            sa_exceptions.CompileError,
+            sa_exceptions.IdentifierError,
+            sa_exceptions.DisconnectionError,
+            sa_exceptions.InvalidatePoolError,
+            sa_exceptions.TimeoutError,
+            sa_exceptions.InvalidRequestError,
+            sa_exceptions.NoInspectionAvailable,
+            sa_exceptions.PendingRollbackError,
+            sa_exceptions.ResourceClosedError,
+            sa_exceptions.NoSuchColumnError,
+            sa_exceptions.NoResultFound,
+            sa_exceptions.MultipleResultsFound,
+            sa_exceptions.NoReferenceError,
+            sa_exceptions.AwaitRequired,
+            sa_exceptions.MissingGreenlet,
+            sa_exceptions.NoSuchTableError,
+            sa_exceptions.UnreflectableTableError,
+            sa_exceptions.UnboundExecutionError,
+        ],
+        [lambda cls: cls("foo", code="42")],
+    ),
+    (
+        [sa_exceptions.CircularDependencyError],
+        [
+            lambda cls: cls("msg", ["cycles"], "edges"),
+            lambda cls: cls("msg", ["cycles"], "edges", "xx", "zz"),
+        ],
+    ),
+    (
+        [sa_exceptions.UnsupportedCompilationError],
+        [lambda cls: cls("cmp", "el"), lambda cls: cls("cmp", "el", "msg")],
+    ),
+    (
+        [sa_exceptions.NoReferencedTableError],
+        [lambda cls: cls("msg", "tbl")],
+    ),
+    (
+        [sa_exceptions.NoReferencedColumnError],
+        [lambda cls: cls("msg", "tbl", "col")],
+    ),
+    (
+        [sa_exceptions.StatementError],
+        [
+            lambda cls: cls("msg", "stmt", (), "orig"),
+            lambda cls: cls("msg", "stmt", (), "orig", True, "99", True),
+            details,
+        ],
+    ),
+    (
+        [
+            sa_exceptions.DBAPIError,
+            sa_exceptions.InterfaceError,
+            sa_exceptions.DatabaseError,
+            sa_exceptions.DataError,
+            sa_exceptions.OperationalError,
+            sa_exceptions.IntegrityError,
+            sa_exceptions.InternalError,
+            sa_exceptions.ProgrammingError,
+            sa_exceptions.NotSupportedError,
+        ],
+        [
+            lambda cls: cls("stmt", (), "orig"),
+            lambda cls: cls("stmt", (), "orig", True, True, "99", True),
+            details,
+        ],
+    ),
+    (
+        [
+            sa_exceptions.SADeprecationWarning,
+            sa_exceptions.Base20DeprecationWarning,
+            sa_exceptions.LegacyAPIWarning,
+            sa_exceptions.RemovedIn20Warning,
+            sa_exceptions.MovedIn20Warning,
+            sa_exceptions.SAWarning,
+        ],
+        [lambda cls: cls("foo", code="42")],
+    ),
+    ([sa_exceptions.SAPendingDeprecationWarning], [lambda cls: cls(1, 2, 3)]),
+]
+
+
+class PickleException(fixtures.TestBase):
+    def test_all_exc(self):
+        found = {
+            e
+            for e in vars(sa_exceptions).values()
+            if isinstance(e, type) and issubclass(e, Exception)
+        }
+
+        listed = set()
+        for cls_list, _ in ALL_EXC:
+            listed.update(cls_list)
+
+        eq_(found, listed)
+
+    def make_combinations():
+        unroll = []
+        for cls_list, callable_list in ALL_EXC:
+            unroll.extend(product(cls_list, callable_list))
+
+        return combinations_list(unroll)
+
+    @make_combinations()
+    def test_exc(self, cls, ctor):
+        inst = ctor(cls)
+        re_created = pickle.loads(pickle.dumps(inst))
+
+        eq_(re_created.__class__, cls)
+        eq_(re_created.args, inst.args)
+        eq_(re_created.__dict__, inst.__dict__)

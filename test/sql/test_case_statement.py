@@ -2,7 +2,7 @@ from sqlalchemy import and_
 from sqlalchemy import case
 from sqlalchemy import cast
 from sqlalchemy import Column
-from sqlalchemy import exc
+from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import literal_column
 from sqlalchemy import MetaData
@@ -13,7 +13,6 @@ from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy.sql import column
 from sqlalchemy.sql import table
-from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
@@ -26,8 +25,8 @@ class CaseTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
     @classmethod
-    def setup_class(cls):
-        metadata = MetaData(testing.db)
+    def setup_test_class(cls):
+        metadata = MetaData()
         global info_table
         info_table = Table(
             "infos",
@@ -36,42 +35,39 @@ class CaseTest(fixtures.TestBase, AssertsCompiledSQL):
             Column("info", String(30)),
         )
 
-        info_table.create()
+        with testing.db.begin() as conn:
+            info_table.create(conn)
 
-        info_table.insert().execute(
-            {"pk": 1, "info": "pk_1_data"},
-            {"pk": 2, "info": "pk_2_data"},
-            {"pk": 3, "info": "pk_3_data"},
-            {"pk": 4, "info": "pk_4_data"},
-            {"pk": 5, "info": "pk_5_data"},
-            {"pk": 6, "info": "pk_6_data"},
-        )
+            conn.execute(
+                info_table.insert(),
+                [
+                    {"pk": 1, "info": "pk_1_data"},
+                    {"pk": 2, "info": "pk_2_data"},
+                    {"pk": 3, "info": "pk_3_data"},
+                    {"pk": 4, "info": "pk_4_data"},
+                    {"pk": 5, "info": "pk_5_data"},
+                    {"pk": 6, "info": "pk_6_data"},
+                ],
+            )
 
     @classmethod
-    def teardown_class(cls):
-        info_table.drop()
+    def teardown_test_class(cls):
+        with testing.db.begin() as conn:
+            info_table.drop(conn)
 
     @testing.fails_on("firebird", "FIXME: unknown")
     @testing.requires.subqueries
-    def test_case(self):
+    def test_case(self, connection):
         inner = select(
-            [
-                case(
-                    [
-                        [info_table.c.pk < 3, "lessthan3"],
-                        [
-                            and_(info_table.c.pk >= 3, info_table.c.pk < 7),
-                            "gt3",
-                        ],
-                    ]
-                ).label("x"),
-                info_table.c.pk,
-                info_table.c.info,
-            ],
-            from_obj=[info_table],
-        )
+            case(
+                (info_table.c.pk < 3, "lessthan3"),
+                (and_(info_table.c.pk >= 3, info_table.c.pk < 7), "gt3"),
+            ).label("x"),
+            info_table.c.pk,
+            info_table.c.info,
+        ).select_from(info_table)
 
-        inner_result = inner.execute().fetchall()
+        inner_result = connection.execute(inner).all()
 
         # Outputs:
         # lessthan3 1 pk_1_data
@@ -80,18 +76,21 @@ class CaseTest(fixtures.TestBase, AssertsCompiledSQL):
         # gt3 4 pk_4_data
         # gt3 5 pk_5_data
         # gt3 6 pk_6_data
-        assert inner_result == [
-            ("lessthan3", 1, "pk_1_data"),
-            ("lessthan3", 2, "pk_2_data"),
-            ("gt3", 3, "pk_3_data"),
-            ("gt3", 4, "pk_4_data"),
-            ("gt3", 5, "pk_5_data"),
-            ("gt3", 6, "pk_6_data"),
-        ]
+        eq_(
+            inner_result,
+            [
+                ("lessthan3", 1, "pk_1_data"),
+                ("lessthan3", 2, "pk_2_data"),
+                ("gt3", 3, "pk_3_data"),
+                ("gt3", 4, "pk_4_data"),
+                ("gt3", 5, "pk_5_data"),
+                ("gt3", 6, "pk_6_data"),
+            ],
+        )
 
-        outer = select([inner.alias("q_inner")])
+        outer = select(inner.alias("q_inner"))
 
-        outer_result = outer.execute().fetchall()
+        outer_result = connection.execute(outer).all()
 
         assert outer_result == [
             ("lessthan3", 1, "pk_1_data"),
@@ -103,136 +102,206 @@ class CaseTest(fixtures.TestBase, AssertsCompiledSQL):
         ]
 
         w_else = select(
+            case(
+                [info_table.c.pk < 3, cast(3, Integer)],
+                [and_(info_table.c.pk >= 3, info_table.c.pk < 6), 6],
+                else_=0,
+            ).label("x"),
+            info_table.c.pk,
+            info_table.c.info,
+        ).select_from(info_table)
+
+        else_result = connection.execute(w_else).all()
+
+        eq_(
+            else_result,
             [
-                case(
-                    [
-                        [info_table.c.pk < 3, cast(3, Integer)],
-                        [and_(info_table.c.pk >= 3, info_table.c.pk < 6), 6],
-                    ],
-                    else_=0,
-                ).label("x"),
-                info_table.c.pk,
-                info_table.c.info,
+                (3, 1, "pk_1_data"),
+                (3, 2, "pk_2_data"),
+                (6, 3, "pk_3_data"),
+                (6, 4, "pk_4_data"),
+                (6, 5, "pk_5_data"),
+                (0, 6, "pk_6_data"),
             ],
-            from_obj=[info_table],
         )
 
-        else_result = w_else.execute().fetchall()
+    def test_literal_interpretation_one(self):
+        """note this is modified as of #7287 to accept strings, tuples
+        and other literal values as input
+        where they are interpreted as bound values just like any other
+        expression.
 
-        assert else_result == [
-            (3, 1, "pk_1_data"),
-            (3, 2, "pk_2_data"),
-            (6, 3, "pk_3_data"),
-            (6, 4, "pk_4_data"),
-            (6, 5, "pk_5_data"),
-            (0, 6, "pk_6_data"),
-        ]
+        Previously, an exception would be raised that the literal was
+        ambiguous.
 
-    def test_literal_interpretation_ambiguous(self):
-        assert_raises_message(
-            exc.ArgumentError,
-            r"Ambiguous literal: 'x'.  Use the 'text\(\)' function",
-            case,
-            [("x", "y")],
+
+        """
+        self.assert_compile(
+            case(("x", "y")),
+            "CASE WHEN :param_1 THEN :param_2 END",
+            checkparams={"param_1": "x", "param_2": "y"},
         )
 
-    def test_literal_interpretation_ambiguous_tuple(self):
-        assert_raises_message(
-            exc.ArgumentError,
-            r"Ambiguous literal: \('x', 'y'\).  Use the 'text\(\)' function",
-            case,
-            [(("x", "y"), "z")],
+    def test_literal_interpretation_two(self):
+        """note this is modified as of #7287 to accept strings, tuples
+        and other literal values as input
+        where they are interpreted as bound values just like any other
+        expression.
+
+        Previously, an exception would be raised that the literal was
+        ambiguous.
+
+
+        """
+        self.assert_compile(
+            case(
+                (("x", "y"), "z"),
+            ),
+            "CASE WHEN :param_1 THEN :param_2 END",
+            checkparams={"param_1": ("x", "y"), "param_2": "z"},
         )
 
-    def test_literal_interpretation(self):
+    def test_literal_interpretation_two_point_five(self):
+        """note this is modified as of #7287 to accept strings, tuples
+        and other literal values as input
+        where they are interpreted as bound values just like any other
+        expression.
+
+        Previously, an exception would be raised that the literal was
+        ambiguous.
+
+
+        """
+        self.assert_compile(
+            case(
+                (12, "z"),
+            ),
+            "CASE WHEN :param_1 THEN :param_2 END",
+            checkparams={"param_1": 12, "param_2": "z"},
+        )
+
+    def test_literal_interpretation_three(self):
         t = table("test", column("col1"))
 
         self.assert_compile(
-            case([("x", "y")], value=t.c.col1),
+            case(("x", "y"), value=t.c.col1),
             "CASE test.col1 WHEN :param_1 THEN :param_2 END",
         )
         self.assert_compile(
-            case([(t.c.col1 == 7, "y")], else_="z"),
+            case((t.c.col1 == 7, "y"), else_="z"),
             "CASE WHEN (test.col1 = :col1_1) THEN :param_1 ELSE :param_2 END",
         )
 
-    def test_text_doesnt_explode(self):
+    @testing.combinations(
+        (
+            (lambda t: ({"x": "y"}, t.c.col1, None)),
+            "CASE test.col1 WHEN :param_1 THEN :param_2 END",
+        ),
+        (
+            (lambda t: ({"x": "y", "p": "q"}, t.c.col1, None)),
+            "CASE test.col1 WHEN :param_1 THEN :param_2 "
+            "WHEN :param_3 THEN :param_4 END",
+        ),
+        (
+            (lambda t: ({t.c.col1 == 7: "x"}, None, 10)),
+            "CASE WHEN (test.col1 = :col1_1) THEN :param_1 ELSE :param_2 END",
+        ),
+        (
+            (lambda t: ({t.c.col1 == 7: "x", t.c.col1 == 10: "y"}, None, 10)),
+            "CASE WHEN (test.col1 = :col1_1) THEN :param_1 "
+            "WHEN (test.col1 = :col1_2) THEN :param_2 ELSE :param_3 END",
+        ),
+        argnames="test_case, expected",
+    )
+    def test_when_dicts(self, test_case, expected):
+        t = table("test", column("col1"))
+
+        whens, value, else_ = testing.resolve_lambda(test_case, t=t)
+
+        def _case_args(whens, value=None, else_=None):
+            kw = {}
+            if value is not None:
+                kw["value"] = value
+            if else_ is not None:
+                kw["else_"] = else_
+
+            return case(whens, **kw)
+
+            # note: 1.3 also does not allow this form
+            # case([whens], **kw)
+
+        self.assert_compile(
+            _case_args(whens=whens, value=value, else_=else_),
+            expected,
+        )
+
+    def test_text_doesnt_explode(self, connection):
 
         for s in [
             select(
-                [
-                    case(
-                        [(info_table.c.info == "pk_4_data", text("'yes'"))],
-                        else_=text("'no'"),
-                    )
-                ]
+                case(
+                    (info_table.c.info == "pk_4_data", text("'yes'")),
+                    else_=text("'no'"),
+                )
             ).order_by(info_table.c.info),
             select(
-                [
-                    case(
-                        [
-                            (
-                                info_table.c.info == "pk_4_data",
-                                literal_column("'yes'"),
-                            )
-                        ],
-                        else_=literal_column("'no'"),
-                    )
-                ]
+                case(
+                    (
+                        info_table.c.info == "pk_4_data",
+                        literal_column("'yes'"),
+                    ),
+                    else_=literal_column("'no'"),
+                )
             ).order_by(info_table.c.info),
         ]:
-            if testing.against("firebird"):
-                eq_(
-                    s.execute().fetchall(),
-                    [
-                        ("no ",),
-                        ("no ",),
-                        ("no ",),
-                        ("yes",),
-                        ("no ",),
-                        ("no ",),
-                    ],
-                )
-            else:
-                eq_(
-                    s.execute().fetchall(),
-                    [("no",), ("no",), ("no",), ("yes",), ("no",), ("no",)],
-                )
+            eq_(
+                connection.execute(s).all(),
+                [("no",), ("no",), ("no",), ("yes",), ("no",), ("no",)],
+            )
 
-    @testing.fails_on("firebird", "FIXME: unknown")
+    def test_text_doenst_explode_even_in_whenlist(self):
+        """test #7287"""
+        self.assert_compile(
+            case(
+                (text(":case = 'upper'"), func.upper(literal_column("q"))),
+                else_=func.lower(literal_column("q")),
+            ),
+            "CASE WHEN :case = 'upper' THEN upper(q) ELSE lower(q) END",
+        )
+
     def testcase_with_dict(self):
         query = select(
+            case(
+                {
+                    info_table.c.pk < 3: "lessthan3",
+                    info_table.c.pk >= 3: "gt3",
+                },
+                else_="other",
+            ),
+            info_table.c.pk,
+            info_table.c.info,
+        ).select_from(info_table)
+        eq_(
+            query.execute().fetchall(),
             [
-                case(
-                    {
-                        info_table.c.pk < 3: "lessthan3",
-                        info_table.c.pk >= 3: "gt3",
-                    },
-                    else_="other",
-                ),
-                info_table.c.pk,
-                info_table.c.info,
+                ("lessthan3", 1, "pk_1_data"),
+                ("lessthan3", 2, "pk_2_data"),
+                ("gt3", 3, "pk_3_data"),
+                ("gt3", 4, "pk_4_data"),
+                ("gt3", 5, "pk_5_data"),
+                ("gt3", 6, "pk_6_data"),
             ],
-            from_obj=[info_table],
         )
-        assert query.execute().fetchall() == [
-            ("lessthan3", 1, "pk_1_data"),
-            ("lessthan3", 2, "pk_2_data"),
-            ("gt3", 3, "pk_3_data"),
-            ("gt3", 4, "pk_4_data"),
-            ("gt3", 5, "pk_5_data"),
-            ("gt3", 6, "pk_6_data"),
-        ]
 
-        simple_query = select(
-            [
+        simple_query = (
+            select(
                 case(
                     {1: "one", 2: "two"}, value=info_table.c.pk, else_="other"
                 ),
                 info_table.c.pk,
-            ],
-            whereclause=info_table.c.pk < 4,
-            from_obj=[info_table],
+            )
+            .where(info_table.c.pk < 4)
+            .select_from(info_table)
         )
 
         assert simple_query.execute().fetchall() == [

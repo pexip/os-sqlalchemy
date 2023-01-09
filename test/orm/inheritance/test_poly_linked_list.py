@@ -1,13 +1,13 @@
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
+from sqlalchemy import testing
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -17,8 +17,7 @@ class PolymorphicCircularTest(fixtures.MappedTest):
 
     @classmethod
     def define_tables(cls, metadata):
-        global Table1, Table1B, Table2, Table3, Data
-        table1 = Table(
+        Table(
             "table1",
             metadata,
             Column(
@@ -31,19 +30,19 @@ class PolymorphicCircularTest(fixtures.MappedTest):
             Column("name", String(30)),
         )
 
-        table2 = Table(
+        Table(
             "table2",
             metadata,
             Column("id", Integer, ForeignKey("table1.id"), primary_key=True),
         )
 
-        table3 = Table(
+        Table(
             "table3",
             metadata,
             Column("id", Integer, ForeignKey("table1.id"), primary_key=True),
         )
 
-        data = Table(
+        Table(
             "data",
             metadata,
             Column(
@@ -53,6 +52,12 @@ class PolymorphicCircularTest(fixtures.MappedTest):
             Column("data", String(30)),
         )
 
+    @classmethod
+    def setup_mappers(cls):
+        global Table1, Table1B, Table2, Table3, Data
+        table1, table2, table3, data = cls.tables(
+            "table1", "table2", "table3", "data"
+        )
         # join = polymorphic_union(
         #   {
         #   'table3' : table1.join(table3),
@@ -60,8 +65,11 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         #   'table1' : table1.select(table1.c.type.in_(['table1', 'table1b'])),
         #   }, None, 'pjoin')
 
-        join = table1.outerjoin(table2).outerjoin(table3).alias("pjoin")
-        # join = None
+        with testing.expect_deprecated_20(
+            r"The Join.alias\(\) method is considered legacy"
+        ):
+            join = table1.outerjoin(table2).outerjoin(table3).alias("pjoin")
+            # join = None
 
         class Table1(object):
             def __init__(self, name, data=None):
@@ -100,7 +108,7 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         try:
             # this is how the mapping used to work.  ensure that this raises an
             # error now
-            table1_mapper = mapper(
+            table1_mapper = cls.mapper_registry.map_imperatively(
                 Table1,
                 table1,
                 select_table=join,
@@ -115,7 +123,9 @@ class PolymorphicCircularTest(fixtures.MappedTest):
                         uselist=False,
                         primaryjoin=join.c.id == join.c.related_id,
                     ),
-                    "data": relationship(mapper(Data, data)),
+                    "data": relationship(
+                        cls.mapper_registry.map_imperatively(Data, data)
+                    ),
                 },
             )
             configure_mappers()
@@ -133,7 +143,7 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         # gets an exception instead of it silently not eager loading.
         # NOTE: using "nxt" instead of "next" to avoid 2to3 turning it into
         # __next__() for some reason.
-        table1_mapper = mapper(
+        table1_mapper = cls.mapper_registry.map_imperatively(
             Table1,
             table1,
             # select_table=join,
@@ -149,21 +159,25 @@ class PolymorphicCircularTest(fixtures.MappedTest):
                     primaryjoin=table1.c.id == table1.c.related_id,
                 ),
                 "data": relationship(
-                    mapper(Data, data), lazy="joined", order_by=data.c.id
+                    cls.mapper_registry.map_imperatively(Data, data),
+                    lazy="joined",
+                    order_by=data.c.id,
                 ),
             },
         )
 
-        mapper(Table1B, inherits=table1_mapper, polymorphic_identity="table1b")
+        cls.mapper_registry.map_imperatively(
+            Table1B, inherits=table1_mapper, polymorphic_identity="table1b"
+        )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Table2,
             table2,
             inherits=table1_mapper,
             polymorphic_identity="table2",
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Table3,
             table3,
             inherits=table1_mapper,
@@ -207,7 +221,7 @@ class PolymorphicCircularTest(fixtures.MappedTest):
         )
 
     def _testlist(self, classes):
-        sess = create_session()
+        sess = fixture_session()
 
         # create objects in a linked list
         count = 1

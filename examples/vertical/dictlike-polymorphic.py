@@ -67,8 +67,8 @@ class PolymorphicVerticalProperty(object):
 
     @value.comparator
     class value(PropComparator):
-        """A comparator for .value, builds a polymorphic comparison via
-        CASE."""
+        """A comparator for .value, builds a polymorphic comparison
+        via CASE."""
 
         def __init__(self, cls):
             self.cls = cls
@@ -83,7 +83,7 @@ class PolymorphicVerticalProperty(object):
                 for attribute, discriminator in pairs
                 if attribute is not None
             ]
-            return case(whens, self.cls.type, null())
+            return case(whens, value=self.cls.type, else_=null())
 
         def __eq__(self, other):
             return self._case() == cast(other, String)

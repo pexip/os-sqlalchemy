@@ -4,7 +4,6 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.engine import default
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import joinedload
@@ -17,6 +16,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.entities import ComparableEntity
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from .inheritance._poly_fixtures import _PolymorphicAliasedJoins
 from .inheritance._poly_fixtures import _PolymorphicJoins
@@ -34,14 +34,14 @@ class _PolymorphicTestBase(object):
     __dialect__ = "default"
 
     def test_any_one(self):
-        sess = Session()
+        sess = fixture_session()
         any_ = Company.employees.of_type(Engineer).any(
             Engineer.primary_language == "cobol"
         )
         eq_(sess.query(Company).filter(any_).one(), self.c2)
 
     def test_any_two(self):
-        sess = Session()
+        sess = fixture_session()
         calias = aliased(Company)
         any_ = calias.employees.of_type(Engineer).any(
             Engineer.primary_language == "cobol"
@@ -49,26 +49,26 @@ class _PolymorphicTestBase(object):
         eq_(sess.query(calias).filter(any_).one(), self.c2)
 
     def test_any_three(self):
-        sess = Session()
+        sess = fixture_session()
         any_ = Company.employees.of_type(Boss).any(Boss.golf_swing == "fore")
         eq_(sess.query(Company).filter(any_).one(), self.c1)
 
     def test_any_four(self):
-        sess = Session()
-        any_ = Company.employees.of_type(Boss).any(
+        sess = fixture_session()
+        any_ = Company.employees.of_type(Manager).any(
             Manager.manager_name == "pointy"
         )
         eq_(sess.query(Company).filter(any_).one(), self.c1)
 
     def test_any_five(self):
-        sess = Session()
+        sess = fixture_session()
         any_ = Company.employees.of_type(Engineer).any(
             and_(Engineer.primary_language == "cobol")
         )
         eq_(sess.query(Company).filter(any_).one(), self.c2)
 
     def test_join_to_subclass_one(self):
-        sess = Session()
+        sess = fixture_session()
         eq_(
             sess.query(Company)
             .join(Company.employees.of_type(Engineer))
@@ -78,17 +78,18 @@ class _PolymorphicTestBase(object):
         )
 
     def test_join_to_subclass_two(self):
-        sess = Session()
+        sess = fixture_session()
         eq_(
             sess.query(Company)
-            .join(Company.employees.of_type(Engineer), "machines")
+            .join(Company.employees.of_type(Engineer))
+            .join(Engineer.machines)
             .filter(Machine.name.ilike("%thinkpad%"))
             .all(),
             [self.c1],
         )
 
     def test_join_to_subclass_three(self):
-        sess = Session()
+        sess = fixture_session()
         eq_(
             sess.query(Company, Engineer)
             .join(Company.employees.of_type(Engineer))
@@ -98,7 +99,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_join_to_subclass_four(self):
-        sess = Session()
+        sess = fixture_session()
         # test [ticket:2093]
         eq_(
             sess.query(Company.company_id, Engineer)
@@ -109,7 +110,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_join_to_subclass_five(self):
-        sess = Session()
+        sess = fixture_session()
         eq_(
             sess.query(Company)
             .join(Company.employees.of_type(Engineer))
@@ -119,7 +120,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_with_polymorphic_join_compile_one(self):
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(Company).join(
@@ -135,7 +136,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_with_polymorphic_join_exec_contains_eager_one(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             wp = with_polymorphic(
@@ -164,7 +165,7 @@ class _PolymorphicTestBase(object):
     def test_with_polymorphic_join_exec_contains_eager_two(
         self, contains_eager_option
     ):
-        sess = Session()
+        sess = fixture_session()
 
         wp = with_polymorphic(Person, [Engineer, Manager], aliased=True)
         contains_eager_option = testing.resolve_lambda(
@@ -188,7 +189,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_with_polymorphic_any(self):
-        sess = Session()
+        sess = fixture_session()
         wp = with_polymorphic(Person, [Engineer], aliased=True)
         eq_(
             sess.query(Company.company_id)
@@ -202,7 +203,7 @@ class _PolymorphicTestBase(object):
         )
 
     def test_subqueryload_implicit_withpoly(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             eq_(
@@ -216,7 +217,7 @@ class _PolymorphicTestBase(object):
         self.assert_sql_count(testing.db, go, 4)
 
     def test_joinedload_implicit_withpoly(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             eq_(
@@ -230,7 +231,7 @@ class _PolymorphicTestBase(object):
         self.assert_sql_count(testing.db, go, 3)
 
     def test_subqueryload_explicit_withpoly(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             target = with_polymorphic(Person, Engineer)
@@ -245,7 +246,7 @@ class _PolymorphicTestBase(object):
         self.assert_sql_count(testing.db, go, 4)
 
     def test_joinedload_explicit_withpoly(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             target = with_polymorphic(Person, Engineer, flat=True)
@@ -260,7 +261,7 @@ class _PolymorphicTestBase(object):
         self.assert_sql_count(testing.db, go, 3)
 
     def test_joinedload_stacked_of_type(self):
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             eq_(
@@ -281,17 +282,12 @@ class PolymorphicPolymorphicTest(
     _PolymorphicTestBase, _PolymorphicPolymorphic
 ):
     def _polymorphic_join_target(self, cls):
-        from sqlalchemy.orm import class_mapper
-
-        from sqlalchemy.sql.expression import FromGrouping
-
-        m, sel = class_mapper(Person)._with_polymorphic_args(cls)
-        sel = FromGrouping(sel.alias(flat=True))
-        comp_sel = sel.compile(dialect=default.DefaultDialect())
-
         return (
-            comp_sel.process(sel, asfrom=True).replace("\n", "")
-            + " ON companies.company_id = people_1.company_id"
+            "(people AS people_1 LEFT OUTER JOIN engineers AS engineers_1 "
+            "ON people_1.person_id = engineers_1.person_id "
+            "LEFT OUTER JOIN managers AS managers_1 "
+            "ON people_1.person_id = managers_1.person_id) "
+            "ON companies.company_id = people_1.company_id"
         )
 
     def _test_with_polymorphic_join_exec_contains_eager_two_result(self):
@@ -329,25 +325,33 @@ class PolymorphicPolymorphicTest(
 
 class PolymorphicUnionsTest(_PolymorphicTestBase, _PolymorphicUnions):
     def _polymorphic_join_target(self, cls):
-        from sqlalchemy.orm import class_mapper
-
-        sel = class_mapper(Person)._with_polymorphic_selectable.element
-        comp_sel = sel.compile(dialect=default.DefaultDialect())
-
         return (
-            comp_sel.process(sel, asfrom=True).replace("\n", "")
-            + " AS anon_1 ON companies.company_id = anon_1.company_id"
+            "(SELECT engineers.person_id AS person_id, people.company_id "
+            "AS company_id, people.name AS name, people.type AS type, "
+            "engineers.status AS status, "
+            "engineers.engineer_name AS engineer_name, "
+            "engineers.primary_language AS primary_language, "
+            "CAST(NULL AS VARCHAR(50)) AS manager_name FROM people "
+            "JOIN engineers ON people.person_id = engineers.person_id "
+            "UNION ALL SELECT managers.person_id AS person_id, "
+            "people.company_id AS company_id, people.name AS name, "
+            "people.type AS type, managers.status AS status, "
+            "CAST(NULL AS VARCHAR(50)) AS engineer_name, "
+            "CAST(NULL AS VARCHAR(50)) AS primary_language, "
+            "managers.manager_name AS manager_name FROM people "
+            "JOIN managers ON people.person_id = managers.person_id) "
+            "AS pjoin_1 ON companies.company_id = pjoin_1.company_id"
         )
 
     def _test_with_polymorphic_join_exec_contains_eager_two_result(self):
         return (
-            "SELECT anon_1.person_id AS anon_1_person_id, "
-            "anon_1.company_id AS anon_1_company_id, anon_1.name AS "
-            "anon_1_name, anon_1.type AS anon_1_type, anon_1.status "
-            "AS anon_1_status, anon_1.engineer_name AS "
-            "anon_1_engineer_name, anon_1.primary_language AS "
-            "anon_1_primary_language, anon_1.manager_name AS "
-            "anon_1_manager_name, companies.company_id AS "
+            "SELECT pjoin_1.person_id AS pjoin_1_person_id, "
+            "pjoin_1.company_id AS pjoin_1_company_id, pjoin_1.name AS "
+            "pjoin_1_name, pjoin_1.type AS pjoin_1_type, pjoin_1.status "
+            "AS pjoin_1_status, pjoin_1.engineer_name AS "
+            "pjoin_1_engineer_name, pjoin_1.primary_language AS "
+            "pjoin_1_primary_language, pjoin_1.manager_name AS "
+            "pjoin_1_manager_name, companies.company_id AS "
             "companies_company_id, companies.name AS companies_name "
             "FROM companies JOIN (SELECT engineers.person_id AS "
             "person_id, people.company_id AS company_id, people.name AS name, "
@@ -363,8 +367,8 @@ class PolymorphicUnionsTest(_PolymorphicTestBase, _PolymorphicUnions):
             "CAST(NULL AS VARCHAR(50)) AS primary_language, "
             "managers.manager_name AS manager_name FROM people "
             "JOIN managers ON people.person_id = managers.person_id) AS "
-            "anon_1 ON companies.company_id = anon_1.company_id "
-            "ORDER BY companies.company_id, anon_1.person_id"
+            "pjoin_1 ON companies.company_id = pjoin_1.company_id "
+            "ORDER BY companies.company_id, pjoin_1.person_id"
         )
 
 
@@ -372,30 +376,38 @@ class PolymorphicAliasedJoinsTest(
     _PolymorphicTestBase, _PolymorphicAliasedJoins
 ):
     def _polymorphic_join_target(self, cls):
-        from sqlalchemy.orm import class_mapper
-
-        sel = class_mapper(Person)._with_polymorphic_selectable.element
-        comp_sel = sel.compile(dialect=default.DefaultDialect())
-
         return (
-            comp_sel.process(sel, asfrom=True).replace("\n", "")
-            + " AS anon_1 ON companies.company_id = anon_1.people_company_id"
+            "(SELECT people.person_id AS people_person_id, "
+            "people.company_id AS people_company_id, "
+            "people.name AS people_name, people.type AS people_type, "
+            "engineers.person_id AS engineers_person_id, "
+            "engineers.status AS engineers_status, "
+            "engineers.engineer_name AS engineers_engineer_name, "
+            "engineers.primary_language AS engineers_primary_language, "
+            "managers.person_id AS managers_person_id, "
+            "managers.status AS managers_status, "
+            "managers.manager_name AS managers_manager_name "
+            "FROM people LEFT OUTER JOIN engineers "
+            "ON people.person_id = engineers.person_id "
+            "LEFT OUTER JOIN managers "
+            "ON people.person_id = managers.person_id) AS pjoin_1 "
+            "ON companies.company_id = pjoin_1.people_company_id"
         )
 
     def _test_with_polymorphic_join_exec_contains_eager_two_result(self):
         return (
-            "SELECT anon_1.people_person_id AS anon_1_people_person_id, "
-            "anon_1.people_company_id AS anon_1_people_company_id, "
-            "anon_1.people_name AS anon_1_people_name, anon_1.people_type "
-            "AS anon_1_people_type, anon_1.engineers_person_id AS "
-            "anon_1_engineers_person_id, anon_1.engineers_status AS "
-            "anon_1_engineers_status, anon_1.engineers_engineer_name "
-            "AS anon_1_engineers_engineer_name, "
-            "anon_1.engineers_primary_language AS "
-            "anon_1_engineers_primary_language, anon_1.managers_person_id "
-            "AS anon_1_managers_person_id, anon_1.managers_status "
-            "AS anon_1_managers_status, anon_1.managers_manager_name "
-            "AS anon_1_managers_manager_name, companies.company_id "
+            "SELECT pjoin_1.people_person_id AS pjoin_1_people_person_id, "
+            "pjoin_1.people_company_id AS pjoin_1_people_company_id, "
+            "pjoin_1.people_name AS pjoin_1_people_name, pjoin_1.people_type "
+            "AS pjoin_1_people_type, pjoin_1.engineers_person_id AS "
+            "pjoin_1_engineers_person_id, pjoin_1.engineers_status AS "
+            "pjoin_1_engineers_status, pjoin_1.engineers_engineer_name "
+            "AS pjoin_1_engineers_engineer_name, "
+            "pjoin_1.engineers_primary_language AS "
+            "pjoin_1_engineers_primary_language, pjoin_1.managers_person_id "
+            "AS pjoin_1_managers_person_id, pjoin_1.managers_status "
+            "AS pjoin_1_managers_status, pjoin_1.managers_manager_name "
+            "AS pjoin_1_managers_manager_name, companies.company_id "
             "AS companies_company_id, companies.name AS companies_name "
             "FROM companies JOIN (SELECT people.person_id AS "
             "people_person_id, people.company_id AS people_company_id, "
@@ -408,25 +420,20 @@ class PolymorphicAliasedJoinsTest(
             "managers.manager_name AS managers_manager_name FROM people "
             "LEFT OUTER JOIN engineers ON people.person_id = "
             "engineers.person_id LEFT OUTER JOIN managers "
-            "ON people.person_id = managers.person_id) AS anon_1 "
-            "ON companies.company_id = anon_1.people_company_id "
-            "ORDER BY companies.company_id, anon_1.people_person_id"
+            "ON people.person_id = managers.person_id) AS pjoin_1 "
+            "ON companies.company_id = pjoin_1.people_company_id "
+            "ORDER BY companies.company_id, pjoin_1.people_person_id"
         )
 
 
 class PolymorphicJoinsTest(_PolymorphicTestBase, _PolymorphicJoins):
     def _polymorphic_join_target(self, cls):
-        from sqlalchemy.orm import class_mapper
-        from sqlalchemy.sql.expression import FromGrouping
-
-        sel = FromGrouping(
-            class_mapper(Person)._with_polymorphic_selectable.alias(flat=True)
-        )
-        comp_sel = sel.compile(dialect=default.DefaultDialect())
-
         return (
-            comp_sel.process(sel, asfrom=True).replace("\n", "")
-            + " ON companies.company_id = people_1.company_id"
+            "(people AS people_1 LEFT OUTER JOIN engineers "
+            "AS engineers_1 ON people_1.person_id = engineers_1.person_id "
+            "LEFT OUTER JOIN managers AS managers_1 "
+            "ON people_1.person_id = managers_1.person_id) "
+            "ON companies.company_id = people_1.company_id"
         )
 
     def _test_with_polymorphic_join_exec_contains_eager_two_result(self):
@@ -462,7 +469,7 @@ class PolymorphicJoinsTest(_PolymorphicTestBase, _PolymorphicJoins):
         )
 
     def test_joinedload_explicit_with_unaliased_poly_compile(self):
-        sess = Session()
+        sess = fixture_session()
         target = with_polymorphic(Person, Engineer)
         q = (
             sess.query(Company)
@@ -476,7 +483,7 @@ class PolymorphicJoinsTest(_PolymorphicTestBase, _PolymorphicJoins):
         )
 
     def test_joinedload_explicit_with_flataliased_poly_compile(self):
-        sess = Session()
+        sess = fixture_session()
         target = with_polymorphic(Person, Engineer, flat=True)
         q = (
             sess.query(Company)
@@ -747,7 +754,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob, aliased=True, flat=True)
 
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Job)
             .join(DataContainer.jobs)
@@ -777,7 +784,7 @@ class SubclassRelationshipTest(
 
         Job_A = aliased(Job)
 
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Job)
             .join(DataContainer.jobs)
@@ -809,7 +816,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(DataContainer.jobs.of_type(Job_P))
         self.assert_compile(
             q,
@@ -827,7 +834,7 @@ class SubclassRelationshipTest(
             self.classes.SubJob,
         )
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(DataContainer.jobs.of_type(SubJob))
         # note the of_type() here renders JOIN for the Job->SubJob.
         # this is because it's using the SubJob mapper directly within
@@ -851,7 +858,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob, innerjoin=True)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(DataContainer.jobs.of_type(Job_P))
         self.assert_compile(
             q,
@@ -870,7 +877,7 @@ class SubclassRelationshipTest(
 
         Job_A = aliased(Job)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(DataContainer.jobs.of_type(Job_A))
         self.assert_compile(
             q,
@@ -889,7 +896,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(Job_P, DataContainer.jobs)
         self.assert_compile(
             q,
@@ -910,7 +917,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob, flat=True)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(Job_P, DataContainer.jobs)
         self.assert_compile(
             q,
@@ -931,7 +938,7 @@ class SubclassRelationshipTest(
 
         Job_P = with_polymorphic(Job, SubJob, aliased=True)
 
-        s = Session()
+        s = fixture_session()
         q = s.query(DataContainer).join(Job_P, DataContainer.jobs)
         self.assert_compile(
             q,
@@ -1144,9 +1151,10 @@ class SubclassRelationshipTest3(
         "c.id AS c_id, c.type AS c_type, c.b_id AS c_b_id, a.id AS a_id, "
         "a.type AS a_type "
         "FROM a LEFT OUTER JOIN b ON "
-        "a.id = b.a_id AND b.type IN (:type_1) "
+        "a.id = b.a_id AND b.type IN (__[POSTCOMPILE_type_1]) "
         "LEFT OUTER JOIN c ON "
-        "b.id = c.b_id AND c.type IN (:type_2) WHERE a.type IN (:type_3)"
+        "b.id = c.b_id AND c.type IN (__[POSTCOMPILE_type_2]) "
+        "WHERE a.type IN (__[POSTCOMPILE_type_3])"
     )
 
     _query2 = (
@@ -1154,10 +1162,10 @@ class SubclassRelationshipTest3(
         "ccc.id AS ccc_id, ccc.type AS ccc_type, ccc.b_id AS ccc_b_id, "
         "aaa.id AS aaa_id, aaa.type AS aaa_type "
         "FROM a AS aaa LEFT OUTER JOIN b AS bbb "
-        "ON aaa.id = bbb.a_id AND bbb.type IN (:type_1) "
+        "ON aaa.id = bbb.a_id AND bbb.type IN (__[POSTCOMPILE_type_1]) "
         "LEFT OUTER JOIN c AS ccc ON "
-        "bbb.id = ccc.b_id AND ccc.type IN (:type_2) "
-        "WHERE aaa.type IN (:type_3)"
+        "bbb.id = ccc.b_id AND ccc.type IN (__[POSTCOMPILE_type_2]) "
+        "WHERE aaa.type IN (__[POSTCOMPILE_type_3])"
     )
 
     _query3 = (
@@ -1165,10 +1173,10 @@ class SubclassRelationshipTest3(
         "c.id AS c_id, c.type AS c_type, c.b_id AS c_b_id, "
         "aaa.id AS aaa_id, aaa.type AS aaa_type "
         "FROM a AS aaa LEFT OUTER JOIN b AS bbb "
-        "ON aaa.id = bbb.a_id AND bbb.type IN (:type_1) "
+        "ON aaa.id = bbb.a_id AND bbb.type IN (__[POSTCOMPILE_type_1]) "
         "LEFT OUTER JOIN c ON "
-        "bbb.id = c.b_id AND c.type IN (:type_2) "
-        "WHERE aaa.type IN (:type_3)"
+        "bbb.id = c.b_id AND c.type IN (__[POSTCOMPILE_type_2]) "
+        "WHERE aaa.type IN (__[POSTCOMPILE_type_3])"
     )
 
     def _test(self, join_of_type, of_type_for_c1, aliased_):
@@ -1179,7 +1187,7 @@ class SubclassRelationshipTest3(
             B1 = aliased(B1, name="bbb")
             C1 = aliased(C1, name="ccc")
 
-        sess = Session()
+        sess = fixture_session()
         abc = sess.query(A1)
 
         if join_of_type:

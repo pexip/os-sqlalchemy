@@ -18,8 +18,9 @@ The Query Object
 
 Following is the full interface for the :class:`_query.Query` object.
 
-.. autoclass:: sqlalchemy.orm.query.Query
+.. autoclass:: sqlalchemy.orm.Query
    :members:
+   :inherited-members:
 
 ORM-Specific Query Constructs
 =============================
@@ -30,14 +31,14 @@ ORM-Specific Query Constructs
 
 .. autoclass:: sqlalchemy.orm.util.AliasedInsp
 
-.. autoclass:: sqlalchemy.orm.query.Bundle
+.. autoclass:: sqlalchemy.orm.Bundle
     :members:
 
-.. autoclass:: sqlalchemy.util.KeyedTuple
-    :members: keys, _fields, _asdict
-
-.. autoclass:: sqlalchemy.orm.strategy_options.Load
+.. autoclass:: sqlalchemy.orm.Load
     :members:
+    :noindex:
+
+.. autofunction:: sqlalchemy.orm.with_loader_criteria
 
 .. autofunction:: join
 

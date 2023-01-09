@@ -4,22 +4,24 @@ from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import composite
 from sqlalchemy.orm import CompositeProperty
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import mapper
-from sqlalchemy.orm import persistence
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
 
 class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
+    __dialect__ = "default"
+
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -76,8 +78,10 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
                 if args:
                     self.start, self.end = args
 
-        mapper(Graph, graphs, properties={"edges": relationship(Edge)})
-        mapper(
+        cls.mapper_registry.map_imperatively(
+            Graph, graphs, properties={"edges": relationship(Edge)}
+        )
+        cls.mapper_registry.map_imperatively(
             Edge,
             edges,
             properties={
@@ -86,14 +90,14 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             },
         )
 
-    def _fixture(self):
+    def _fixture(self, future=False):
         Graph, Edge, Point = (
             self.classes.Graph,
             self.classes.Edge,
             self.classes.Point,
         )
 
-        sess = Session()
+        sess = Session(testing.db, future=future)
         g = Graph(
             id=1,
             edges=[
@@ -119,7 +123,7 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         g1 = sess.query(Graph).first()
         sess.close()
 
-        g = sess.query(Graph).get(g1.id)
+        g = sess.get(Graph, g1.id)
         eq_(
             [(e.start, e.end) for e in g.edges],
             [(Point(3, 4), Point(5, 6)), (Point(14, 5), Point(2, 7))],
@@ -138,7 +142,7 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         g.edges[1].end = Point(18, 4)
         sess.commit()
 
-        e = sess.query(Edge).get(g.edges[1].id)
+        e = sess.get(Edge, g.edges[1].id)
         eq_(e.end, Point(18, 4))
 
     def test_not_none(self):
@@ -149,7 +153,7 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         # pending/transient object.
         e1 = Edge()
         assert e1.end is None
-        sess = Session()
+        sess = fixture_session()
         sess.add(e1)
 
         # however, once it's persistent, the code as of 0.7.3
@@ -174,8 +178,8 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         sess.close()
 
         def go():
-            g2 = (
-                sess.query(Graph).options(sa.orm.joinedload("edges")).get(g.id)
+            g2 = sess.get(
+                Graph, g.id, options=[sa.orm.joinedload(Graph.edges)]
             )
 
             eq_(
@@ -227,19 +231,22 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def test_bulk_update_sql(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
-        sess = self._fixture()
+        sess = self._fixture(future=True)
 
-        e1 = sess.query(Edge).filter(Edge.start == Point(14, 5)).one()
+        e1 = sess.execute(
+            select(Edge).filter(Edge.start == Point(14, 5))
+        ).scalar_one()
 
         eq_(e1.end, Point(2, 7))
 
-        q = sess.query(Edge).filter(Edge.start == Point(14, 5))
-        bulk_ud = persistence.BulkUpdate.factory(
-            q, False, {Edge.end: Point(16, 10)}, {}
+        stmt = (
+            update(Edge)
+            .filter(Edge.start == Point(14, 5))
+            .values({Edge.end: Point(16, 10)})
         )
 
         self.assert_compile(
-            bulk_ud,
+            stmt,
             "UPDATE edges SET x2=:x2, y2=:y2 WHERE edges.x1 = :x1_1 "
             "AND edges.y1 = :y1_1",
             params={"x2": 16, "x1_1": 14, "y2": 10, "y1_1": 5},
@@ -249,16 +256,31 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def test_bulk_update_evaluate(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
-        sess = self._fixture()
+        sess = self._fixture(future=True)
 
-        e1 = sess.query(Edge).filter(Edge.start == Point(14, 5)).one()
+        e1 = sess.execute(
+            select(Edge).filter(Edge.start == Point(14, 5))
+        ).scalar_one()
 
         eq_(e1.end, Point(2, 7))
 
-        q = sess.query(Edge).filter(Edge.start == Point(14, 5))
-        q.update({Edge.end: Point(16, 10)})
+        stmt = (
+            update(Edge)
+            .filter(Edge.start == Point(14, 5))
+            .values({Edge.end: Point(16, 10)})
+        )
+        sess.execute(stmt)
 
         eq_(e1.end, Point(16, 10))
+
+        stmt = (
+            update(Edge)
+            .filter(Edge.start == Point(14, 5))
+            .values({Edge.end: Point(17, 8)})
+        )
+        sess.execute(stmt)
+
+        eq_(e1.end, Point(17, 8))
 
     def test_bulk_update_fetch(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
@@ -273,6 +295,10 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         q.update({Edge.end: Point(16, 10)}, synchronize_session="fetch")
 
         eq_(e1.end, Point(16, 10))
+
+        q.update({Edge.end: Point(17, 8)}, synchronize_session="fetch")
+
+        eq_(e1.end, Point(17, 8))
 
     def test_get_history(self):
         Edge = self.classes.Edge
@@ -309,6 +335,20 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         eq_(
             sess.query(start, end).filter(start == Point(3, 4)).all(),
             [(Point(3, 4), Point(5, 6))],
+        )
+
+    def test_cols_as_core_clauseelement(self):
+        Edge = self.classes.Edge
+        Point = self.classes.Point
+
+        start, end = Edge.start, Edge.end
+
+        stmt = select(start, end).where(start == Point(3, 4))
+        self.assert_compile(
+            stmt,
+            "SELECT edges.x1, edges.y1, edges.x2, edges.y2 "
+            "FROM edges WHERE edges.x1 = :x1_1 AND edges.y1 = :y1_1",
+            checkparams={"x1_1": 3, "y1_1": 4},
         )
 
     def test_query_cols_labeled(self):
@@ -351,13 +391,13 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         """test saving a null composite value
 
         See google groups thread for more context:
-        http://groups.google.com/group/sqlalchemy/browse_thread/thread/0c6580a1761b2c29
+        https://groups.google.com/group/sqlalchemy/browse_thread/thread/0c6580a1761b2c29
 
         """
 
         Graph, Edge = self.classes.Graph, self.classes.Edge
 
-        sess = Session()
+        sess = fixture_session()
         g = Graph(id=1)
         e = Edge(None, None)
         g.edges.append(e)
@@ -365,7 +405,7 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         sess.add(g)
         sess.commit()
 
-        g2 = sess.query(Graph).get(1)
+        g2 = sess.get(Graph, 1)
         assert g2.edges[-1].start.x is None
         assert g2.edges[-1].start.y is None
 
@@ -449,7 +489,7 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
                 self.ab = ab
 
         stuff = self.tables.stuff
-        mapper(
+        self.mapper_registry.map_imperatively(
             Thing,
             stuff,
             properties={
@@ -463,7 +503,7 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def test_round_trip(self):
         Thing, AB, CD = self._fixture()
 
-        s = Session()
+        s = fixture_session()
 
         s.add(Thing(AB("a", "b", CD("c", "d"))))
         s.commit()
@@ -515,7 +555,7 @@ class PrimaryKeyTest(fixtures.MappedTest):
             def __init__(self, version):
                 self.version = version
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Graph,
             graphs,
             properties={
@@ -528,7 +568,7 @@ class PrimaryKeyTest(fixtures.MappedTest):
     def _fixture(self):
         Graph, Version = self.classes.Graph, self.classes.Version
 
-        sess = Session()
+        sess = fixture_session()
         g = Graph(Version(1, 1))
         sess.add(g)
         sess.commit()
@@ -540,7 +580,7 @@ class PrimaryKeyTest(fixtures.MappedTest):
         sess = self._fixture()
         g = sess.query(Graph).first()
 
-        g2 = sess.query(Graph).get([g.id, g.version_id])
+        g2 = sess.get(Graph, [g.id, g.version_id])
         eq_(g.version, g2.version)
 
     def test_get_by_composite(self):
@@ -549,7 +589,7 @@ class PrimaryKeyTest(fixtures.MappedTest):
         sess = self._fixture()
         g = sess.query(Graph).first()
 
-        g2 = sess.query(Graph).get(Version(g.id, g.version_id))
+        g2 = sess.get(Graph, Version(g.id, g.version_id))
         eq_(g.version, g2.version)
 
     def test_pk_mutation(self):
@@ -561,14 +601,14 @@ class PrimaryKeyTest(fixtures.MappedTest):
 
         g.version = Version(2, 1)
         sess.commit()
-        g2 = sess.query(Graph).get(Version(2, 1))
+        g2 = sess.get(Graph, Version(2, 1))
         eq_(g.version, g2.version)
 
     @testing.fails_on_everything_except("sqlite")
     def test_null_pk(self):
         Graph, Version = self.classes.Graph, self.classes.Version
 
-        sess = Session()
+        sess = fixture_session()
 
         # test pk with one column NULL
         # only sqlite can really handle this
@@ -632,7 +672,7 @@ class DefaultsTest(fixtures.MappedTest):
                     self.x4,
                 )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Foobar,
             foobars,
             properties=dict(
@@ -649,7 +689,7 @@ class DefaultsTest(fixtures.MappedTest):
     def test_attributes_with_defaults(self):
         Foobar, FBComposite = self.classes.Foobar, self.classes.FBComposite
 
-        sess = Session()
+        sess = fixture_session()
         f1 = Foobar()
         f1.foob = FBComposite(None, 5, None, None)
         sess.add(f1)
@@ -665,7 +705,7 @@ class DefaultsTest(fixtures.MappedTest):
     def test_set_composite_values(self):
         Foobar, FBComposite = self.classes.Foobar, self.classes.FBComposite
 
-        sess = Session()
+        sess = fixture_session()
         f1 = Foobar()
         f1.foob = FBComposite(None, 5, None, None)
         sess.add(f1)
@@ -720,12 +760,15 @@ class MappedSelectTest(fixtures.MappedTest):
             def __composite_values__(self):
                 return self
 
-        desc_values = select(
-            [values, descriptions.c.d1, descriptions.c.d2],
-            descriptions.c.id == values.c.description_id,
-        ).alias("descriptions_values")
+        desc_values = (
+            select(values, descriptions.c.d1, descriptions.c.d2)
+            .where(
+                descriptions.c.id == values.c.description_id,
+            )
+            .alias("descriptions_values")
+        )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Descriptions,
             descriptions,
             properties={
@@ -736,7 +779,7 @@ class MappedSelectTest(fixtures.MappedTest):
             },
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Values,
             desc_values,
             properties={
@@ -746,7 +789,7 @@ class MappedSelectTest(fixtures.MappedTest):
             },
         )
 
-    def test_set_composite_attrs_via_selectable(self):
+    def test_set_composite_attrs_via_selectable(self, connection):
         Values, CustomValues, values, Descriptions, descriptions = (
             self.classes.Values,
             self.classes.CustomValues,
@@ -755,7 +798,7 @@ class MappedSelectTest(fixtures.MappedTest):
             self.tables.descriptions,
         )
 
-        session = Session()
+        session = fixture_session()
         d = Descriptions(
             custom_descriptions=CustomValues("Color", "Number"),
             values=[
@@ -767,11 +810,11 @@ class MappedSelectTest(fixtures.MappedTest):
         session.add(d)
         session.commit()
         eq_(
-            testing.db.execute(descriptions.select()).fetchall(),
+            connection.execute(descriptions.select()).fetchall(),
             [(1, "Color", "Number")],
         )
         eq_(
-            testing.db.execute(values.select()).fetchall(),
+            connection.execute(values.select()).fetchall(),
             [(1, 1, "Red", "5"), (2, 1, "Blue", "1")],
         )
 
@@ -822,12 +865,12 @@ class ManyToOneTest(fixtures.MappedTest):
                     and other.b2 == self.b2
                 )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             A,
             a,
             properties={"b2": relationship(B), "c": composite(C, "b1", "b2")},
         )
-        mapper(B, b)
+        cls.mapper_registry.map_imperatively(B, b)
 
     def test_early_configure(self):
         # test [ticket:2935], that we can call a composite
@@ -838,7 +881,7 @@ class ManyToOneTest(fixtures.MappedTest):
     def test_persist(self):
         A, C, B = (self.classes.A, self.classes.C, self.classes.B)
 
-        sess = Session()
+        sess = fixture_session()
         sess.add(A(c=C("b1", B(data="b2"))))
         sess.commit()
 
@@ -848,7 +891,7 @@ class ManyToOneTest(fixtures.MappedTest):
     def test_query(self):
         A, C, B = (self.classes.A, self.classes.C, self.classes.B)
 
-        sess = Session()
+        sess = fixture_session()
         b1, b2 = B(data="b1"), B(data="b2")
         a1 = A(c=C("a1b1", b1))
         a2 = A(c=C("a2b1", b2))
@@ -860,7 +903,7 @@ class ManyToOneTest(fixtures.MappedTest):
     def test_query_aliased(self):
         A, C, B = (self.classes.A, self.classes.C, self.classes.B)
 
-        sess = Session()
+        sess = fixture_session()
         b1, b2 = B(data="b1"), B(data="b2")
         a1 = A(c=C("a1b1", b1))
         a2 = A(c=C("a2b1", b2))
@@ -913,7 +956,7 @@ class ConfigurationTest(fixtures.MappedTest):
         Edge, Point = self.classes.Edge, self.classes.Point
 
         e1 = Edge(start=Point(3, 4), end=Point(5, 6))
-        sess = Session()
+        sess = fixture_session()
         sess.add(e1)
         sess.commit()
 
@@ -926,7 +969,7 @@ class ConfigurationTest(fixtures.MappedTest):
             self.classes.Point,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Edge,
             edge,
             properties={
@@ -944,7 +987,7 @@ class ConfigurationTest(fixtures.MappedTest):
             self.classes.Point,
         )
 
-        m = mapper(Edge, edge)
+        m = self.mapper_registry.map_imperatively(Edge, edge)
         m.add_property("start", sa.orm.composite(Point, Edge.x1, Edge.y1))
         m.add_property("end", sa.orm.composite(Point, Edge.x2, Edge.y2))
 
@@ -957,7 +1000,7 @@ class ConfigurationTest(fixtures.MappedTest):
             self.classes.Point,
         )
 
-        m = mapper(Edge, edge)
+        m = self.mapper_registry.map_imperatively(Edge, edge)
         m.add_property("start", sa.orm.composite(Point, "x1", "y1"))
         m.add_property("end", sa.orm.composite(Point, "x2", "y2"))
 
@@ -969,7 +1012,7 @@ class ConfigurationTest(fixtures.MappedTest):
             self.classes.Edge,
             self.classes.Point,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Edge,
             edge,
             properties={
@@ -989,7 +1032,7 @@ class ConfigurationTest(fixtures.MappedTest):
             self.classes.Edge,
             self.classes.Point,
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Edge,
             edge,
             properties={
@@ -1069,7 +1112,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
                     diff_y = clauses[1] - other.y
                     return diff_x * diff_x + diff_y * diff_y <= d * d
 
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Edge,
                 edge,
                 properties={
@@ -1083,7 +1126,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
                 },
             )
         else:
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Edge,
                 edge,
                 properties={
@@ -1103,7 +1146,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def _test_comparator_behavior(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
-        sess = Session()
+        sess = fixture_session()
         e1 = Edge(Point(3, 4), Point(5, 6))
         e2 = Edge(Point(14, 5), Point(2, 7))
         sess.add_all([e1, e2])
@@ -1131,7 +1174,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             Edge(Point(0, 1), Point(3, 5)),
         )
 
-        sess = Session()
+        sess = fixture_session()
         sess.add_all([edge_1, edge_2])
         sess.commit()
 
@@ -1151,7 +1194,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def test_order_by(self):
         self._fixture(False)
         Edge = self.classes.Edge
-        s = Session()
+        s = fixture_session()
         self.assert_compile(
             s.query(Edge).order_by(Edge.start, Edge.end),
             "SELECT edge.id AS edge_id, edge.x1 AS edge_x1, "
@@ -1162,7 +1205,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     def test_order_by_aliased(self):
         self._fixture(False)
         Edge = self.classes.Edge
-        s = Session()
+        s = fixture_session()
         ea = aliased(Edge)
         self.assert_compile(
             s.query(ea).order_by(ea.start, ea.end),
@@ -1181,7 +1224,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         configure_mappers()
 
         self.assert_compile(
-            select([Edge]).order_by(Edge.start),
+            select(Edge).order_by(Edge.start),
             "SELECT edge.id, edge.x1, edge.y1, edge.x2, edge.y2 FROM edge "
             "ORDER BY edge.x1, edge.y1",
         )

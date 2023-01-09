@@ -7,6 +7,13 @@ constructs build on the intermediary :class:`.ValuesBase`.
 
 .. currentmodule:: sqlalchemy.sql.expression
 
+.. _dml_foundational_consructors:
+
+DML Foundational Constructors
+--------------------------------------
+
+Top level "INSERT", "UPDATE", "DELETE" constructors.
+
 .. autofunction:: delete
 
 .. autofunction:: insert
@@ -14,8 +21,16 @@ constructs build on the intermediary :class:`.ValuesBase`.
 .. autofunction:: update
 
 
+DML Class Documentation Constructors
+--------------------------------------
+
+Class documentation for the constructors listed at
+:ref:`dml_foundational_consructors`.
+
 .. autoclass:: Delete
    :members:
+
+   .. automethod:: Delete.where
 
    .. automethod:: Delete.returning
 
@@ -30,6 +45,8 @@ constructs build on the intermediary :class:`.ValuesBase`.
    :members:
 
    .. automethod:: Update.returning
+
+   .. automethod:: Update.where
 
    .. automethod:: Update.values
 

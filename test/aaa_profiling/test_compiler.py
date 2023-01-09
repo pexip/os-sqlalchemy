@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.engine import default
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import AssertsExecutionResults
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import profiling
@@ -18,7 +19,7 @@ class CompileTest(fixtures.TestBase, AssertsExecutionResults):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
 
         global t1, t2, metadata
         metadata = MetaData()
@@ -65,7 +66,7 @@ class CompileTest(fixtures.TestBase, AssertsExecutionResults):
     def test_update_whereclause(self):
         t1.update().where(t1.c.c2 == 12).compile(dialect=self.dialect)
 
-        @profiling.function_call_count(variance=0.20)
+        @profiling.function_call_count()
         def go():
             t1.update().where(t1.c.c2 == 12).compile(dialect=self.dialect)
 
@@ -74,12 +75,12 @@ class CompileTest(fixtures.TestBase, AssertsExecutionResults):
     def test_select(self):
         # give some of the cached type values
         # a chance to warm up
-        s = select([t1], t1.c.c2 == t2.c.c1)
+        s = select(t1).where(t1.c.c2 == t2.c.c1)
         s.compile(dialect=self.dialect)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(variance=0.15, warmup=1)
         def go():
-            s = select([t1], t1.c.c2 == t2.c.c1)
+            s = select(t1).where(t1.c.c2 == t2.c.c1)
             s.compile(dialect=self.dialect)
 
         go()
@@ -87,12 +88,20 @@ class CompileTest(fixtures.TestBase, AssertsExecutionResults):
     def test_select_labels(self):
         # give some of the cached type values
         # a chance to warm up
-        s = select([t1], t1.c.c2 == t2.c.c1).apply_labels()
+        s = (
+            select(t1)
+            .where(t1.c.c2 == t2.c.c1)
+            .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+        )
         s.compile(dialect=self.dialect)
 
-        @profiling.function_call_count()
+        @profiling.function_call_count(variance=0.15, warmup=1)
         def go():
-            s = select([t1], t1.c.c2 == t2.c.c1).apply_labels()
+            s = (
+                select(t1)
+                .where(t1.c.c2 == t2.c.c1)
+                .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+            )
             s.compile(dialect=self.dialect)
 
         go()

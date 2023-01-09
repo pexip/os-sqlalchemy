@@ -5,6 +5,8 @@ from sqlalchemy import exc
 from sqlalchemy import FLOAT
 from sqlalchemy import ForeignKey
 from sqlalchemy import ForeignKeyConstraint
+from sqlalchemy import func
+from sqlalchemy import Identity
 from sqlalchemy import Index
 from sqlalchemy import inspect
 from sqlalchemy import INTEGER
@@ -13,7 +15,6 @@ from sqlalchemy import MetaData
 from sqlalchemy import Numeric
 from sqlalchemy import PrimaryKeyConstraint
 from sqlalchemy import select
-from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import Unicode
@@ -22,11 +23,12 @@ from sqlalchemy.dialects.oracle.base import BINARY_DOUBLE
 from sqlalchemy.dialects.oracle.base import BINARY_FLOAT
 from sqlalchemy.dialects.oracle.base import DOUBLE_PRECISION
 from sqlalchemy.dialects.oracle.base import NUMBER
-from sqlalchemy.testing import assert_raises
+from sqlalchemy.testing import assert_warns
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing.engines import testing_engine
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -37,72 +39,73 @@ class MultiSchemaTest(fixtures.TestBase, AssertsCompiledSQL):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         # currently assuming full DBA privs for the user.
         # don't really know how else to go here unless
         # we connect as the other user.
 
-        for stmt in (
-            """
-create table %(test_schema)s.parent(
-    id integer primary key,
-    data varchar2(50)
-);
+        with testing.db.begin() as conn:
+            for stmt in (
+                """
+    create table %(test_schema)s.parent(
+        id integer primary key,
+        data varchar2(50)
+    );
 
-COMMENT ON TABLE %(test_schema)s.parent IS 'my table comment';
+    COMMENT ON TABLE %(test_schema)s.parent IS 'my table comment';
 
-create table %(test_schema)s.child(
-    id integer primary key,
-    data varchar2(50),
-    parent_id integer references %(test_schema)s.parent(id)
-);
+    create table %(test_schema)s.child(
+        id integer primary key,
+        data varchar2(50),
+        parent_id integer references %(test_schema)s.parent(id)
+    );
 
-create table local_table(
-    id integer primary key,
-    data varchar2(50)
-);
+    create table local_table(
+        id integer primary key,
+        data varchar2(50)
+    );
 
-create synonym %(test_schema)s.ptable for %(test_schema)s.parent;
-create synonym %(test_schema)s.ctable for %(test_schema)s.child;
+    create synonym %(test_schema)s.ptable for %(test_schema)s.parent;
+    create synonym %(test_schema)s.ctable for %(test_schema)s.child;
 
-create synonym %(test_schema)s_pt for %(test_schema)s.parent;
+    create synonym %(test_schema)s_pt for %(test_schema)s.parent;
 
-create synonym %(test_schema)s.local_table for local_table;
+    create synonym %(test_schema)s.local_table for local_table;
 
--- can't make a ref from local schema to the
--- remote schema's table without this,
--- *and* cant give yourself a grant !
--- so we give it to public.  ideas welcome.
-grant references on %(test_schema)s.parent to public;
-grant references on %(test_schema)s.child to public;
-"""
-            % {"test_schema": testing.config.test_schema}
-        ).split(";"):
-            if stmt.strip():
-                testing.db.execute(stmt)
+    -- can't make a ref from local schema to the
+    -- remote schema's table without this,
+    -- *and* cant give yourself a grant !
+    -- so we give it to public.  ideas welcome.
+    grant references on %(test_schema)s.parent to public;
+    grant references on %(test_schema)s.child to public;
+    """
+                % {"test_schema": testing.config.test_schema}
+            ).split(";"):
+                if stmt.strip():
+                    conn.exec_driver_sql(stmt)
 
     @classmethod
-    def teardown_class(cls):
-        for stmt in (
-            """
-drop table %(test_schema)s.child;
-drop table %(test_schema)s.parent;
-drop table local_table;
-drop synonym %(test_schema)s.ctable;
-drop synonym %(test_schema)s.ptable;
-drop synonym %(test_schema)s_pt;
-drop synonym %(test_schema)s.local_table;
+    def teardown_test_class(cls):
+        with testing.db.begin() as conn:
+            for stmt in (
+                """
+    drop table %(test_schema)s.child;
+    drop table %(test_schema)s.parent;
+    drop table local_table;
+    drop synonym %(test_schema)s.ctable;
+    drop synonym %(test_schema)s.ptable;
+    drop synonym %(test_schema)s_pt;
+    drop synonym %(test_schema)s.local_table;
 
-"""
-            % {"test_schema": testing.config.test_schema}
-        ).split(";"):
-            if stmt.strip():
-                testing.db.execute(stmt)
+    """
+                % {"test_schema": testing.config.test_schema}
+            ).split(";"):
+                if stmt.strip():
+                    conn.exec_driver_sql(stmt)
 
-    @testing.provide_metadata
-    def test_create_same_names_explicit_schema(self):
+    def test_create_same_names_explicit_schema(self, metadata, connection):
         schema = testing.db.dialect.default_schema_name
-        meta = self.metadata
+        meta = metadata
         parent = Table(
             "parent",
             meta,
@@ -116,17 +119,17 @@ drop synonym %(test_schema)s.local_table;
             Column("pid", Integer, ForeignKey("%s.parent.pid" % schema)),
             schema=schema,
         )
-        meta.create_all()
-        parent.insert().execute({"pid": 1})
-        child.insert().execute({"cid": 1, "pid": 1})
-        eq_(child.select().execute().fetchall(), [(1, 1)])
+        meta.create_all(connection)
+        connection.execute(parent.insert(), {"pid": 1})
+        connection.execute(child.insert(), {"cid": 1, "pid": 1})
+        eq_(connection.execute(child.select()).fetchall(), [(1, 1)])
 
     def test_reflect_alt_table_owner_local_synonym(self):
-        meta = MetaData(testing.db)
+        meta = MetaData()
         parent = Table(
             "%s_pt" % testing.config.test_schema,
             meta,
-            autoload=True,
+            autoload_with=testing.db,
             oracle_resolve_synonyms=True,
         )
         self.assert_compile(
@@ -135,14 +138,13 @@ drop synonym %(test_schema)s.local_table;
             "%(test_schema)s_pt.data FROM %(test_schema)s_pt"
             % {"test_schema": testing.config.test_schema},
         )
-        select([parent]).execute().fetchall()
 
     def test_reflect_alt_synonym_owner_local_table(self):
-        meta = MetaData(testing.db)
+        meta = MetaData()
         parent = Table(
             "local_table",
             meta,
-            autoload=True,
+            autoload_with=testing.db,
             oracle_resolve_synonyms=True,
             schema=testing.config.test_schema,
         )
@@ -153,11 +155,9 @@ drop synonym %(test_schema)s.local_table;
             "FROM %(test_schema)s.local_table"
             % {"test_schema": testing.config.test_schema},
         )
-        select([parent]).execute().fetchall()
 
-    @testing.provide_metadata
-    def test_create_same_names_implicit_schema(self):
-        meta = self.metadata
+    def test_create_same_names_implicit_schema(self, metadata, connection):
+        meta = metadata
         parent = Table(
             "parent", meta, Column("pid", Integer, primary_key=True)
         )
@@ -167,18 +167,25 @@ drop synonym %(test_schema)s.local_table;
             Column("cid", Integer, primary_key=True),
             Column("pid", Integer, ForeignKey("parent.pid")),
         )
-        meta.create_all()
-        parent.insert().execute({"pid": 1})
-        child.insert().execute({"cid": 1, "pid": 1})
-        eq_(child.select().execute().fetchall(), [(1, 1)])
+        meta.create_all(connection)
+
+        connection.execute(parent.insert(), {"pid": 1})
+        connection.execute(child.insert(), {"cid": 1, "pid": 1})
+        eq_(connection.execute(child.select()).fetchall(), [(1, 1)])
 
     def test_reflect_alt_owner_explicit(self):
-        meta = MetaData(testing.db)
+        meta = MetaData()
         parent = Table(
-            "parent", meta, autoload=True, schema=testing.config.test_schema
+            "parent",
+            meta,
+            autoload_with=testing.db,
+            schema=testing.config.test_schema,
         )
         child = Table(
-            "child", meta, autoload=True, schema=testing.config.test_schema
+            "child",
+            meta,
+            autoload_with=testing.db,
+            schema=testing.config.test_schema,
         )
 
         self.assert_compile(
@@ -187,25 +194,25 @@ drop synonym %(test_schema)s.local_table;
             "%(test_schema)s.parent.id = %(test_schema)s.child.parent_id"
             % {"test_schema": testing.config.test_schema},
         )
-        select([parent, child]).select_from(
-            parent.join(child)
-        ).execute().fetchall()
+        with testing.db.connect() as conn:
+            conn.execute(
+                select(parent, child).select_from(parent.join(child))
+            ).fetchall()
 
         # check table comment (#5146)
         eq_(parent.comment, "my table comment")
 
-    @testing.provide_metadata
-    def test_reflect_table_comment(self):
+    def test_reflect_table_comment(self, metadata, connection):
         local_parent = Table(
             "parent",
-            self.metadata,
+            metadata,
             Column("q", Integer),
             comment="my local comment",
         )
 
-        local_parent.create(testing.db)
+        local_parent.create(connection)
 
-        insp = inspect(testing.db)
+        insp = inspect(connection)
         eq_(
             insp.get_table_comment(
                 "parent", schema=testing.config.test_schema
@@ -220,21 +227,21 @@ drop synonym %(test_schema)s.local_table;
         )
         eq_(
             insp.get_table_comment(
-                "parent", schema=testing.db.dialect.default_schema_name
+                "parent", schema=connection.dialect.default_schema_name
             ),
             {"text": "my local comment"},
         )
 
-    def test_reflect_local_to_remote(self):
-        testing.db.execute(
+    def test_reflect_local_to_remote(self, connection):
+        connection.exec_driver_sql(
             "CREATE TABLE localtable (id INTEGER "
             "PRIMARY KEY, parent_id INTEGER REFERENCES "
             "%(test_schema)s.parent(id))"
-            % {"test_schema": testing.config.test_schema}
+            % {"test_schema": testing.config.test_schema},
         )
         try:
-            meta = MetaData(testing.db)
-            lcl = Table("localtable", meta, autoload=True)
+            meta = MetaData()
+            lcl = Table("localtable", meta, autoload_with=testing.db)
             parent = meta.tables["%s.parent" % testing.config.test_schema]
             self.assert_compile(
                 parent.join(lcl),
@@ -243,19 +250,22 @@ drop synonym %(test_schema)s.local_table;
                 "localtable.parent_id"
                 % {"test_schema": testing.config.test_schema},
             )
-            select([parent, lcl]).select_from(
-                parent.join(lcl)
-            ).execute().fetchall()
         finally:
-            testing.db.execute("DROP TABLE localtable")
+            connection.exec_driver_sql("DROP TABLE localtable")
 
     def test_reflect_alt_owner_implicit(self):
-        meta = MetaData(testing.db)
+        meta = MetaData()
         parent = Table(
-            "parent", meta, autoload=True, schema=testing.config.test_schema
+            "parent",
+            meta,
+            autoload_with=testing.db,
+            schema=testing.config.test_schema,
         )
         child = Table(
-            "child", meta, autoload=True, schema=testing.config.test_schema
+            "child",
+            meta,
+            autoload_with=testing.db,
+            schema=testing.config.test_schema,
         )
         self.assert_compile(
             parent.join(child),
@@ -264,20 +274,24 @@ drop synonym %(test_schema)s.local_table;
             "%(test_schema)s.child.parent_id"
             % {"test_schema": testing.config.test_schema},
         )
-        select([parent, child]).select_from(
-            parent.join(child)
-        ).execute().fetchall()
+        with testing.db.connect() as conn:
+            conn.execute(
+                select(parent, child).select_from(parent.join(child))
+            ).fetchall()
 
-    def test_reflect_alt_owner_synonyms(self):
-        testing.db.execute(
+    def test_reflect_alt_owner_synonyms(self, connection):
+        connection.exec_driver_sql(
             "CREATE TABLE localtable (id INTEGER "
             "PRIMARY KEY, parent_id INTEGER REFERENCES "
-            "%s.ptable(id))" % testing.config.test_schema
+            "%s.ptable(id))" % testing.config.test_schema,
         )
         try:
-            meta = MetaData(testing.db)
+            meta = MetaData()
             lcl = Table(
-                "localtable", meta, autoload=True, oracle_resolve_synonyms=True
+                "localtable",
+                meta,
+                autoload_with=connection,
+                oracle_resolve_synonyms=True,
             )
             parent = meta.tables["%s.ptable" % testing.config.test_schema]
             self.assert_compile(
@@ -287,25 +301,25 @@ drop synonym %(test_schema)s.local_table;
                 "localtable.parent_id"
                 % {"test_schema": testing.config.test_schema},
             )
-            select([parent, lcl]).select_from(
-                parent.join(lcl)
-            ).execute().fetchall()
+            connection.execute(
+                select(parent, lcl).select_from(parent.join(lcl))
+            ).fetchall()
         finally:
-            testing.db.execute("DROP TABLE localtable")
+            connection.exec_driver_sql("DROP TABLE localtable")
 
     def test_reflect_remote_synonyms(self):
-        meta = MetaData(testing.db)
+        meta = MetaData()
         parent = Table(
             "ptable",
             meta,
-            autoload=True,
+            autoload_with=testing.db,
             schema=testing.config.test_schema,
             oracle_resolve_synonyms=True,
         )
         child = Table(
             "ctable",
             meta,
-            autoload=True,
+            autoload_with=testing.db,
             schema=testing.config.test_schema,
             oracle_resolve_synonyms=True,
         )
@@ -317,9 +331,6 @@ drop synonym %(test_schema)s.local_table;
             "%(test_schema)s.ctable.parent_id"
             % {"test_schema": testing.config.test_schema},
         )
-        select([parent, child]).select_from(
-            parent.join(child)
-        ).execute().fetchall()
 
 
 class ConstraintTest(fixtures.TablesTest):
@@ -332,28 +343,28 @@ class ConstraintTest(fixtures.TablesTest):
     def define_tables(cls, metadata):
         Table("foo", metadata, Column("id", Integer, primary_key=True))
 
-    def test_oracle_has_no_on_update_cascade(self):
+    def test_oracle_has_no_on_update_cascade(self, connection):
         bar = Table(
             "bar",
-            self.metadata,
+            self.tables_test_metadata,
             Column("id", Integer, primary_key=True),
             Column(
                 "foo_id", Integer, ForeignKey("foo.id", onupdate="CASCADE")
             ),
         )
-        assert_raises(exc.SAWarning, bar.create)
+        assert_warns(exc.SAWarning, bar.create, connection)
 
         bat = Table(
             "bat",
-            self.metadata,
+            self.tables_test_metadata,
             Column("id", Integer, primary_key=True),
             Column("foo_id", Integer),
             ForeignKeyConstraint(["foo_id"], ["foo.id"], onupdate="CASCADE"),
         )
-        assert_raises(exc.SAWarning, bat.create)
+        assert_warns(exc.SAWarning, bat.create, connection)
 
-    def test_reflect_check_include_all(self):
-        insp = inspect(testing.db)
+    def test_reflect_check_include_all(self, connection):
+        insp = inspect(connection)
         eq_(insp.get_check_constraints("foo"), [])
         eq_(
             [
@@ -368,19 +379,21 @@ class SystemTableTablenamesTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    def setup(self):
-        testing.db.execute("create table my_table (id integer)")
-        testing.db.execute(
-            "create global temporary table my_temp_table (id integer)"
-        )
-        testing.db.execute(
-            "create table foo_table (id integer) tablespace SYSTEM"
-        )
+    def setup_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql("create table my_table (id integer)")
+            conn.exec_driver_sql(
+                "create global temporary table my_temp_table (id integer)",
+            )
+            conn.exec_driver_sql(
+                "create table foo_table (id integer) tablespace SYSTEM"
+            )
 
-    def teardown(self):
-        testing.db.execute("drop table my_temp_table")
-        testing.db.execute("drop table my_table")
-        testing.db.execute("drop table foo_table")
+    def teardown_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql("drop table my_temp_table")
+            conn.exec_driver_sql("drop table my_table")
+            conn.exec_driver_sql("drop table foo_table")
 
     def test_table_names_no_system(self):
         insp = inspect(testing.db)
@@ -408,85 +421,60 @@ class DontReflectIOTTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    def setup(self):
-        testing.db.execute(
-            """
-        CREATE TABLE admin_docindex(
-                token char(20),
-                doc_id NUMBER,
-                token_frequency NUMBER,
-                token_offsets VARCHAR2(2000),
-                CONSTRAINT pk_admin_docindex PRIMARY KEY (token, doc_id))
-            ORGANIZATION INDEX
-            TABLESPACE users
-            PCTTHRESHOLD 20
-            OVERFLOW TABLESPACE users
-        """
-        )
+    def setup_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql(
+                """
+            CREATE TABLE admin_docindex(
+                    token char(20),
+                    doc_id NUMBER,
+                    token_frequency NUMBER,
+                    token_offsets VARCHAR2(2000),
+                    CONSTRAINT pk_admin_docindex PRIMARY KEY (token, doc_id))
+                ORGANIZATION INDEX
+                TABLESPACE users
+                PCTTHRESHOLD 20
+                OVERFLOW TABLESPACE users
+            """,
+            )
 
-    def teardown(self):
-        testing.db.execute("drop table admin_docindex")
+    def teardown_test(self):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql("drop table admin_docindex")
 
-    def test_reflect_all(self):
-        m = MetaData(testing.db)
-        m.reflect()
+    def test_reflect_all(self, connection):
+        m = MetaData()
+        m.reflect(connection)
         eq_(set(t.name for t in m.tables.values()), set(["admin_docindex"]))
 
 
-class UnsupportedIndexReflectTest(fixtures.TestBase):
-    __only_on__ = "oracle"
-    __backend__ = True
-
-    @testing.emits_warning("No column names")
-    @testing.provide_metadata
-    def test_reflect_functional_index(self):
-        metadata = self.metadata
-        Table(
-            "test_index_reflect",
-            metadata,
-            Column("data", String(20), primary_key=True),
-        )
-        metadata.create_all()
-
-        testing.db.execute(
-            "CREATE INDEX DATA_IDX ON " "TEST_INDEX_REFLECT (UPPER(DATA))"
-        )
-        m2 = MetaData(testing.db)
-        Table("test_index_reflect", m2, autoload=True)
-
-
 def all_tables_compression_missing():
-    try:
-        testing.db.execute("SELECT compression FROM all_tables")
-        if "Enterprise Edition" not in testing.db.scalar(
-            "select * from v$version"
-        ):
+    with testing.db.connect() as conn:
+        if (
+            "Enterprise Edition"
+            not in conn.exec_driver_sql("select * from v$version").scalar()
+            # this works in Oracle Database 18c Express Edition Release
+        ) and testing.db.dialect.server_version_info < (18,):
             return True
         return False
-    except Exception:
-        return True
 
 
 def all_tables_compress_for_missing():
-    try:
-        testing.db.execute("SELECT compress_for FROM all_tables")
-        if "Enterprise Edition" not in testing.db.scalar(
-            "select * from v$version"
+    with testing.db.connect() as conn:
+        if (
+            "Enterprise Edition"
+            not in conn.exec_driver_sql("select * from v$version").scalar()
         ):
             return True
         return False
-    except Exception:
-        return True
 
 
 class TableReflectionTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    @testing.provide_metadata
     @testing.fails_if(all_tables_compression_missing)
-    def test_reflect_basic_compression(self):
-        metadata = self.metadata
+    def test_reflect_basic_compression(self, metadata, connection):
 
         tbl = Table(
             "test_compress",
@@ -494,30 +482,27 @@ class TableReflectionTest(fixtures.TestBase):
             Column("data", Integer, primary_key=True),
             oracle_compress=True,
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        m2 = MetaData(testing.db)
+        m2 = MetaData()
 
-        tbl = Table("test_compress", m2, autoload=True)
+        tbl = Table("test_compress", m2, autoload_with=connection)
         # Don't hardcode the exact value, but it must be non-empty
         assert tbl.dialect_options["oracle"]["compress"]
 
-    @testing.provide_metadata
     @testing.fails_if(all_tables_compress_for_missing)
-    def test_reflect_oltp_compression(self):
-        metadata = self.metadata
-
+    def test_reflect_oltp_compression(self, metadata, connection):
         tbl = Table(
             "test_compress",
             metadata,
             Column("data", Integer, primary_key=True),
             oracle_compress="OLTP",
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        m2 = MetaData(testing.db)
+        m2 = MetaData()
 
-        tbl = Table("test_compress", m2, autoload=True)
+        tbl = Table("test_compress", m2, autoload_with=connection)
         assert tbl.dialect_options["oracle"]["compress"] == "OLTP"
 
 
@@ -525,10 +510,7 @@ class RoundTripIndexTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_no_pk(self):
-        metadata = self.metadata
-
+    def test_no_pk(self, metadata, connection):
         Table(
             "sometable",
             metadata,
@@ -537,9 +519,9 @@ class RoundTripIndexTest(fixtures.TestBase):
             Index("pk_idx_1", "id_a", "id_b", unique=True),
             Index("pk_idx_2", "id_b", "id_a", unique=True),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        insp = inspect(testing.db)
+        insp = inspect(connection)
         eq_(
             insp.get_indexes("sometable"),
             [
@@ -558,10 +540,10 @@ class RoundTripIndexTest(fixtures.TestBase):
             ],
         )
 
-    @testing.combinations((True,), (False,))
-    @testing.provide_metadata
-    def test_include_indexes_resembling_pk(self, explicit_pk):
-        metadata = self.metadata
+    @testing.combinations((True,), (False,), argnames="explicit_pk")
+    def test_include_indexes_resembling_pk(
+        self, metadata, connection, explicit_pk
+    ):
 
         t = Table(
             "sometable",
@@ -581,9 +563,9 @@ class RoundTripIndexTest(fixtures.TestBase):
                     "id_a", "id_b", "group", name="some_primary_key"
                 )
             )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        insp = inspect(testing.db)
+        insp = inspect(connection)
         eq_(
             insp.get_indexes("sometable"),
             [
@@ -602,9 +584,39 @@ class RoundTripIndexTest(fixtures.TestBase):
             ],
         )
 
-    @testing.provide_metadata
-    def test_basic(self):
-        metadata = self.metadata
+    def test_reflect_fn_index(self, metadata, connection):
+        """test reflection of a functional index.
+
+        it appears this emitted a warning at some point but does not right now.
+        the returned data is not exactly correct, but this is what it's
+        likely been doing for many years.
+
+        """
+
+        s_table = Table(
+            "sometable",
+            metadata,
+            Column("group", Unicode(255), primary_key=True),
+            Column("col", Unicode(255)),
+        )
+
+        Index("data_idx", func.upper(s_table.c.col))
+
+        metadata.create_all(connection)
+
+        eq_(
+            inspect(connection).get_indexes("sometable"),
+            [
+                {
+                    "column_names": [],
+                    "dialect_options": {},
+                    "name": "data_idx",
+                    "unique": False,
+                }
+            ],
+        )
+
+    def test_basic(self, metadata, connection):
 
         s_table = Table(
             "sometable",
@@ -629,16 +641,16 @@ class RoundTripIndexTest(fixtures.TestBase):
             oracle_compress=1,
         )
 
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        mirror = MetaData(testing.db)
-        mirror.reflect()
+        mirror = MetaData()
+        mirror.reflect(connection)
 
-        metadata.drop_all()
-        mirror.create_all()
+        metadata.drop_all(connection)
+        mirror.create_all(connection)
 
-        inspect = MetaData(testing.db)
-        inspect.reflect()
+        inspect = MetaData()
+        inspect.reflect(connection)
 
         def obj_definition(obj):
             return (
@@ -648,7 +660,7 @@ class RoundTripIndexTest(fixtures.TestBase):
             )
 
         # find what the primary k constraint name should be
-        primaryconsname = testing.db.scalar(
+        primaryconsname = connection.scalar(
             text(
                 """SELECT constraint_name
                FROM all_constraints
@@ -656,8 +668,10 @@ class RoundTripIndexTest(fixtures.TestBase):
                AND owner = :owner
                AND constraint_type = 'P' """
             ),
-            table_name=s_table.name.upper(),
-            owner=testing.db.dialect.default_schema_name.upper(),
+            dict(
+                table_name=s_table.name.upper(),
+                owner=testing.db.dialect.default_schema_name.upper(),
+            ),
         )
 
         reflectedtable = inspect.tables[s_table.name]
@@ -703,7 +717,7 @@ class DBLinkReflectionTest(fixtures.TestBase):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         from sqlalchemy.testing import config
 
         cls.dblink = config.file_config.get("sqla_testing", "oracle_db_link")
@@ -711,30 +725,29 @@ class DBLinkReflectionTest(fixtures.TestBase):
         # note that the synonym here is still not totally functional
         # when accessing via a different username as we do with the
         # multiprocess test suite, so testing here is minimal
-        with testing.db.connect() as conn:
-            conn.execute(
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql(
                 "create table test_table "
                 "(id integer primary key, data varchar2(50))"
             )
-            conn.execute(
+            conn.exec_driver_sql(
                 "create synonym test_table_syn "
                 "for test_table@%s" % cls.dblink
             )
 
     @classmethod
-    def teardown_class(cls):
-        with testing.db.connect() as conn:
-            conn.execute("drop synonym test_table_syn")
-            conn.execute("drop table test_table")
+    def teardown_test_class(cls):
+        with testing.db.begin() as conn:
+            conn.exec_driver_sql("drop synonym test_table_syn")
+            conn.exec_driver_sql("drop table test_table")
 
     def test_reflection(self):
-        """test the resolution of the synonym/dblink. """
+        """test the resolution of the synonym/dblink."""
         m = MetaData()
 
         t = Table(
             "test_table_syn",
             m,
-            autoload=True,
             autoload_with=testing.db,
             oracle_resolve_synonyms=True,
         )
@@ -746,14 +759,13 @@ class TypeReflectionTest(fixtures.TestBase):
     __only_on__ = "oracle"
     __backend__ = True
 
-    @testing.provide_metadata
-    def _run_test(self, specs, attributes):
+    def _run_test(self, metadata, connection, specs, attributes):
         columns = [Column("c%i" % (i + 1), t[0]) for i, t in enumerate(specs)]
-        m = self.metadata
+        m = metadata
         Table("oracle_types", m, *columns)
-        m.create_all()
-        m2 = MetaData(testing.db)
-        table = Table("oracle_types", m2, autoload=True)
+        m.create_all(connection)
+        m2 = MetaData()
+        table = Table("oracle_types", m2, autoload_with=connection)
         for i, (reflected_col, spec) in enumerate(zip(table.c, specs)):
             expected_spec = spec[1]
             reflected_type = reflected_col.type
@@ -773,15 +785,23 @@ class TypeReflectionTest(fixtures.TestBase):
                     ),
                 )
 
-    def test_integer_types(self):
+    def test_integer_types(self, metadata, connection):
         specs = [(Integer, INTEGER()), (Numeric, INTEGER())]
-        self._run_test(specs, [])
+        self._run_test(metadata, connection, specs, [])
 
-    def test_number_types(self):
+    def test_number_types(
+        self,
+        metadata,
+        connection,
+    ):
         specs = [(Numeric(5, 2), NUMBER(5, 2)), (NUMBER, NUMBER())]
-        self._run_test(specs, ["precision", "scale"])
+        self._run_test(metadata, connection, specs, ["precision", "scale"])
 
-    def test_float_types(self):
+    def test_float_types(
+        self,
+        metadata,
+        connection,
+    ):
         specs = [
             (DOUBLE_PRECISION(), FLOAT()),
             # when binary_precision is supported
@@ -795,4 +815,40 @@ class TypeReflectionTest(fixtures.TestBase):
             # when binary_precision is supported
             # (FLOAT(5), oracle.FLOAT(binary_precision=126),),
         ]
-        self._run_test(specs, ["precision"])
+        self._run_test(metadata, connection, specs, ["precision"])
+
+
+class IdentityReflectionTest(fixtures.TablesTest):
+    __only_on__ = "oracle"
+    __backend__ = True
+    __requires__ = ("identity_columns",)
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table("t1", metadata, Column("id1", Integer, Identity(on_null=True)))
+        Table("t2", metadata, Column("id2", Integer, Identity(order=True)))
+
+    def test_reflect_identity(self):
+        insp = inspect(testing.db)
+        common = {
+            "always": False,
+            "start": 1,
+            "increment": 1,
+            "on_null": False,
+            "maxvalue": 10 ** 28 - 1,
+            "minvalue": 1,
+            "cycle": False,
+            "cache": 20,
+            "order": False,
+        }
+        for col in insp.get_columns("t1") + insp.get_columns("t2"):
+            if col["name"] == "id1":
+                is_true("identity" in col)
+                exp = common.copy()
+                exp["on_null"] = True
+                eq_(col["identity"], exp)
+            if col["name"] == "id2":
+                is_true("identity" in col)
+                exp = common.copy()
+                exp["order"] = True
+                eq_(col["identity"], exp)

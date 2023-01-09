@@ -3,90 +3,99 @@ import os
 
 from sqlalchemy import Column
 from sqlalchemy import DateTime
+from sqlalchemy import delete
 from sqlalchemy import event
 from sqlalchemy import Float
 from sqlalchemy import ForeignKey
 from sqlalchemy import inspect
 from sqlalchemy import Integer
-from sqlalchemy import MetaData
+from sqlalchemy import select
 from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
+from sqlalchemy import text
+from sqlalchemy import update
 from sqlalchemy import util
 from sqlalchemy.ext.horizontal_shard import ShardedSession
 from sqlalchemy.orm import clear_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import deferred
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import SingletonThreadPool
 from sqlalchemy.sql import operators
+from sqlalchemy.sql import Select
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 from sqlalchemy.testing import provision
 from sqlalchemy.testing.engines import testing_engine
 from sqlalchemy.testing.engines import testing_reaper
-
-
-# TODO: ShardTest can be turned into a base for further subclasses
 
 
 class ShardTest(object):
     __skip_if__ = (lambda: util.win32,)
     __requires__ = ("sqlite",)
 
+    run_create_tables = None
+
     schema = None
 
-    def setUp(self):
+    @classmethod
+    def define_tables(cls, metadata):
         global db1, db2, db3, db4, weather_locations, weather_reports
 
-        db1, db2, db3, db4 = self._init_dbs()
-
-        meta = MetaData()
-        ids = Table("ids", meta, Column("nextid", Integer, nullable=False))
+        cls.tables.ids = ids = Table(
+            "ids", metadata, Column("nextid", Integer, nullable=False)
+        )
 
         def id_generator(ctx):
             # in reality, might want to use a separate transaction for this.
 
-            c = db1.connect()
-            nextid = c.execute(ids.select().with_for_update()).scalar()
-            c.execute(ids.update(values={ids.c.nextid: ids.c.nextid + 1}))
-            return nextid
+            with db1.begin() as c:
+                nextid = c.execute(ids.select().with_for_update()).scalar()
+                c.execute(
+                    ids.update().values({ids.c.nextid: ids.c.nextid + 1})
+                )
+                return nextid
 
-        weather_locations = Table(
+        cls.tables.weather_locations = weather_locations = Table(
             "weather_locations",
-            meta,
+            metadata,
             Column("id", Integer, primary_key=True, default=id_generator),
             Column("continent", String(30), nullable=False),
             Column("city", String(50), nullable=False),
-            schema=self.schema,
+            schema=cls.schema,
         )
 
-        weather_reports = Table(
+        cls.tables.weather_reports = Table(
             "weather_reports",
-            meta,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("location_id", Integer, ForeignKey(weather_locations.c.id)),
             Column("temperature", Float),
             Column("report_time", DateTime, default=datetime.datetime.now),
-            schema=self.schema,
+            schema=cls.schema,
         )
 
-        for db in (db1, db2, db3, db4):
-            meta.create_all(db)
+    def setup_test(self):
+        global db1, db2, db3, db4
+        db1, db2, db3, db4 = self._dbs = self._init_dbs()
 
-        db1.execute(ids.insert(), nextid=1)
+        for db in (db1, db2, db3, db4):
+            self.tables_test_metadata.create_all(db)
+
+        ids = self.tables.ids
+        with db1.begin() as conn:
+            conn.execute(ids.insert(), dict(nextid=1))
 
         self.setup_session()
-        self.setup_mappers()
 
     @classmethod
     def setup_session(cls):
-        global create_session
+        global sharded_session
         shard_lookup = {
             "North America": "north_america",
             "Asia": "asia",
@@ -103,8 +112,10 @@ class ShardTest(object):
         def id_chooser(query, ident):
             return ["north_america", "asia", "europe", "south_america"]
 
-        def query_chooser(query):
+        def execute_chooser(orm_context):
             ids = []
+
+            query = orm_context.statement
 
             class FindContinent(sql.ClauseVisitor):
                 def visit_binary(self, binary):
@@ -114,20 +125,20 @@ class ShardTest(object):
                         if binary.operator == operators.eq:
                             ids.append(shard_lookup[binary.right.value])
                         elif binary.operator == operators.in_op:
-                            for bind in binary.right.clauses:
-                                ids.append(shard_lookup[bind.value])
+                            for value in binary.right.value:
+                                ids.append(shard_lookup[value])
 
-            if query._criterion is not None:
-                FindContinent().traverse(query._criterion)
+            if isinstance(query, Select) and query.whereclause is not None:
+                FindContinent().traverse(query.whereclause)
             if len(ids) == 0:
                 return ["north_america", "asia", "europe", "south_america"]
             else:
                 return ids
 
-        create_session = sessionmaker(
+        sharded_session = sessionmaker(
             class_=ShardedSession, autoflush=True, autocommit=False
         )
-        create_session.configure(
+        sharded_session.configure(
             shards={
                 "north_america": db1,
                 "asia": db2,
@@ -136,7 +147,7 @@ class ShardTest(object):
             },
             shard_chooser=shard_chooser,
             id_chooser=id_chooser,
-            query_chooser=query_chooser,
+            execute_chooser=execute_chooser,
         )
 
     @classmethod
@@ -154,7 +165,9 @@ class ShardTest(object):
                 if id_:
                     self.id = id_
 
-        mapper(
+        weather_locations = cls.tables.weather_locations
+
+        cls.mapper_registry.map_imperatively(
             WeatherLocation,
             weather_locations,
             properties={
@@ -163,7 +176,9 @@ class ShardTest(object):
             },
         )
 
-        mapper(Report, weather_reports)
+        weather_reports = cls.tables.weather_reports
+
+        cls.mapper_registry.map_imperatively(Report, weather_reports)
 
     def _fixture_data(self):
         tokyo = WeatherLocation("Asia", "Tokyo")
@@ -176,7 +191,7 @@ class ShardTest(object):
         tokyo.reports.append(Report(80.0, id_=1))
         newyork.reports.append(Report(75, id_=1))
         quito.reports.append(Report(85))
-        sess = create_session()
+        sess = sharded_session(future=True)
         for c in [tokyo, newyork, toronto, london, dublin, brasilia, quito]:
             sess.add(c)
         sess.flush()
@@ -190,55 +205,132 @@ class ShardTest(object):
         sess.close()
         return sess
 
-    def test_roundtrip(self):
+    def test_get(self):
         sess = self._fixture_data()
-        tokyo = sess.query(WeatherLocation).filter_by(city="Tokyo").one()
-        tokyo.city  # reload 'city' attribute on tokyo
-        sess.expire_all()
+        tokyo = sess.get(WeatherLocation, 1)
+        eq_(tokyo.city, "Tokyo")
+
+        newyork = sess.get(WeatherLocation, 2)
+        eq_(newyork.city, "New York")
+
+        t2 = sess.get(WeatherLocation, 1)
+        is_(t2, tokyo)
+
+    def test_get_explicit_shard(self):
+        sess = self._fixture_data()
+        tokyo = (
+            sess.query(WeatherLocation)
+            .set_shard("europe")
+            .where(WeatherLocation.id == 1)
+            .first()
+        )
+        is_(tokyo, None)
+
+        newyork = (
+            sess.query(WeatherLocation)
+            .set_shard("north_america")
+            .where(WeatherLocation.id == 2)
+            .first()
+        )
+        eq_(newyork.city, "New York")
+
+        # now it found it
+        t2 = sess.get(WeatherLocation, 1)
+        eq_(t2.city, "Tokyo")
+
+    def test_query_explicit_shard_via_bind_opts(self):
+        sess = self._fixture_data()
+
+        stmt = select(WeatherLocation).filter(WeatherLocation.id == 1)
+
+        tokyo = (
+            sess.execute(stmt, bind_arguments={"shard_id": "asia"})
+            .scalars()
+            .first()
+        )
+
+        eq_(tokyo.city, "Tokyo")
+
+    def test_plain_db_lookup(self):
+        self._fixture_data()
+        # not sure what this is testing except the fixture data itself
         eq_(
-            db2.execute(weather_locations.select()).fetchall(),
+            db2.connect().execute(weather_locations.select()).fetchall(),
             [(1, "Asia", "Tokyo")],
         )
         eq_(
-            db1.execute(weather_locations.select()).fetchall(),
+            db1.connect().execute(weather_locations.select()).fetchall(),
             [
                 (2, "North America", "New York"),
                 (3, "North America", "Toronto"),
             ],
         )
+
+    def test_plain_core_lookup_w_shard(self):
+        sess = self._fixture_data()
         eq_(
             sess.execute(
-                weather_locations.select(), shard_id="asia"
+                weather_locations.select(),
+                bind_arguments=dict(shard_id="asia"),
             ).fetchall(),
             [(1, "Asia", "Tokyo")],
         )
-        t = sess.query(WeatherLocation).get(tokyo.id)
+
+    def test_roundtrip_future(self):
+        sess = self._fixture_data()
+
+        tokyo = (
+            sess.execute(select(WeatherLocation).filter_by(city="Tokyo"))
+            .scalars()
+            .one()
+        )
+        eq_(tokyo.city, "Tokyo")
+
+        asia_and_europe = sess.execute(
+            select(WeatherLocation).filter(
+                WeatherLocation.continent.in_(["Europe", "Asia"])
+            )
+        ).scalars()
+        eq_(
+            {c.city for c in asia_and_europe},
+            {"Tokyo", "London", "Dublin"},
+        )
+
+    def test_roundtrip(self):
+        sess = self._fixture_data()
+        tokyo = sess.query(WeatherLocation).filter_by(city="Tokyo").one()
+
+        eq_(tokyo.city, "Tokyo")
+        tokyo.city  # reload 'city' attribute on tokyo
+        sess.expire_all()
+
+        t = sess.get(WeatherLocation, tokyo.id)
         eq_(t.city, tokyo.city)
         eq_(t.reports[0].temperature, 80.0)
         north_american_cities = sess.query(WeatherLocation).filter(
             WeatherLocation.continent == "North America"
         )
         eq_(
-            set([c.city for c in north_american_cities]),
-            set(["New York", "Toronto"]),
+            {c.city for c in north_american_cities},
+            {"New York", "Toronto"},
         )
         asia_and_europe = sess.query(WeatherLocation).filter(
             WeatherLocation.continent.in_(["Europe", "Asia"])
         )
         eq_(
-            set([c.city for c in asia_and_europe]),
-            set(["Tokyo", "London", "Dublin"]),
+            {c.city for c in asia_and_europe},
+            {"Tokyo", "London", "Dublin"},
         )
 
         # inspect the shard token stored with each instance
         eq_(
-            set(inspect(c).key[2] for c in asia_and_europe),
-            set(["europe", "asia"]),
+            {inspect(c).key[2] for c in asia_and_europe},
+            {"europe", "asia"},
         )
 
         eq_(
-            set(inspect(c).identity_token for c in asia_and_europe),
-            set(["europe", "asia"]),
+            {inspect(c).identity_token for c in asia_and_europe},
+            {"europe", "asia"},
         )
 
         newyork = sess.query(WeatherLocation).filter_by(city="New York").one()
@@ -312,10 +404,19 @@ class ShardTest(object):
         eq_(t.city, tokyo.city)
 
     def test_shard_id_event(self):
+        # this test is kind of important, it's testing that
+        # when the load event is emitted for an ORM result,
+        # the context is set up in the state that is expected.
+        # prior to 1.4, we were changing a single context in place,
+        # as we would join result sets by fully evaluating and concatenating.
+        # in 1.4 onwards we return a Result that has not run for each
+        # individual result yet, so each one has its own context that
+        # is a shallow copy from the original.
+
         canary = []
 
         def load(instance, ctx):
-            canary.append(ctx.attributes["shard_id"])
+            canary.append(ctx.bind_arguments["shard_id"])
 
         event.listen(WeatherLocation, "load", load)
         sess = self._fixture_data()
@@ -357,9 +458,7 @@ class ShardTest(object):
             t = bq(sess).get(tokyo.id)
             return t
 
-        Sess = sessionmaker(
-            class_=Session, bind=db2, autoflush=True, autocommit=False
-        )
+        Sess = sessionmaker(class_=Session, bind=db2, autoflush=True)
         sess2 = Sess()
 
         t = get_tokyo(sess)
@@ -368,7 +467,7 @@ class ShardTest(object):
         t = get_tokyo(sess2)
         eq_(t.city, tokyo.city)
 
-    def test_bulk_update(self):
+    def test_bulk_update_synchronize_evaluate(self):
         sess = self._fixture_data()
 
         eq_(
@@ -380,7 +479,8 @@ class ShardTest(object):
         eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
 
         sess.query(Report).filter(Report.temperature >= 80).update(
-            {"temperature": Report.temperature + 6}
+            {"temperature": Report.temperature + 6},
+            synchronize_session="evaluate",
         )
 
         eq_(
@@ -391,13 +491,39 @@ class ShardTest(object):
         # test synchronize session as well
         eq_(set(t.temperature for t in temps), {86.0, 75.0, 91.0})
 
-    def test_bulk_delete(self):
+    def test_bulk_update_synchronize_fetch(self):
+        sess = self._fixture_data()
+
+        eq_(
+            set(row.temperature for row in sess.query(Report.temperature)),
+            {80.0, 75.0, 85.0},
+        )
+
+        temps = sess.query(Report).all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        sess.query(Report).filter(Report.temperature >= 80).update(
+            {"temperature": Report.temperature + 6},
+            synchronize_session="fetch",
+        )
+
+        eq_(
+            set(row.temperature for row in sess.query(Report.temperature)),
+            {86.0, 75.0, 91.0},
+        )
+
+        # test synchronize session as well
+        eq_(set(t.temperature for t in temps), {86.0, 75.0, 91.0})
+
+    def test_bulk_delete_synchronize_evaluate(self):
         sess = self._fixture_data()
 
         temps = sess.query(Report).all()
         eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
 
-        sess.query(Report).filter(Report.temperature >= 80).delete()
+        sess.query(Report).filter(Report.temperature >= 80).delete(
+            synchronize_session="evaluate"
+        )
 
         eq_(
             set(row.temperature for row in sess.query(Report.temperature)),
@@ -408,8 +534,145 @@ class ShardTest(object):
         for t in temps:
             assert inspect(t).deleted is (t.temperature >= 80)
 
+    def test_bulk_delete_synchronize_fetch(self):
+        sess = self._fixture_data()
 
-class DistinctEngineShardTest(ShardTest, fixtures.TestBase):
+        temps = sess.query(Report).all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        sess.query(Report).filter(Report.temperature >= 80).delete(
+            synchronize_session="fetch"
+        )
+
+        eq_(
+            set(row.temperature for row in sess.query(Report.temperature)),
+            {75.0},
+        )
+
+        # test synchronize session as well
+        for t in temps:
+            assert inspect(t).deleted is (t.temperature >= 80)
+
+    def test_bulk_update_future_synchronize_evaluate(self):
+        sess = self._fixture_data()
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {80.0, 75.0, 85.0},
+        )
+
+        temps = sess.execute(select(Report)).scalars().all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        sess.execute(
+            update(Report)
+            .filter(Report.temperature >= 80)
+            .values(
+                {"temperature": Report.temperature + 6},
+            )
+            .execution_options(synchronize_session="evaluate")
+        )
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {86.0, 75.0, 91.0},
+        )
+
+        # test synchronize session as well
+        eq_(set(t.temperature for t in temps), {86.0, 75.0, 91.0})
+
+    def test_bulk_update_future_synchronize_fetch(self):
+        sess = self._fixture_data()
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {80.0, 75.0, 85.0},
+        )
+
+        temps = sess.execute(select(Report)).scalars().all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        # MARKMARK
+        # omitting the criteria so that the UPDATE affects three out of
+        # four shards
+        sess.execute(
+            update(Report)
+            .values(
+                {"temperature": Report.temperature + 6},
+            )
+            .execution_options(synchronize_session="fetch")
+        )
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {86.0, 81.0, 91.0},
+        )
+
+        # test synchronize session as well
+        eq_(set(t.temperature for t in temps), {86.0, 81.0, 91.0})
+
+    def test_bulk_delete_future_synchronize_evaluate(self):
+        sess = self._fixture_data()
+
+        temps = sess.execute(select(Report)).scalars().all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        sess.execute(
+            delete(Report)
+            .filter(Report.temperature >= 80)
+            .execution_options(synchronize_session="evaluate")
+        )
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {75.0},
+        )
+
+        # test synchronize session as well
+        for t in temps:
+            assert inspect(t).deleted is (t.temperature >= 80)
+
+    def test_bulk_delete_future_synchronize_fetch(self):
+        sess = self._fixture_data()
+
+        temps = sess.execute(select(Report)).scalars().all()
+        eq_(set(t.temperature for t in temps), {80.0, 75.0, 85.0})
+
+        sess.execute(
+            delete(Report)
+            .filter(Report.temperature >= 80)
+            .execution_options(synchronize_session="fetch")
+        )
+
+        eq_(
+            set(
+                row.temperature
+                for row in sess.execute(select(Report.temperature))
+            ),
+            {75.0},
+        )
+
+        # test synchronize session as well
+        for t in temps:
+            assert inspect(t).deleted is (t.temperature >= 80)
+
+
+class DistinctEngineShardTest(ShardTest, fixtures.MappedTest):
     def _init_dbs(self):
         db1 = testing_engine(
             "sqlite:///shard1_%s.db" % provision.FOLLOWER_IDENT,
@@ -428,16 +691,83 @@ class DistinctEngineShardTest(ShardTest, fixtures.TestBase):
         self.dbs = [db1, db2, db3, db4]
         return self.dbs
 
-    def teardown(self):
-        clear_mappers()
+    def teardown_test(self):
 
-        for db in self.dbs:
-            db.connect().invalidate()
+        testing_reaper.checkin_all()
+        for i in range(1, 5):
+            os.remove("shard%d_%s.db" % (i, provision.FOLLOWER_IDENT))
+
+    @testing.combinations((True,), (False,))
+    @testing.uses_deprecated("Using plain strings")
+    def test_plain_core_textual_lookup_w_shard(self, use_legacy_text):
+        sess = self._fixture_data()
+
+        if use_legacy_text:
+            stmt = "SELECT * FROM weather_locations"
+        else:
+            stmt = text("SELECT * FROM weather_locations")
+
+        eq_(
+            sess.execute(stmt, shard_id="asia").fetchall(),
+            [(1, "Asia", "Tokyo")],
+        )
+
+    @testing.combinations((True,), (False,))
+    @testing.uses_deprecated("Using plain strings")
+    def test_plain_core_textual_lookup(self, use_legacy_text):
+        sess = self._fixture_data()
+
+        if use_legacy_text:
+            stmt = "SELECT * FROM weather_locations WHERE id=1"
+        else:
+            stmt = text("SELECT * FROM weather_locations WHERE id=1")
+        eq_(
+            sess.execute(stmt).fetchall(),
+            [(1, "Asia", "Tokyo")],
+        )
+
+
+class AttachedFileShardTest(ShardTest, fixtures.MappedTest):
+    """Use modern schema conventions along with SQLite ATTACH."""
+
+    schema = "changeme"
+
+    def _init_dbs(self):
+        e = testing_engine("sqlite://")
+        with e.connect() as conn:
+            for i in range(1, 5):
+                conn.exec_driver_sql(
+                    'ATTACH DATABASE "shard%s_%s.db" AS shard%s'
+                    % (i, provision.FOLLOWER_IDENT, i)
+                )
+
+        db1 = e.execution_options(schema_translate_map={"changeme": "shard1"})
+        db2 = e.execution_options(schema_translate_map={"changeme": "shard2"})
+        db3 = e.execution_options(schema_translate_map={"changeme": "shard3"})
+        db4 = e.execution_options(schema_translate_map={"changeme": "shard4"})
+
+        self.engine = e
+        return db1, db2, db3, db4
+
+    def teardown_test(self):
+        testing_reaper.checkin_all()
         for i in range(1, 5):
             os.remove("shard%d_%s.db" % (i, provision.FOLLOWER_IDENT))
 
 
-class AttachedFileShardTest(ShardTest, fixtures.TestBase):
+class TableNameConventionShardTest(ShardTest, fixtures.MappedTest):
+    """This fixture uses a single SQLite database along with a table naming
+    convention to achieve sharding.   Event hooks are used to rewrite SQL
+    statements.
+
+    This used to be called "AttachedFileShardTest" but I didn't see any
+    ATTACH going on.
+
+    A more modern approach here would be to use the schema_translate_map
+    option.
+
+    """
+
     schema = "changeme"
 
     def _init_dbs(self):
@@ -463,6 +793,53 @@ class AttachedFileShardTest(ShardTest, fixtures.TestBase):
         return db1, db2, db3, db4
 
 
+class MultipleDialectShardTest(ShardTest, fixtures.MappedTest):
+    __only_on__ = "postgresql"
+
+    schema = "changeme"
+
+    def _init_dbs(self):
+        e1 = testing_engine("sqlite://")
+        with e1.connect() as conn:
+            for i in [1, 3]:
+                conn.exec_driver_sql(
+                    'ATTACH DATABASE "shard%s_%s.db" AS shard%s'
+                    % (i, provision.FOLLOWER_IDENT, i)
+                )
+
+        e2 = testing_engine()
+        with e2.begin() as conn:
+            for i in [2, 4]:
+                conn.exec_driver_sql(
+                    "CREATE SCHEMA IF NOT EXISTS shard%s" % (i,)
+                )
+
+        db1 = e1.execution_options(schema_translate_map={"changeme": "shard1"})
+        db2 = e2.execution_options(schema_translate_map={"changeme": "shard2"})
+        db3 = e1.execution_options(schema_translate_map={"changeme": "shard3"})
+        db4 = e2.execution_options(schema_translate_map={"changeme": "shard4"})
+
+        self.sqlite_engine = e1
+        self.postgresql_engine = e2
+        return db1, db2, db3, db4
+
+    def teardown_test(self):
+        clear_mappers()
+
+        # the tests in this suite don't cleanly close out the Session
+        # at the moment so use the reaper to close all connections
+        testing_reaper.checkin_all()
+
+        for i in [1, 3]:
+            os.remove("shard%d_%s.db" % (i, provision.FOLLOWER_IDENT))
+
+        with self.postgresql_engine.begin() as conn:
+            self.tables_test_metadata.drop_all(conn)
+            for i in [2, 4]:
+                conn.exec_driver_sql("DROP SCHEMA shard%s CASCADE" % (i,))
+        self.postgresql_engine.dispose()
+
+
 class SelectinloadRegressionTest(fixtures.DeclarativeMappedTest):
     """test #4175"""
 
@@ -485,7 +862,7 @@ class SelectinloadRegressionTest(fixtures.DeclarativeMappedTest):
             shards={"test": testing.db},
             shard_chooser=lambda *args: "test",
             id_chooser=lambda *args: None,
-            query_chooser=lambda *args: ["test"],
+            execute_chooser=lambda *args: ["test"],
         )
 
         Book, Page = self.classes("Book", "Page")
@@ -495,7 +872,7 @@ class SelectinloadRegressionTest(fixtures.DeclarativeMappedTest):
         session.add(book)
         session.commit()
 
-        result = session.query(Book).options(selectinload("pages")).all()
+        result = session.query(Book).options(selectinload(Book.pages)).all()
         eq_(result, [book])
 
 
@@ -517,13 +894,17 @@ class RefreshDeferExpireTest(fixtures.DeclarativeMappedTest):
         s.add(A(data="d1", deferred_data="d2"))
         s.commit()
 
-    def _session_fixture(self):
+    def _session_fixture(self, **kw):
+        # the "fake" key here is to ensure that neither id_chooser
+        # nor query_chooser are actually used, only shard_chooser
+        # should be used.
 
         return ShardedSession(
             shards={"main": testing.db},
             shard_chooser=lambda *args: "main",
             id_chooser=lambda *args: ["fake", "main"],
-            query_chooser=lambda *args: ["fake", "main"],
+            execute_chooser=lambda *args: ["fake", "main"],
+            **kw
         )
 
     def test_refresh(self):
@@ -559,17 +940,17 @@ class LazyLoadIdentityKeyTest(fixtures.DeclarativeMappedTest):
         )
 
         for db in (db1, db2):
-            self.metadata.create_all(db)
+            self.tables_test_metadata.create_all(db)
 
         self.dbs = [db1, db2]
 
         return self.dbs
 
-    def teardown(self):
+    def teardown_test(self):
         for db in self.dbs:
             db.connect().invalidate()
 
-        testing_reaper.close_all()
+        testing_reaper.checkin_all()
         for i in range(1, 3):
             os.remove("shard%d_%s.db" % (i, provision.FOLLOWER_IDENT))
 
@@ -608,19 +989,22 @@ class LazyLoadIdentityKeyTest(fixtures.DeclarativeMappedTest):
 
             return [query.lazy_loaded_from.identity_token]
 
-        def no_query_chooser(query):
-            if query.column_descriptions[0]["type"] is Book and lazy_load_book:
-                assert isinstance(query.lazy_loaded_from.obj(), Page)
+        def no_query_chooser(orm_context):
+            if (
+                orm_context.statement.column_descriptions[0]["type"] is Book
+                and lazy_load_book
+            ):
+                assert isinstance(orm_context.lazy_loaded_from.obj(), Page)
             elif (
-                query.column_descriptions[0]["type"] is Page
+                orm_context.statement.column_descriptions[0]["type"] is Page
                 and lazy_load_pages
             ):
-                assert isinstance(query.lazy_loaded_from.obj(), Book)
+                assert isinstance(orm_context.lazy_loaded_from.obj(), Book)
 
-            if query.lazy_loaded_from is None:
+            if orm_context.lazy_loaded_from is None:
                 return ["test", "test2"]
             else:
-                return [query.lazy_loaded_from.identity_token]
+                return [orm_context.lazy_loaded_from.identity_token]
 
         def shard_chooser(mapper, instance, **kw):
             if isinstance(instance, Page):
@@ -633,7 +1017,7 @@ class LazyLoadIdentityKeyTest(fixtures.DeclarativeMappedTest):
             shards={"test": db1, "test2": db2},
             shard_chooser=shard_chooser,
             id_chooser=id_chooser,
-            query_chooser=no_query_chooser,
+            execute_chooser=no_query_chooser,
         )
 
         return session

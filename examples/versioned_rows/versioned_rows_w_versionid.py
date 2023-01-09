@@ -3,7 +3,7 @@ an UPDATE statement on a single row into an INSERT statement, so that a new
 row is inserted with the new data, keeping the old row intact.
 
 This example adds a numerical version_id to the Versioned class as well
-as the ability to see which row is the most "current" vesion.
+as the ability to see which row is the most "current" version.
 
 """
 from sqlalchemy import Boolean
@@ -39,7 +39,7 @@ class Versioned(object):
     def __declare_last__(cls):
         alias = cls.__table__.alias()
         cls.calc_is_current_version = column_property(
-            select([func.max(alias.c.version_id) == cls.version_id]).where(
+            select(func.max(alias.c.version_id) == cls.version_id).where(
                 alias.c.id == cls.id
             )
         )
@@ -64,7 +64,7 @@ def before_flush(session, flush_context, instances):
     for instance in session.dirty:
         if not isinstance(instance, Versioned):
             continue
-        if not session.is_modified(instance, passive=True):
+        if not session.is_modified(instance):
             continue
 
         if not attributes.instance_state(instance).has_identity:

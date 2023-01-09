@@ -1,1013 +1,1003 @@
 import re
-import time
 
 import sqlalchemy as tsa
-from sqlalchemy import column
+import sqlalchemy as sa
+from sqlalchemy import bindparam
 from sqlalchemy import create_engine
-from sqlalchemy import engine_from_config
+from sqlalchemy import DDL
+from sqlalchemy import engine
 from sqlalchemy import event
+from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import INT
 from sqlalchemy import Integer
-from sqlalchemy import literal
 from sqlalchemy import MetaData
 from sqlalchemy import pool
 from sqlalchemy import select
-from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import text
-from sqlalchemy import TypeDecorator
+from sqlalchemy import ThreadLocalMetaData
 from sqlalchemy import VARCHAR
+from sqlalchemy.engine import reflection
+from sqlalchemy.engine.base import Connection
 from sqlalchemy.engine.base import Engine
-from sqlalchemy.interfaces import ConnectionProxy
+from sqlalchemy.engine.mock import MockConnection
+from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import config
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_instance_of
+from sqlalchemy.testing import is_true
+from sqlalchemy.testing import mock
 from sqlalchemy.testing.engines import testing_engine
-from sqlalchemy.testing.mock import call
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
-from sqlalchemy.testing.util import gc_collect
-from sqlalchemy.testing.util import lazy_gc
-from .test_parseconnect import mock_dbapi
+from .test_transaction import ResetFixture
 
-tlengine = None
+
+def _string_deprecation_expect():
+    return testing.expect_deprecated_20(
+        r"Passing a string to Connection.execute\(\) is deprecated "
+        r"and will be removed in version 2.0"
+    )
 
 
 class SomeException(Exception):
     pass
 
 
-def _tlengine_deprecated():
-    return testing.expect_deprecated(
-        "The 'threadlocal' engine strategy is deprecated"
-    )
+class ConnectionlessDeprecationTest(fixtures.TestBase):
+    """test various things associated with "connectionless" executions."""
 
+    def check_usage(self, inspector):
+        with inspector._operation_context() as conn:
+            is_instance_of(conn, Connection)
 
-class TableNamesOrderByTest(fixtures.TestBase):
-    @testing.provide_metadata
-    def test_order_by_foreign_key(self):
-        Table(
-            "t1",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
+    def test_bind_close_engine(self):
+        e = testing.db
+        with e.connect() as conn:
+            assert not conn.closed
+        assert conn.closed
+
+    def test_bind_create_drop_err_metadata(self):
+        metadata = MetaData()
+        Table("test_table", metadata, Column("foo", Integer))
+        for meth in [metadata.create_all, metadata.drop_all]:
+            with testing.expect_deprecated_20(
+                "The ``bind`` argument for schema methods that invoke SQL"
+            ):
+                assert_raises_message(
+                    exc.UnboundExecutionError,
+                    "MetaData object is not bound to an Engine or Connection.",
+                    meth,
+                )
+
+    def test_bind_create_drop_err_table(self):
+        metadata = MetaData()
+        table = Table("test_table", metadata, Column("foo", Integer))
+
+        for meth in [table.create, table.drop]:
+            with testing.expect_deprecated_20(
+                "The ``bind`` argument for schema methods that invoke SQL"
+            ):
+                assert_raises_message(
+                    exc.UnboundExecutionError,
+                    (
+                        "Table object 'test_table' is not bound to an "
+                        "Engine or Connection."
+                    ),
+                    meth,
+                )
+
+    def test_bind_create_drop_bound(self):
+
+        for meta in (MetaData, ThreadLocalMetaData):
+            for bind in (testing.db, testing.db.connect()):
+                if isinstance(bind, engine.Connection):
+                    bind.begin()
+
+                if meta is ThreadLocalMetaData:
+                    with testing.expect_deprecated(
+                        "ThreadLocalMetaData is deprecated"
+                    ):
+                        metadata = meta()
+                else:
+                    metadata = meta()
+                table = Table("test_table", metadata, Column("foo", Integer))
+                metadata.bind = bind
+                assert metadata.bind is table.bind is bind
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    metadata.create_all()
+
+                with testing.expect_deprecated(
+                    r"The Table.exists\(\) method is deprecated and will "
+                    "be removed in a future release."
+                ):
+                    assert table.exists()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    metadata.drop_all()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    table.create()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    table.drop()
+                with testing.expect_deprecated(
+                    r"The Table.exists\(\) method is deprecated and will "
+                    "be removed in a future release."
+                ):
+                    assert not table.exists()
+
+                if meta is ThreadLocalMetaData:
+                    with testing.expect_deprecated(
+                        "ThreadLocalMetaData is deprecated"
+                    ):
+                        metadata = meta()
+                else:
+                    metadata = meta()
+
+                table = Table("test_table", metadata, Column("foo", Integer))
+
+                metadata.bind = bind
+
+                assert metadata.bind is table.bind is bind
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    metadata.create_all()
+                with testing.expect_deprecated(
+                    r"The Table.exists\(\) method is deprecated and will "
+                    "be removed in a future release."
+                ):
+                    assert table.exists()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    metadata.drop_all()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    table.create()
+                with testing.expect_deprecated_20(
+                    "The ``bind`` argument for schema methods that invoke SQL"
+                ):
+                    table.drop()
+                with testing.expect_deprecated(
+                    r"The Table.exists\(\) method is deprecated and will "
+                    "be removed in a future release."
+                ):
+                    assert not table.exists()
+                if isinstance(bind, engine.Connection):
+                    bind.close()
+
+    def test_bind_create_drop_constructor_bound(self):
+        for bind in (testing.db, testing.db.connect()):
+            if isinstance(bind, engine.Connection):
+                bind.begin()
+            try:
+                for args in (([bind], {}), ([], {"bind": bind})):
+                    with testing.expect_deprecated_20(
+                        "The MetaData.bind argument is deprecated "
+                    ):
+                        metadata = MetaData(*args[0], **args[1])
+                    table = Table(
+                        "test_table", metadata, Column("foo", Integer)
+                    )
+                    assert metadata.bind is table.bind is bind
+                    with testing.expect_deprecated_20(
+                        "The ``bind`` argument for schema methods "
+                        "that invoke SQL"
+                    ):
+                        metadata.create_all()
+                    is_true(inspect(bind).has_table(table.name))
+                    with testing.expect_deprecated_20(
+                        "The ``bind`` argument for schema methods "
+                        "that invoke SQL"
+                    ):
+                        metadata.drop_all()
+                    with testing.expect_deprecated_20(
+                        "The ``bind`` argument for schema methods "
+                        "that invoke SQL"
+                    ):
+                        table.create()
+                    with testing.expect_deprecated_20(
+                        "The ``bind`` argument for schema methods "
+                        "that invoke SQL"
+                    ):
+                        table.drop()
+                    is_false(inspect(bind).has_table(table.name))
+            finally:
+                if isinstance(bind, engine.Connection):
+                    bind.close()
+
+    def test_bind_implicit_execution(self):
+        metadata = MetaData()
+        table = Table(
+            "test_table",
+            metadata,
+            Column("foo", Integer),
             test_needs_acid=True,
         )
-        Table(
-            "t2",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
-            Column("t1id", Integer, ForeignKey("t1.id")),
-            test_needs_acid=True,
-        )
-        Table(
-            "t3",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
-            Column("t2id", Integer, ForeignKey("t2.id")),
-            test_needs_acid=True,
-        )
-        self.metadata.create_all()
-        insp = inspect(testing.db)
+        conn = testing.db.connect()
+        with conn.begin():
+            metadata.create_all(bind=conn)
+        try:
+            trans = conn.begin()
+            metadata.bind = conn
+            t = table.insert()
+            assert t.bind is conn
+            with testing.expect_deprecated_20(
+                r"The Executable.execute\(\) method is considered legacy"
+            ):
+                table.insert().execute(foo=5)
+            with testing.expect_deprecated_20(
+                r"The Executable.execute\(\) method is considered legacy"
+            ):
+                table.insert().execute(foo=6)
+            with testing.expect_deprecated_20(
+                r"The Executable.execute\(\) method is considered legacy"
+            ):
+                table.insert().execute(foo=7)
+            trans.rollback()
+            metadata.bind = None
+            assert (
+                conn.exec_driver_sql(
+                    "select count(*) from test_table"
+                ).scalar()
+                == 0
+            )
+        finally:
+            with conn.begin():
+                metadata.drop_all(bind=conn)
+
+    def test_bind_clauseelement(self):
+        metadata = MetaData()
+        table = Table("test_table", metadata, Column("foo", Integer))
+        metadata.create_all(bind=testing.db)
+        try:
+            for elem in [
+                table.select,
+                lambda **kwargs: sa.func.current_timestamp(**kwargs).select(),
+                # func.current_timestamp().select,
+                lambda **kwargs: text("select * from test_table", **kwargs),
+            ]:
+                for bind in (testing.db, testing.db.connect()):
+                    try:
+                        with testing.expect_deprecated_20(
+                            "The .*bind argument is deprecated"
+                        ):
+                            e = elem(bind=bind)
+                        assert e.bind is bind
+                        with testing.expect_deprecated_20(
+                            r"The Executable.execute\(\) method is "
+                            "considered legacy"
+                        ):
+                            e.execute().close()
+                    finally:
+                        if isinstance(bind, engine.Connection):
+                            bind.close()
+
+                e = elem()
+                assert e.bind is None
+                with testing.expect_deprecated_20(
+                    r"The Executable.execute\(\) method is considered legacy"
+                ):
+                    assert_raises(exc.UnboundExecutionError, e.execute)
+        finally:
+            if isinstance(bind, engine.Connection):
+                bind.close()
+            metadata.drop_all(bind=testing.db)
+
+    def test_inspector_constructor_engine(self):
         with testing.expect_deprecated(
-            "The get_table_names.order_by parameter is deprecated "
+            r"The __init__\(\) method on Inspector is deprecated and will "
+            r"be removed in a future release."
         ):
-            tnames = insp.get_table_names(order_by="foreign_key")
-        eq_(tnames, ["t1", "t2", "t3"])
+            i1 = reflection.Inspector(testing.db)
+
+        is_(i1.bind, testing.db)
+        self.check_usage(i1)
+
+    def test_inspector_constructor_connection(self):
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated(
+                r"The __init__\(\) method on Inspector is deprecated and "
+                r"will be removed in a future release."
+            ):
+                i1 = reflection.Inspector(conn)
+
+            is_(i1.bind, conn)
+            is_(i1.engine, testing.db)
+            self.check_usage(i1)
+
+    def test_inspector_from_engine(self):
+        with testing.expect_deprecated(
+            r"The from_engine\(\) method on Inspector is deprecated and will "
+            r"be removed in a future release."
+        ):
+            i1 = reflection.Inspector.from_engine(testing.db)
+
+        is_(i1.bind, testing.db)
+        self.check_usage(i1)
+
+    def test_bind_close_conn(self):
+        e = testing.db
+        conn = e.connect()
+
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered",
+            r"The .close\(\) method on a so-called 'branched' connection is "
+            r"deprecated as of 1.4, as are 'branched' connections overall, "
+            r"and will be removed in a future release.",
+        ):
+            with conn.connect() as c2:
+                assert not c2.closed
+        assert not conn.closed
+        assert c2.closed
+
+    @testing.provide_metadata
+    def test_explicit_connectionless_execute(self):
+        table = Table("t", self.metadata, Column("a", Integer))
+        table.create(testing.db)
+
+        stmt = table.insert().values(a=1)
+        with testing.expect_deprecated_20(
+            r"The Engine.execute\(\) method is considered legacy",
+        ):
+            testing.db.execute(stmt)
+
+        stmt = select(table)
+        with testing.expect_deprecated_20(
+            r"The Engine.execute\(\) method is considered legacy",
+        ):
+            eq_(testing.db.execute(stmt).fetchall(), [(1,)])
+
+    def test_implicit_execute(self, metadata):
+        table = Table("t", metadata, Column("a", Integer))
+        table.create(testing.db)
+
+        metadata.bind = testing.db
+        stmt = table.insert().values(a=1)
+        with testing.expect_deprecated_20(
+            r"The Executable.execute\(\) method is considered legacy",
+        ):
+            stmt.execute()
+
+        stmt = select(table)
+        with testing.expect_deprecated_20(
+            r"The Executable.execute\(\) method is considered legacy",
+        ):
+            eq_(stmt.execute().fetchall(), [(1,)])
 
 
 class CreateEngineTest(fixtures.TestBase):
-    def test_pool_threadlocal_from_config(self):
-        dbapi = mock_dbapi
-
-        config = {
-            "sqlalchemy.url": "postgresql://scott:tiger@somehost/test",
-            "sqlalchemy.pool_threadlocal": "false",
-        }
-
-        e = engine_from_config(config, module=dbapi, _initialize=False)
-        eq_(e.pool._use_threadlocal, False)
-
-        config = {
-            "sqlalchemy.url": "postgresql://scott:tiger@somehost/test",
-            "sqlalchemy.pool_threadlocal": "true",
-        }
+    def test_strategy_keyword_mock(self):
+        def executor(x, y):
+            pass
 
         with testing.expect_deprecated(
-            "The Pool.use_threadlocal parameter is deprecated"
+            "The create_engine.strategy keyword is deprecated, and the "
+            "only argument accepted is 'mock'"
         ):
-            e = engine_from_config(config, module=dbapi, _initialize=False)
-        eq_(e.pool._use_threadlocal, True)
+            e = create_engine(
+                "postgresql://", strategy="mock", executor=executor
+            )
 
+        assert isinstance(e, MockConnection)
 
-class RecycleTest(fixtures.TestBase):
-    __backend__ = True
-
-    def test_basic(self):
+    def test_strategy_keyword_unknown(self):
         with testing.expect_deprecated(
-            "The Pool.use_threadlocal parameter is deprecated"
+            "The create_engine.strategy keyword is deprecated, and the "
+            "only argument accepted is 'mock'"
         ):
-            engine = engines.reconnecting_engine(
-                options={"pool_threadlocal": True}
+            assert_raises_message(
+                tsa.exc.ArgumentError,
+                "unknown strategy: 'threadlocal'",
+                create_engine,
+                "postgresql://",
+                strategy="threadlocal",
             )
 
+    def test_empty_in_keyword(self):
         with testing.expect_deprecated(
-            r"The Engine.contextual_connect\(\) method is deprecated"
+            "The create_engine.empty_in_strategy keyword is deprecated, "
+            "and no longer has any effect."
         ):
-            conn = engine.contextual_connect()
-        eq_(conn.execute(select([1])).scalar(), 1)
-        conn.close()
-
-        # set the pool recycle down to 1.
-        # we aren't doing this inline with the
-        # engine create since cx_oracle takes way
-        # too long to create the 1st connection and don't
-        # want to build a huge delay into this test.
-
-        engine.pool._recycle = 1
-
-        # kill the DB connection
-        engine.test_shutdown()
-
-        # wait until past the recycle period
-        time.sleep(2)
-
-        # can connect, no exception
-        with testing.expect_deprecated(
-            r"The Engine.contextual_connect\(\) method is deprecated"
-        ):
-            conn = engine.contextual_connect()
-        eq_(conn.execute(select([1])).scalar(), 1)
-        conn.close()
-
-
-class TLTransactionTest(fixtures.TestBase):
-    __requires__ = ("ad_hoc_engines",)
-    __backend__ = True
-
-    @classmethod
-    def setup_class(cls):
-        global users, metadata, tlengine
-
-        with _tlengine_deprecated():
-            tlengine = testing_engine(options=dict(strategy="threadlocal"))
-        metadata = MetaData()
-        users = Table(
-            "query_users",
-            metadata,
-            Column(
-                "user_id",
-                INT,
-                Sequence("query_users_id_seq", optional=True),
-                primary_key=True,
-            ),
-            Column("user_name", VARCHAR(20)),
-            test_needs_acid=True,
-        )
-        metadata.create_all(tlengine)
-
-    def teardown(self):
-        tlengine.execute(users.delete()).close()
-
-    @classmethod
-    def teardown_class(cls):
-        tlengine.close()
-        metadata.drop_all(tlengine)
-        tlengine.dispose()
-
-    def setup(self):
-
-        # ensure tests start with engine closed
-
-        tlengine.close()
-
-    @testing.crashes(
-        "oracle", "TNS error of unknown origin occurs on the buildbot."
-    )
-    def test_rollback_no_trans(self):
-        with _tlengine_deprecated():
-            tlengine = testing_engine(options=dict(strategy="threadlocal"))
-
-        # shouldn't fail
-        tlengine.rollback()
-
-        tlengine.begin()
-        tlengine.rollback()
-
-        # shouldn't fail
-        tlengine.rollback()
-
-    def test_commit_no_trans(self):
-        with _tlengine_deprecated():
-            tlengine = testing_engine(options=dict(strategy="threadlocal"))
-
-        # shouldn't fail
-        tlengine.commit()
-
-        tlengine.begin()
-        tlengine.rollback()
-
-        # shouldn't fail
-        tlengine.commit()
-
-    def test_prepare_no_trans(self):
-        with _tlengine_deprecated():
-            tlengine = testing_engine(options=dict(strategy="threadlocal"))
-
-        # shouldn't fail
-        tlengine.prepare()
-
-        tlengine.begin()
-        tlengine.rollback()
-
-        # shouldn't fail
-        tlengine.prepare()
-
-    def test_connection_close(self):
-        """test that when connections are closed for real, transactions
-        are rolled back and disposed."""
-
-        c = tlengine.contextual_connect()
-        c.begin()
-        assert c.in_transaction()
-        c.close()
-        assert not c.in_transaction()
-
-    def test_transaction_close(self):
-        c = tlengine.contextual_connect()
-        t = c.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        t2 = c.begin()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        t2.close()
-        result = c.execute("select * from query_users")
-        assert len(result.fetchall()) == 4
-        t.close()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 0
-        finally:
-            c.close()
-            external_connection.close()
-
-    def test_rollback(self):
-        """test a basic rollback"""
-
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.rollback()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 0
-        finally:
-            external_connection.close()
-
-    def test_commit(self):
-        """test a basic commit"""
-
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.commit()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 3
-        finally:
-            external_connection.close()
-
-    def test_with_interface(self):
-        trans = tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        trans.commit()
-
-        trans = tlengine.begin()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        trans.__exit__(Exception, "fake", None)
-        trans = tlengine.begin()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        trans.__exit__(None, None, None)
-        eq_(
-            tlengine.execute(
-                users.select().order_by(users.c.user_id)
-            ).fetchall(),
-            [(1, "user1"), (2, "user2"), (4, "user4")],
-        )
-
-    def test_commits(self):
-        connection = tlengine.connect()
-        assert (
-            connection.execute("select count(*) from query_users").scalar()
-            == 0
-        )
-        connection.close()
-        connection = tlengine.contextual_connect()
-        transaction = connection.begin()
-        connection.execute(users.insert(), user_id=1, user_name="user1")
-        transaction.commit()
-        transaction = connection.begin()
-        connection.execute(users.insert(), user_id=2, user_name="user2")
-        connection.execute(users.insert(), user_id=3, user_name="user3")
-        transaction.commit()
-        transaction = connection.begin()
-        result = connection.execute("select * from query_users")
-        rows = result.fetchall()
-        assert len(rows) == 3, "expected 3 got %d" % len(rows)
-        transaction.commit()
-        connection.close()
-
-    def test_rollback_off_conn(self):
-
-        # test that a TLTransaction opened off a TLConnection allows
-        # that TLConnection to be aware of the transactional context
-
-        conn = tlengine.contextual_connect()
-        trans = conn.begin()
-        conn.execute(users.insert(), user_id=1, user_name="user1")
-        conn.execute(users.insert(), user_id=2, user_name="user2")
-        conn.execute(users.insert(), user_id=3, user_name="user3")
-        trans.rollback()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 0
-        finally:
-            conn.close()
-            external_connection.close()
-
-    def test_morerollback_off_conn(self):
-
-        # test that an existing TLConnection automatically takes place
-        # in a TLTransaction opened on a second TLConnection
-
-        conn = tlengine.contextual_connect()
-        conn2 = tlengine.contextual_connect()
-        trans = conn2.begin()
-        conn.execute(users.insert(), user_id=1, user_name="user1")
-        conn.execute(users.insert(), user_id=2, user_name="user2")
-        conn.execute(users.insert(), user_id=3, user_name="user3")
-        trans.rollback()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 0
-        finally:
-            conn.close()
-            conn2.close()
-            external_connection.close()
-
-    def test_commit_off_connection(self):
-        conn = tlengine.contextual_connect()
-        trans = conn.begin()
-        conn.execute(users.insert(), user_id=1, user_name="user1")
-        conn.execute(users.insert(), user_id=2, user_name="user2")
-        conn.execute(users.insert(), user_id=3, user_name="user3")
-        trans.commit()
-        external_connection = tlengine.connect()
-        result = external_connection.execute("select * from query_users")
-        try:
-            assert len(result.fetchall()) == 3
-        finally:
-            conn.close()
-            external_connection.close()
-
-    def test_nesting_rollback(self):
-        """tests nesting of transactions, rollback at the end"""
-
-        external_connection = tlengine.connect()
-        self.assert_(
-            external_connection.connection
-            is not tlengine.contextual_connect().connection
-        )
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        tlengine.execute(users.insert(), user_id=5, user_name="user5")
-        tlengine.commit()
-        tlengine.rollback()
-        try:
-            self.assert_(
-                external_connection.scalar("select count(*) from query_users")
-                == 0
+            create_engine(
+                "postgresql://",
+                empty_in_strategy="static",
+                module=Mock(),
+                _initialize=False,
             )
-        finally:
-            external_connection.close()
-
-    def test_nesting_commit(self):
-        """tests nesting of transactions, commit at the end."""
-
-        external_connection = tlengine.connect()
-        self.assert_(
-            external_connection.connection
-            is not tlengine.contextual_connect().connection
-        )
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        tlengine.execute(users.insert(), user_id=5, user_name="user5")
-        tlengine.commit()
-        tlengine.commit()
-        try:
-            self.assert_(
-                external_connection.scalar("select count(*) from query_users")
-                == 5
-            )
-        finally:
-            external_connection.close()
-
-    def test_mixed_nesting(self):
-        """tests nesting of transactions off the TLEngine directly
-        inside of transactions off the connection from the TLEngine"""
-
-        external_connection = tlengine.connect()
-        self.assert_(
-            external_connection.connection
-            is not tlengine.contextual_connect().connection
-        )
-        conn = tlengine.contextual_connect()
-        trans = conn.begin()
-        trans2 = conn.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=5, user_name="user5")
-        tlengine.execute(users.insert(), user_id=6, user_name="user6")
-        tlengine.execute(users.insert(), user_id=7, user_name="user7")
-        tlengine.commit()
-        tlengine.execute(users.insert(), user_id=8, user_name="user8")
-        tlengine.commit()
-        trans2.commit()
-        trans.rollback()
-        conn.close()
-        try:
-            self.assert_(
-                external_connection.scalar("select count(*) from query_users")
-                == 0
-            )
-        finally:
-            external_connection.close()
-
-    def test_more_mixed_nesting(self):
-        """tests nesting of transactions off the connection from the
-        TLEngine inside of transactions off the TLEngine directly."""
-
-        external_connection = tlengine.connect()
-        self.assert_(
-            external_connection.connection
-            is not tlengine.contextual_connect().connection
-        )
-        tlengine.begin()
-        connection = tlengine.contextual_connect()
-        connection.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.begin()
-        connection.execute(users.insert(), user_id=2, user_name="user2")
-        connection.execute(users.insert(), user_id=3, user_name="user3")
-        trans = connection.begin()
-        connection.execute(users.insert(), user_id=4, user_name="user4")
-        connection.execute(users.insert(), user_id=5, user_name="user5")
-        trans.commit()
-        tlengine.commit()
-        tlengine.rollback()
-        connection.close()
-        try:
-            self.assert_(
-                external_connection.scalar("select count(*) from query_users")
-                == 0
-            )
-        finally:
-            external_connection.close()
-
-    @testing.requires.savepoints
-    def test_nested_subtransaction_rollback(self):
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.begin_nested()
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.rollback()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.commit()
-        tlengine.close()
-        eq_(
-            tlengine.execute(
-                select([users.c.user_id]).order_by(users.c.user_id)
-            ).fetchall(),
-            [(1,), (3,)],
-        )
-        tlengine.close()
-
-    @testing.requires.savepoints
-    @testing.crashes(
-        "oracle+zxjdbc",
-        "Errors out and causes subsequent tests to " "deadlock",
-    )
-    def test_nested_subtransaction_commit(self):
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.begin_nested()
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.commit()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.commit()
-        tlengine.close()
-        eq_(
-            tlengine.execute(
-                select([users.c.user_id]).order_by(users.c.user_id)
-            ).fetchall(),
-            [(1,), (2,), (3,)],
-        )
-        tlengine.close()
-
-    @testing.requires.savepoints
-    def test_rollback_to_subtransaction(self):
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.begin_nested()
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.begin()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.rollback()
-        tlengine.rollback()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        tlengine.commit()
-        tlengine.close()
-        eq_(
-            tlengine.execute(
-                select([users.c.user_id]).order_by(users.c.user_id)
-            ).fetchall(),
-            [(1,), (4,)],
-        )
-        tlengine.close()
-
-    def test_connections(self):
-        """tests that contextual_connect is threadlocal"""
-
-        c1 = tlengine.contextual_connect()
-        c2 = tlengine.contextual_connect()
-        assert c1.connection is c2.connection
-        c2.close()
-        assert not c1.closed
-        assert not tlengine.closed
-
-    @testing.requires.independent_cursors
-    def test_result_closing(self):
-        """tests that contextual_connect is threadlocal"""
-
-        r1 = tlengine.execute(select([1]))
-        r2 = tlengine.execute(select([1]))
-        r1.fetchone()
-        r2.fetchone()
-        r1.close()
-        assert r2.connection is r1.connection
-        assert not r2.connection.closed
-        assert not tlengine.closed
-
-        # close again, nothing happens since resultproxy calls close()
-        # only once
-
-        r1.close()
-        assert r2.connection is r1.connection
-        assert not r2.connection.closed
-        assert not tlengine.closed
-        r2.close()
-        assert r2.connection.closed
-        assert tlengine.closed
-
-    @testing.crashes(
-        "oracle+cx_oracle", "intermittent failures on the buildbot"
-    )
-    def test_dispose(self):
-        with _tlengine_deprecated():
-            eng = testing_engine(options=dict(strategy="threadlocal"))
-        eng.execute(select([1]))
-        eng.dispose()
-        eng.execute(select([1]))
-
-    @testing.requires.two_phase_transactions
-    def test_two_phase_transaction(self):
-        tlengine.begin_twophase()
-        tlengine.execute(users.insert(), user_id=1, user_name="user1")
-        tlengine.prepare()
-        tlengine.commit()
-        tlengine.begin_twophase()
-        tlengine.execute(users.insert(), user_id=2, user_name="user2")
-        tlengine.commit()
-        tlengine.begin_twophase()
-        tlengine.execute(users.insert(), user_id=3, user_name="user3")
-        tlengine.rollback()
-        tlengine.begin_twophase()
-        tlengine.execute(users.insert(), user_id=4, user_name="user4")
-        tlengine.prepare()
-        tlengine.rollback()
-        eq_(
-            tlengine.execute(
-                select([users.c.user_id]).order_by(users.c.user_id)
-            ).fetchall(),
-            [(1,), (2,)],
-        )
 
 
-class ConvenienceExecuteTest(fixtures.TablesTest):
+class TransactionTest(ResetFixture, fixtures.TablesTest):
     __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
-        cls.table = Table(
-            "exec_test",
+        Table(
+            "users",
             metadata,
-            Column("a", Integer),
-            Column("b", Integer),
+            Column("user_id", Integer, primary_key=True),
+            Column("user_name", String(20)),
             test_needs_acid=True,
         )
+        Table("inserttable", metadata, Column("data", String(20)))
 
-    def _trans_fn(self, is_transaction=False):
-        def go(conn, x, value=None):
-            if is_transaction:
-                conn = conn.connection
-            conn.execute(self.table.insert().values(a=x, b=value))
+    @testing.fixture
+    def local_connection(self):
+        with testing.db.connect() as conn:
+            yield conn
 
-        return go
+    def test_transaction_container(self):
+        users = self.tables.users
 
-    def _trans_rollback_fn(self, is_transaction=False):
-        def go(conn, x, value=None):
-            if is_transaction:
-                conn = conn.connection
-            conn.execute(self.table.insert().values(a=x, b=value))
-            raise SomeException("breakage")
+        def go(conn, table, data):
+            for d in data:
+                conn.execute(table.insert(), d)
 
-        return go
+        with testing.expect_deprecated(
+            r"The Engine.transaction\(\) method is deprecated"
+        ):
+            testing.db.transaction(
+                go, users, [dict(user_id=1, user_name="user1")]
+            )
 
-    def _assert_no_data(self):
+        with testing.db.connect() as conn:
+            eq_(conn.execute(users.select()).fetchall(), [(1, "user1")])
+        with testing.expect_deprecated(
+            r"The Engine.transaction\(\) method is deprecated"
+        ):
+            assert_raises(
+                tsa.exc.DBAPIError,
+                testing.db.transaction,
+                go,
+                users,
+                [
+                    {"user_id": 2, "user_name": "user2"},
+                    {"user_id": 1, "user_name": "user3"},
+                ],
+            )
+        with testing.db.connect() as conn:
+            eq_(conn.execute(users.select()).fetchall(), [(1, "user1")])
+
+    def test_begin_begin_rollback_rollback(self, reset_agent):
+        with reset_agent.engine.connect() as connection:
+            trans = connection.begin()
+            with testing.expect_deprecated_20(
+                r"Calling .begin\(\) when a transaction is already "
+                "begun, creating a 'sub' transaction"
+            ):
+                trans2 = connection.begin()
+            trans2.rollback()
+            trans.rollback()
         eq_(
-            testing.db.scalar(
-                select([func.count("*")]).select_from(self.table)
-            ),
-            0,
+            reset_agent.mock_calls,
+            [
+                mock.call.rollback(connection),
+                mock.call.do_rollback(mock.ANY),
+                mock.call.do_rollback(mock.ANY),
+            ],
         )
 
-    def _assert_fn(self, x, value=None):
-        eq_(testing.db.execute(self.table.select()).fetchall(), [(x, value)])
+    def test_begin_begin_commit_commit(self, reset_agent):
+        with reset_agent.engine.connect() as connection:
+            trans = connection.begin()
+            with testing.expect_deprecated_20(
+                r"Calling .begin\(\) when a transaction is already "
+                "begun, creating a 'sub' transaction"
+            ):
+                trans2 = connection.begin()
+            trans2.commit()
+            trans.commit()
+        eq_(
+            reset_agent.mock_calls,
+            [
+                mock.call.commit(connection),
+                mock.call.do_commit(mock.ANY),
+                mock.call.do_rollback(mock.ANY),
+            ],
+        )
 
-    def test_transaction_tlocal_engine_ctx_commit(self):
-        fn = self._trans_fn()
-        with _tlengine_deprecated():
-            engine = engines.testing_engine(
-                options=dict(strategy="threadlocal", pool=testing.db.pool)
-            )
-        ctx = engine.begin()
-        testing.run_as_contextmanager(ctx, fn, 5, value=8)
-        self._assert_fn(5, value=8)
+    def test_branch_nested_rollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        connection.begin()
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered legacy"
+        ):
+            branched = connection.connect()
+        assert branched.in_transaction()
+        branched.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            nested = branched.begin()
+        branched.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        nested.rollback()
+        assert not connection.in_transaction()
 
-    def test_transaction_tlocal_engine_ctx_rollback(self):
-        fn = self._trans_rollback_fn()
-        with _tlengine_deprecated():
-            engine = engines.testing_engine(
-                options=dict(strategy="threadlocal", pool=testing.db.pool)
-            )
-        ctx = engine.begin()
         assert_raises_message(
-            Exception,
-            "breakage",
-            testing.run_as_contextmanager,
-            ctx,
-            fn,
-            5,
-            value=8,
-        )
-        self._assert_no_data()
-
-
-def _proxy_execute_deprecated():
-    return (
-        testing.expect_deprecated("ConnectionProxy.execute is deprecated."),
-        testing.expect_deprecated(
-            "ConnectionProxy.cursor_execute is deprecated."
-        ),
-    )
-
-
-class ProxyConnectionTest(fixtures.TestBase):
-
-    """These are the same tests as EngineEventsTest, except using
-    the deprecated ConnectionProxy interface.
-
-    """
-
-    __requires__ = ("ad_hoc_engines",)
-    __prefer_requires__ = ("two_phase_transactions",)
-
-    @testing.uses_deprecated(r".*Use event.listen")
-    @testing.fails_on("firebird", "Data type unknown")
-    def test_proxy(self):
-
-        stmts = []
-        cursor_stmts = []
-
-        class MyProxy(ConnectionProxy):
-            def execute(
-                self, conn, execute, clauseelement, *multiparams, **params
-            ):
-                stmts.append((str(clauseelement), params, multiparams))
-                return execute(clauseelement, *multiparams, **params)
-
-            def cursor_execute(
-                self,
-                execute,
-                cursor,
-                statement,
-                parameters,
-                context,
-                executemany,
-            ):
-                cursor_stmts.append((str(statement), parameters, None))
-                return execute(cursor, statement, parameters, context)
-
-        def assert_stmts(expected, received):
-            for stmt, params, posn in expected:
-                if not received:
-                    assert False, "Nothing available for stmt: %s" % stmt
-                while received:
-                    teststmt, testparams, testmultiparams = received.pop(0)
-                    teststmt = (
-                        re.compile(r"[\n\t ]+", re.M)
-                        .sub(" ", teststmt)
-                        .strip()
-                    )
-                    if teststmt.startswith(stmt) and (
-                        testparams == params or testparams == posn
-                    ):
-                        break
-
-        with testing.expect_deprecated(
-            "ConnectionProxy.execute is deprecated.",
-            "ConnectionProxy.cursor_execute is deprecated.",
-        ):
-            plain_engine = engines.testing_engine(
-                options=dict(implicit_returning=False, proxy=MyProxy())
-            )
-
-        with testing.expect_deprecated(
-            "ConnectionProxy.execute is deprecated.",
-            "ConnectionProxy.cursor_execute is deprecated.",
-            "The 'threadlocal' engine strategy is deprecated",
-        ):
-
-            tl_engine = engines.testing_engine(
-                options=dict(
-                    implicit_returning=False,
-                    proxy=MyProxy(),
-                    strategy="threadlocal",
-                )
-            )
-
-        for engine in (plain_engine, tl_engine):
-            m = MetaData(engine)
-            t1 = Table(
-                "t1",
-                m,
-                Column("c1", Integer, primary_key=True),
-                Column(
-                    "c2",
-                    String(50),
-                    default=func.lower("Foo"),
-                    primary_key=True,
-                ),
-            )
-            m.create_all()
-            try:
-                t1.insert().execute(c1=5, c2="some data")
-                t1.insert().execute(c1=6)
-                eq_(
-                    engine.execute("select * from t1").fetchall(),
-                    [(5, "some data"), (6, "foo")],
-                )
-            finally:
-                m.drop_all()
-            engine.dispose()
-            compiled = [
-                ("CREATE TABLE t1", {}, None),
-                (
-                    "INSERT INTO t1 (c1, c2)",
-                    {"c2": "some data", "c1": 5},
-                    None,
-                ),
-                ("INSERT INTO t1 (c1, c2)", {"c1": 6}, None),
-                ("select * from t1", {}, None),
-                ("DROP TABLE t1", {}, None),
-            ]
-
-            cursor = [
-                ("CREATE TABLE t1", {}, ()),
-                (
-                    "INSERT INTO t1 (c1, c2)",
-                    {"c2": "some data", "c1": 5},
-                    (5, "some data"),
-                ),
-                ("SELECT lower", {"lower_1": "Foo"}, ("Foo",)),
-                (
-                    "INSERT INTO t1 (c1, c2)",
-                    {"c2": "foo", "c1": 6},
-                    (6, "foo"),
-                ),
-                ("select * from t1", {}, ()),
-                ("DROP TABLE t1", {}, ()),
-            ]
-
-            assert_stmts(compiled, stmts)
-            assert_stmts(cursor, cursor_stmts)
-
-    @testing.uses_deprecated(r".*Use event.listen")
-    def test_options(self):
-        canary = []
-
-        class TrackProxy(ConnectionProxy):
-            def __getattribute__(self, key):
-                fn = object.__getattribute__(self, key)
-
-                def go(*arg, **kw):
-                    canary.append(fn.__name__)
-                    return fn(*arg, **kw)
-
-                return go
-
-        with testing.expect_deprecated(
-            *[
-                "ConnectionProxy.%s is deprecated" % name
-                for name in [
-                    "execute",
-                    "cursor_execute",
-                    "begin",
-                    "rollback",
-                    "commit",
-                    "savepoint",
-                    "rollback_savepoint",
-                    "release_savepoint",
-                    "begin_twophase",
-                    "prepare_twophase",
-                    "rollback_twophase",
-                    "commit_twophase",
-                ]
-            ]
-        ):
-            engine = engines.testing_engine(options={"proxy": TrackProxy()})
-        conn = engine.connect()
-        c2 = conn.execution_options(foo="bar")
-        eq_(c2._execution_options, {"foo": "bar"})
-        c2.execute(select([1]))
-        c3 = c2.execution_options(bar="bat")
-        eq_(c3._execution_options, {"foo": "bar", "bar": "bat"})
-        eq_(canary, ["execute", "cursor_execute"])
-
-    @testing.uses_deprecated(r".*Use event.listen")
-    def test_transactional(self):
-        canary = []
-
-        class TrackProxy(ConnectionProxy):
-            def __getattribute__(self, key):
-                fn = object.__getattribute__(self, key)
-
-                def go(*arg, **kw):
-                    canary.append(fn.__name__)
-                    return fn(*arg, **kw)
-
-                return go
-
-        with testing.expect_deprecated(
-            *[
-                "ConnectionProxy.%s is deprecated" % name
-                for name in [
-                    "execute",
-                    "cursor_execute",
-                    "begin",
-                    "rollback",
-                    "commit",
-                    "savepoint",
-                    "rollback_savepoint",
-                    "release_savepoint",
-                    "begin_twophase",
-                    "prepare_twophase",
-                    "rollback_twophase",
-                    "commit_twophase",
-                ]
-            ]
-        ):
-            engine = engines.testing_engine(options={"proxy": TrackProxy()})
-        conn = engine.connect()
-        trans = conn.begin()
-        conn.execute(select([1]))
-        trans.rollback()
-        trans = conn.begin()
-        conn.execute(select([1]))
-        trans.commit()
-
-        eq_(
-            canary,
-            [
-                "begin",
-                "execute",
-                "cursor_execute",
-                "rollback",
-                "begin",
-                "execute",
-                "cursor_execute",
-                "commit",
-            ],
+            exc.InvalidRequestError,
+            "This connection is on an inactive transaction.  Please",
+            connection.exec_driver_sql,
+            "select 1",
         )
 
-    @testing.uses_deprecated(r".*Use event.listen")
     @testing.requires.savepoints
-    @testing.requires.two_phase_transactions
-    def test_transactional_advanced(self):
-        canary = []
-
-        class TrackProxy(ConnectionProxy):
-            def __getattribute__(self, key):
-                fn = object.__getattribute__(self, key)
-
-                def go(*arg, **kw):
-                    canary.append(fn.__name__)
-                    return fn(*arg, **kw)
-
-                return go
-
-        with testing.expect_deprecated(
-            *[
-                "ConnectionProxy.%s is deprecated" % name
-                for name in [
-                    "execute",
-                    "cursor_execute",
-                    "begin",
-                    "rollback",
-                    "commit",
-                    "savepoint",
-                    "rollback_savepoint",
-                    "release_savepoint",
-                    "begin_twophase",
-                    "prepare_twophase",
-                    "rollback_twophase",
-                    "commit_twophase",
-                ]
-            ]
-        ):
-            engine = engines.testing_engine(options={"proxy": TrackProxy()})
-        conn = engine.connect()
-
+    def test_savepoint_cancelled_by_toplevel_marker(self, local_connection):
+        conn = local_connection
+        users = self.tables.users
         trans = conn.begin()
-        trans2 = conn.begin_nested()
-        conn.execute(select([1]))
-        trans2.rollback()
-        trans2 = conn.begin_nested()
-        conn.execute(select([1]))
-        trans2.commit()
-        trans.rollback()
+        conn.execute(users.insert(), {"user_id": 1, "user_name": "name"})
 
-        trans = conn.begin_twophase()
-        conn.execute(select([1]))
-        trans.prepare()
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            mk1 = conn.begin()
+
+        sp1 = conn.begin_nested()
+        conn.execute(users.insert(), {"user_id": 2, "user_name": "name2"})
+
+        mk1.rollback()
+
+        assert not sp1.is_active
+        assert not trans.is_active
+        assert conn._transaction is trans
+        assert conn._nested_transaction is None
+
+        with testing.db.connect() as conn:
+            eq_(
+                conn.scalar(select(func.count(1)).select_from(users)),
+                0,
+            )
+
+    @testing.requires.savepoints
+    def test_rollback_to_subtransaction(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        transaction = connection.begin()
+        connection.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        trans2 = connection.begin_nested()
+        connection.execute(users.insert(), dict(user_id=2, user_name="user2"))
+
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans3 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=3, user_name="user3"))
+        trans3.rollback()
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This connection is on an inactive savepoint transaction.",
+            connection.exec_driver_sql,
+            "select 1",
+        )
+        trans2.rollback()
+        assert connection._nested_transaction is None
+
+        connection.execute(users.insert(), dict(user_id=4, user_name="user4"))
+        transaction.commit()
+        eq_(
+            connection.execute(
+                select(users.c.user_id).order_by(users.c.user_id)
+            ).fetchall(),
+            [(1,), (4,)],
+        )
+
+    # PG emergency shutdown:
+    # select * from pg_prepared_xacts
+    # ROLLBACK PREPARED '<xid>'
+    # MySQL emergency shutdown:
+    # for arg in `mysql -u root -e "xa recover" | cut -c 8-100 |
+    #     grep sa`; do mysql -u root -e "xa rollback '$arg'"; done
+    @testing.requires.skip_mysql_on_windows
+    @testing.requires.two_phase_transactions
+    @testing.requires.savepoints
+    def test_mixed_two_phase_transaction(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        transaction = connection.begin_twophase()
+        connection.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            transaction2 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        transaction3 = connection.begin_nested()
+        connection.execute(users.insert(), dict(user_id=3, user_name="user3"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            transaction4 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=4, user_name="user4"))
+        transaction4.commit()
+        transaction3.rollback()
+        connection.execute(users.insert(), dict(user_id=5, user_name="user5"))
+        transaction2.commit()
+        transaction.prepare()
+        transaction.commit()
+        eq_(
+            connection.execute(
+                select(users.c.user_id).order_by(users.c.user_id)
+            ).fetchall(),
+            [(1,), (2,), (5,)],
+        )
+
+    @testing.requires.savepoints
+    def test_inactive_due_to_subtransaction_on_nested_no_commit(
+        self, local_connection
+    ):
+        connection = local_connection
+        trans = connection.begin()
+
+        nested = connection.begin_nested()
+
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans2 = connection.begin()
+        trans2.rollback()
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This connection is on an inactive savepoint transaction.  "
+            "Please rollback",
+            nested.commit,
+        )
         trans.commit()
 
-        canary = [t for t in canary if t not in ("cursor_execute", "execute")]
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This nested transaction is inactive",
+            nested.commit,
+        )
+
+    def test_close(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        transaction = connection.begin()
+        connection.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        connection.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        connection.execute(users.insert(), dict(user_id=3, user_name="user3"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans2 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=4, user_name="user4"))
+        connection.execute(users.insert(), dict(user_id=5, user_name="user5"))
+        assert connection.in_transaction()
+        trans2.close()
+        assert connection.in_transaction()
+        transaction.commit()
+        assert not connection.in_transaction()
+        self.assert_(
+            connection.exec_driver_sql(
+                "select count(*) from " "users"
+            ).scalar()
+            == 5
+        )
+        result = connection.exec_driver_sql("select * from users")
+        assert len(result.fetchall()) == 5
+
+    def test_close2(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        transaction = connection.begin()
+        connection.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        connection.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        connection.execute(users.insert(), dict(user_id=3, user_name="user3"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans2 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=4, user_name="user4"))
+        connection.execute(users.insert(), dict(user_id=5, user_name="user5"))
+        assert connection.in_transaction()
+        trans2.close()
+        assert connection.in_transaction()
+        transaction.close()
+        assert not connection.in_transaction()
+        self.assert_(
+            connection.exec_driver_sql(
+                "select count(*) from " "users"
+            ).scalar()
+            == 0
+        )
+        result = connection.exec_driver_sql("select * from users")
+        assert len(result.fetchall()) == 0
+
+    def test_inactive_due_to_subtransaction_no_commit(self, local_connection):
+        connection = local_connection
+        trans = connection.begin()
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans2 = connection.begin()
+        trans2.rollback()
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This connection is on an inactive transaction.  Please rollback",
+            trans.commit,
+        )
+
+        trans.rollback()
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This transaction is inactive",
+            trans.commit,
+        )
+
+    def test_nested_rollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        try:
+            transaction = connection.begin()
+            try:
+                connection.execute(
+                    users.insert(), dict(user_id=1, user_name="user1")
+                )
+                connection.execute(
+                    users.insert(), dict(user_id=2, user_name="user2")
+                )
+                connection.execute(
+                    users.insert(), dict(user_id=3, user_name="user3")
+                )
+                with testing.expect_deprecated_20(
+                    r"Calling .begin\(\) when a transaction is already "
+                    "begun, creating a 'sub' transaction"
+                ):
+                    trans2 = connection.begin()
+                try:
+                    connection.execute(
+                        users.insert(), dict(user_id=4, user_name="user4")
+                    )
+                    connection.execute(
+                        users.insert(), dict(user_id=5, user_name="user5")
+                    )
+                    raise Exception("uh oh")
+                    trans2.commit()
+                except Exception:
+                    trans2.rollback()
+                    raise
+                transaction.rollback()
+            except Exception:
+                transaction.rollback()
+                raise
+        except Exception as e:
+            # and not "This transaction is inactive"
+            # comment moved here to fix pep8
+            assert str(e) == "uh oh"
+        else:
+            assert False
+
+    def test_nesting(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        transaction = connection.begin()
+        connection.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        connection.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        connection.execute(users.insert(), dict(user_id=3, user_name="user3"))
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            trans2 = connection.begin()
+        connection.execute(users.insert(), dict(user_id=4, user_name="user4"))
+        connection.execute(users.insert(), dict(user_id=5, user_name="user5"))
+        trans2.commit()
+        transaction.rollback()
+        self.assert_(
+            connection.exec_driver_sql(
+                "select count(*) from " "users"
+            ).scalar()
+            == 0
+        )
+        result = connection.exec_driver_sql("select * from users")
+        assert len(result.fetchall()) == 0
+
+    def test_no_marker_on_inactive_trans(self, local_connection):
+        conn = local_connection
+        conn.begin()
+
+        with testing.expect_deprecated_20(
+            r"Calling .begin\(\) when a transaction is already "
+            "begun, creating a 'sub' transaction"
+        ):
+            mk1 = conn.begin()
+
+        mk1.rollback()
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "the current transaction on this connection is inactive.",
+            conn.begin,
+        )
+
+    def test_implicit_autocommit_compiled(self):
+        users = self.tables.users
+
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated_20(
+                "The current statement is being autocommitted "
+                "using implicit autocommit."
+            ):
+                conn.execute(
+                    users.insert(), {"user_id": 1, "user_name": "user3"}
+                )
+
+    def test_implicit_autocommit_text(self):
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated_20(
+                "The current statement is being autocommitted "
+                "using implicit autocommit."
+            ):
+                conn.execute(
+                    text("insert into inserttable (data) values ('thedata')")
+                )
+
+    def test_implicit_autocommit_driversql(self):
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated_20(
+                "The current statement is being autocommitted "
+                "using implicit autocommit."
+            ):
+                conn.exec_driver_sql(
+                    "insert into inserttable (data) values ('thedata')"
+                )
+
+    def test_branch_autorollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered legacy"
+        ):
+            branched = connection.connect()
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            branched.execute(
+                users.insert(), dict(user_id=1, user_name="user1")
+            )
+        assert_raises(
+            exc.DBAPIError,
+            branched.execute,
+            users.insert(),
+            dict(user_id=1, user_name="user1"),
+        )
+        # can continue w/o issue
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            branched.execute(
+                users.insert(), dict(user_id=2, user_name="user2")
+            )
+
+    def test_branch_orig_rollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered legacy"
+        ):
+            branched = connection.connect()
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            branched.execute(
+                users.insert(), dict(user_id=1, user_name="user1")
+            )
+        nested = branched.begin()
+        assert branched.in_transaction()
+        branched.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        nested.rollback()
         eq_(
-            canary,
-            [
-                "begin",
-                "savepoint",
-                "rollback_savepoint",
-                "savepoint",
-                "release_savepoint",
-                "rollback",
-                "begin_twophase",
-                "prepare_twophase",
-                "commit_twophase",
-            ],
+            connection.exec_driver_sql("select count(*) from users").scalar(),
+            1,
+        )
+
+    @testing.requires.independent_connections
+    def test_branch_autocommit(self, local_connection):
+        users = self.tables.users
+        with testing.db.connect() as connection:
+            with testing.expect_deprecated_20(
+                r"The Connection.connect\(\) method is considered legacy"
+            ):
+                branched = connection.connect()
+            with testing.expect_deprecated_20(
+                "The current statement is being autocommitted using "
+                "implicit autocommit"
+            ):
+                branched.execute(
+                    users.insert(), dict(user_id=1, user_name="user1")
+                )
+
+        eq_(
+            local_connection.execute(
+                text("select count(*) from users")
+            ).scalar(),
+            1,
+        )
+
+    @testing.requires.savepoints
+    def test_branch_savepoint_rollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        trans = connection.begin()
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered legacy"
+        ):
+            branched = connection.connect()
+        assert branched.in_transaction()
+        branched.execute(users.insert(), dict(user_id=1, user_name="user1"))
+        nested = branched.begin_nested()
+        branched.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        nested.rollback()
+        assert connection.in_transaction()
+        trans.commit()
+        eq_(
+            connection.exec_driver_sql("select count(*) from users").scalar(),
+            1,
+        )
+
+    @testing.requires.two_phase_transactions
+    def test_branch_twophase_rollback(self, local_connection):
+        connection = local_connection
+        users = self.tables.users
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered legacy"
+        ):
+            branched = connection.connect()
+        assert not branched.in_transaction()
+        with testing.expect_deprecated_20(
+            r"The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            branched.execute(
+                users.insert(), dict(user_id=1, user_name="user1")
+            )
+        nested = branched.begin_twophase()
+        branched.execute(users.insert(), dict(user_id=2, user_name="user2"))
+        nested.rollback()
+        assert not connection.in_transaction()
+        eq_(
+            connection.exec_driver_sql("select count(*) from users").scalar(),
+            1,
         )
 
 
 class HandleInvalidatedOnConnectTest(fixtures.TestBase):
     __requires__ = ("sqlite",)
 
-    def setUp(self):
+    def setup_test(self):
         e = create_engine("sqlite://")
 
         connection = Mock(get_server_version_info=Mock(return_value="5.0"))
@@ -1029,118 +1019,6 @@ class HandleInvalidatedOnConnectTest(fixtures.TestBase):
 
         self.dbapi = dbapi
         self.ProgrammingError = sqlite3.ProgrammingError
-
-    def test_dont_touch_non_dbapi_exception_on_contextual_connect(self):
-        dbapi = self.dbapi
-        dbapi.connect = Mock(side_effect=TypeError("I'm not a DBAPI error"))
-
-        e = create_engine("sqlite://", module=dbapi)
-        e.dialect.is_disconnect = is_disconnect = Mock()
-        with testing.expect_deprecated(
-            r"The Engine.contextual_connect\(\) method is deprecated"
-        ):
-            assert_raises_message(
-                TypeError, "I'm not a DBAPI error", e.contextual_connect
-            )
-        eq_(is_disconnect.call_count, 0)
-
-    def test_invalidate_on_contextual_connect(self):
-        """test that is_disconnect() is called during connect.
-
-        interpretation of connection failures are not supported by
-        every backend.
-
-        """
-
-        dbapi = self.dbapi
-        dbapi.connect = Mock(
-            side_effect=self.ProgrammingError(
-                "Cannot operate on a closed database."
-            )
-        )
-        e = create_engine("sqlite://", module=dbapi)
-        try:
-            with testing.expect_deprecated(
-                r"The Engine.contextual_connect\(\) method is deprecated"
-            ):
-                e.contextual_connect()
-            assert False
-        except tsa.exc.DBAPIError as de:
-            assert de.connection_invalidated
-
-
-class HandleErrorTest(fixtures.TestBase):
-    __requires__ = ("ad_hoc_engines",)
-    __backend__ = True
-
-    def tearDown(self):
-        Engine.dispatch._clear()
-        Engine._has_events = False
-
-    def test_legacy_dbapi_error(self):
-        engine = engines.testing_engine()
-        canary = Mock()
-
-        with testing.expect_deprecated(
-            r"The ConnectionEvents.dbapi_error\(\) event is deprecated"
-        ):
-            event.listen(engine, "dbapi_error", canary)
-
-        with engine.connect() as conn:
-            try:
-                conn.execute("SELECT FOO FROM I_DONT_EXIST")
-                assert False
-            except tsa.exc.DBAPIError as e:
-                eq_(canary.mock_calls[0][1][5], e.orig)
-                eq_(canary.mock_calls[0][1][2], "SELECT FOO FROM I_DONT_EXIST")
-
-    def test_legacy_dbapi_error_no_ad_hoc_context(self):
-        engine = engines.testing_engine()
-
-        listener = Mock(return_value=None)
-        with testing.expect_deprecated(
-            r"The ConnectionEvents.dbapi_error\(\) event is deprecated"
-        ):
-            event.listen(engine, "dbapi_error", listener)
-
-        nope = SomeException("nope")
-
-        class MyType(TypeDecorator):
-            impl = Integer
-
-            def process_bind_param(self, value, dialect):
-                raise nope
-
-        with engine.connect() as conn:
-            assert_raises_message(
-                tsa.exc.StatementError,
-                r"\(.*SomeException\) " r"nope\n\[SQL\: u?SELECT 1 ",
-                conn.execute,
-                select([1]).where(column("foo") == literal("bar", MyType())),
-            )
-        # no legacy event
-        eq_(listener.mock_calls, [])
-
-    def test_legacy_dbapi_error_non_dbapi_error(self):
-        engine = engines.testing_engine()
-
-        listener = Mock(return_value=None)
-        with testing.expect_deprecated(
-            r"The ConnectionEvents.dbapi_error\(\) event is deprecated"
-        ):
-            event.listen(engine, "dbapi_error", listener)
-
-        nope = TypeError("I'm not a DBAPI error")
-        with engine.connect() as c:
-            c.connection.cursor = Mock(
-                return_value=Mock(execute=Mock(side_effect=nope))
-            )
-
-            assert_raises_message(
-                TypeError, "I'm not a DBAPI error", c.execute, "select "
-            )
-        # no legacy event
-        eq_(listener.mock_calls, [])
 
 
 def MockDBAPI():  # noqa
@@ -1175,18 +1053,18 @@ def MockDBAPI():  # noqa
 
 
 class PoolTestBase(fixtures.TestBase):
-    def setup(self):
+    def setup_test(self):
         pool.clear_managers()
         self._teardown_conns = []
 
-    def teardown(self):
+    def teardown_test(self):
         for ref in self._teardown_conns:
             conn = ref()
             if conn:
                 conn.close()
 
     @classmethod
-    def teardown_class(cls):
+    def teardown_test_class(cls):
         pool.clear_managers()
 
     def _queuepool_fixture(self, **kw):
@@ -1201,530 +1079,804 @@ class PoolTestBase(fixtures.TestBase):
         )
 
 
-class DeprecatedPoolListenerTest(PoolTestBase):
-    @testing.requires.predictable_gc
-    @testing.uses_deprecated(
-        r".*Use the PoolEvents", r".*'listeners' argument .* is deprecated"
+def select1(db):
+    return str(select(1).compile(dialect=db.dialect))
+
+
+class DeprecatedEngineFeatureTest(fixtures.TablesTest):
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        cls.table = Table(
+            "exec_test",
+            metadata,
+            Column("a", Integer),
+            Column("b", Integer),
+            test_needs_acid=True,
+        )
+
+    def _trans_fn(self, is_transaction=False):
+        def go(conn, x, value=None):
+            if is_transaction:
+                conn = conn.connection
+            conn.execute(self.table.insert().values(a=x, b=value))
+
+        return go
+
+    def _trans_rollback_fn(self, is_transaction=False):
+        def go(conn, x, value=None):
+            if is_transaction:
+                conn = conn.connection
+            conn.execute(self.table.insert().values(a=x, b=value))
+            raise SomeException("breakage")
+
+        return go
+
+    def _assert_no_data(self):
+        with testing.db.connect() as conn:
+            eq_(
+                conn.scalar(select(func.count("*")).select_from(self.table)),
+                0,
+            )
+
+    def _assert_fn(self, x, value=None):
+        with testing.db.connect() as conn:
+            eq_(conn.execute(self.table.select()).fetchall(), [(x, value)])
+
+    def test_transaction_engine_fn_commit(self):
+        fn = self._trans_fn()
+        with testing.expect_deprecated(r"The Engine.transaction\(\) method"):
+            testing.db.transaction(fn, 5, value=8)
+        self._assert_fn(5, value=8)
+
+    def test_transaction_engine_fn_rollback(self):
+        fn = self._trans_rollback_fn()
+        with testing.expect_deprecated(
+            r"The Engine.transaction\(\) method is deprecated"
+        ):
+            assert_raises_message(
+                Exception, "breakage", testing.db.transaction, fn, 5, value=8
+            )
+        self._assert_no_data()
+
+    def test_transaction_connection_fn_commit(self):
+        fn = self._trans_fn()
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated(
+                r"The Connection.transaction\(\) method is deprecated"
+            ):
+                conn.transaction(fn, 5, value=8)
+            self._assert_fn(5, value=8)
+
+    def test_transaction_connection_fn_rollback(self):
+        fn = self._trans_rollback_fn()
+        with testing.db.connect() as conn:
+            with testing.expect_deprecated(r""):
+                assert_raises(Exception, conn.transaction, fn, 5, value=8)
+        self._assert_no_data()
+
+    def test_execute_plain_string(self):
+        with _string_deprecation_expect():
+            testing.db.execute(select1(testing.db)).scalar()
+
+    def test_execute_plain_string_events(self):
+
+        m1 = Mock()
+        select1_str = select1(testing.db)
+        with _string_deprecation_expect():
+            with testing.db.connect() as conn:
+                event.listen(conn, "before_execute", m1.before_execute)
+                event.listen(conn, "after_execute", m1.after_execute)
+                result = conn.execute(select1_str)
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call.before_execute(mock.ANY, select1_str, [], {}, {}),
+                mock.call.after_execute(
+                    mock.ANY, select1_str, [], {}, {}, result
+                ),
+            ],
+        )
+
+    def test_scalar_plain_string(self):
+        with _string_deprecation_expect():
+            testing.db.scalar(select1(testing.db))
+
+    # Tests for the warning when non dict params are used
+    # @testing.combinations(42, (42,))
+    # def test_execute_positional_non_dicts(self, args):
+    #     with testing.expect_deprecated(
+    #         r"Usage of tuple or scalars as positional arguments of "
+    #     ):
+    #         testing.db.execute(text(select1(testing.db)), args).scalar()
+
+    # @testing.combinations(42, (42,))
+    # def test_scalar_positional_non_dicts(self, args):
+    #     with testing.expect_deprecated(
+    #         r"Usage of tuple or scalars as positional arguments of "
+    #     ):
+    #         testing.db.scalar(text(select1(testing.db)), args)
+
+
+class DeprecatedConnectionFeatureTest(fixtures.TablesTest):
+    __backend__ = True
+
+    def test_execute_plain_string(self):
+        with _string_deprecation_expect():
+            with testing.db.connect() as conn:
+                conn.execute(select1(testing.db)).scalar()
+
+    def test_scalar_plain_string(self):
+        with _string_deprecation_expect():
+            with testing.db.connect() as conn:
+                conn.scalar(select1(testing.db))
+
+    # Tests for the warning when non dict params are used
+    # @testing.combinations(42, (42,))
+    # def test_execute_positional_non_dicts(self, args):
+    #     with testing.expect_deprecated(
+    #         r"Usage of tuple or scalars as positional arguments of "
+    #     ):
+    #         with testing.db.connect() as conn:
+    #             conn.execute(text(select1(testing.db)), args).scalar()
+
+    # @testing.combinations(42, (42,))
+    # def test_scalar_positional_non_dicts(self, args):
+    #     with testing.expect_deprecated(
+    #         r"Usage of tuple or scalars as positional arguments of "
+    #     ):
+    #         with testing.db.connect() as conn:
+    #             conn.scalar(text(select1(testing.db)), args)
+
+
+class DeprecatedReflectionTest(fixtures.TablesTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "user",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50)),
+        )
+        Table(
+            "address",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("user_id", ForeignKey("user.id")),
+            Column("email", String(50)),
+        )
+
+    def test_exists(self):
+        dont_exist = Table("dont_exist", MetaData())
+        with testing.expect_deprecated(
+            r"The Table.exists\(\) method is deprecated"
+        ):
+            is_false(dont_exist.exists(testing.db))
+
+        user = self.tables.user
+        with testing.expect_deprecated(
+            r"The Table.exists\(\) method is deprecated"
+        ):
+            is_true(user.exists(testing.db))
+
+    def test_create_drop_explicit(self):
+        metadata = MetaData()
+        table = Table("test_table", metadata, Column("foo", Integer))
+        bind = testing.db
+        for args in [([], {"bind": bind}), ([bind], {})]:
+            metadata.create_all(*args[0], **args[1])
+            with testing.expect_deprecated(
+                r"The Table.exists\(\) method is deprecated"
+            ):
+                assert table.exists(*args[0], **args[1])
+            metadata.drop_all(*args[0], **args[1])
+            table.create(*args[0], **args[1])
+            table.drop(*args[0], **args[1])
+            with testing.expect_deprecated(
+                r"The Table.exists\(\) method is deprecated"
+            ):
+                assert not table.exists(*args[0], **args[1])
+
+    def test_create_drop_err_table(self):
+        metadata = MetaData()
+        table = Table("test_table", metadata, Column("foo", Integer))
+
+        with testing.expect_deprecated(
+            r"The Table.exists\(\) method is deprecated"
+        ):
+            assert_raises_message(
+                tsa.exc.UnboundExecutionError,
+                (
+                    "Table object 'test_table' is not bound to an Engine or "
+                    "Connection."
+                ),
+                table.exists,
+            )
+
+    def test_engine_has_table(self):
+        with testing.expect_deprecated(
+            r"The Engine.has_table\(\) method is deprecated"
+        ):
+            is_false(testing.db.has_table("dont_exist"))
+
+        with testing.expect_deprecated(
+            r"The Engine.has_table\(\) method is deprecated"
+        ):
+            is_true(testing.db.has_table("user"))
+
+    def test_engine_table_names(self):
+        metadata = self.tables_test_metadata
+
+        with testing.expect_deprecated(
+            r"The Engine.table_names\(\) method is deprecated"
+        ):
+            table_names = testing.db.table_names()
+        is_true(set(table_names).issuperset(metadata.tables))
+
+    def test_reflecttable(self):
+        inspector = inspect(testing.db)
+        metadata = MetaData()
+
+        table = Table("user", metadata)
+        with testing.expect_deprecated_20(
+            r"The Inspector.reflecttable\(\) method is considered "
+        ):
+            res = inspector.reflecttable(table, None)
+        exp = inspector.reflect_table(table, None)
+
+        eq_(res, exp)
+
+
+class ExecutionOptionsTest(fixtures.TestBase):
+    def test_branched_connection_execution_options(self):
+        engine = engines.testing_engine("sqlite://")
+
+        conn = engine.connect()
+        c2 = conn.execution_options(foo="bar")
+
+        with testing.expect_deprecated_20(
+            r"The Connection.connect\(\) method is considered "
+        ):
+            c2_branch = c2.connect()
+        eq_(c2_branch._execution_options, {"foo": "bar"})
+
+
+class RawExecuteTest(fixtures.TablesTest):
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "users",
+            metadata,
+            Column("user_id", INT, primary_key=True, autoincrement=False),
+            Column("user_name", VARCHAR(20)),
+        )
+        Table(
+            "users_autoinc",
+            metadata,
+            Column(
+                "user_id", INT, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("user_name", VARCHAR(20)),
+        )
+
+    def test_no_params_option(self, connection):
+        stmt = (
+            "SELECT '%'"
+            + testing.db.dialect.statement_compiler(
+                testing.db.dialect, None
+            ).default_from()
+        )
+
+        with _string_deprecation_expect():
+            result = (
+                connection.execution_options(no_parameters=True)
+                .execute(stmt)
+                .scalar()
+            )
+        eq_(result, "%")
+
+    @testing.requires.qmark_paramstyle
+    def test_raw_qmark(self, connection):
+        conn = connection
+
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (?, ?)",
+                (1, "jack"),
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (?, ?)",
+                [2, "fred"],
+            )
+
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (?, ?)",
+                [3, "ed"],
+                [4, "horse"],
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (?, ?)",
+                (5, "barney"),
+                (6, "donkey"),
+            )
+
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (?, ?)",
+                7,
+                "sally",
+            )
+
+        with _string_deprecation_expect():
+            res = conn.execute("select * from users order by user_id")
+        assert res.fetchall() == [
+            (1, "jack"),
+            (2, "fred"),
+            (3, "ed"),
+            (4, "horse"),
+            (5, "barney"),
+            (6, "donkey"),
+            (7, "sally"),
+        ]
+        for multiparam, param in [
+            (("jack", "fred"), {}),
+            ((["jack", "fred"],), {}),
+        ]:
+            with _string_deprecation_expect():
+                res = conn.execute(
+                    "select * from users where user_name=? or "
+                    "user_name=? order by user_id",
+                    *multiparam,
+                    **param
+                )
+            assert res.fetchall() == [(1, "jack"), (2, "fred")]
+
+        with _string_deprecation_expect():
+            res = conn.execute("select * from users where user_name=?", "jack")
+        assert res.fetchall() == [(1, "jack")]
+
+    @testing.requires.format_paramstyle
+    def test_raw_sprintf(self, connection):
+        conn = connection
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (%s, %s)",
+                [1, "jack"],
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (%s, %s)",
+                [2, "ed"],
+                [3, "horse"],
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) " "values (%s, %s)",
+                4,
+                "sally",
+            )
+        with _string_deprecation_expect():
+            conn.execute("insert into users (user_id) values (%s)", 5)
+        with _string_deprecation_expect():
+            res = conn.execute("select * from users order by user_id")
+            assert res.fetchall() == [
+                (1, "jack"),
+                (2, "ed"),
+                (3, "horse"),
+                (4, "sally"),
+                (5, None),
+            ]
+        for multiparam, param in [
+            (("jack", "ed"), {}),
+            ((["jack", "ed"],), {}),
+        ]:
+            with _string_deprecation_expect():
+                res = conn.execute(
+                    "select * from users where user_name=%s or "
+                    "user_name=%s order by user_id",
+                    *multiparam,
+                    **param
+                )
+                assert res.fetchall() == [(1, "jack"), (2, "ed")]
+        with _string_deprecation_expect():
+            res = conn.execute(
+                "select * from users where user_name=%s", "jack"
+            )
+        assert res.fetchall() == [(1, "jack")]
+
+    @testing.requires.pyformat_paramstyle
+    def test_raw_python(self, connection):
+        conn = connection
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (%(id)s, %(name)s)",
+                {"id": 1, "name": "jack"},
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (%(id)s, %(name)s)",
+                {"id": 2, "name": "ed"},
+                {"id": 3, "name": "horse"},
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (%(id)s, %(name)s)",
+                id=4,
+                name="sally",
+            )
+        with _string_deprecation_expect():
+            res = conn.execute("select * from users order by user_id")
+            assert res.fetchall() == [
+                (1, "jack"),
+                (2, "ed"),
+                (3, "horse"),
+                (4, "sally"),
+            ]
+
+    @testing.requires.named_paramstyle
+    def test_raw_named(self, connection):
+        conn = connection
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (:id, :name)",
+                {"id": 1, "name": "jack"},
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (:id, :name)",
+                {"id": 2, "name": "ed"},
+                {"id": 3, "name": "horse"},
+            )
+        with _string_deprecation_expect():
+            conn.execute(
+                "insert into users (user_id, user_name) "
+                "values (:id, :name)",
+                id=4,
+                name="sally",
+            )
+        with _string_deprecation_expect():
+            res = conn.execute("select * from users order by user_id")
+            assert res.fetchall() == [
+                (1, "jack"),
+                (2, "ed"),
+                (3, "horse"),
+                (4, "sally"),
+            ]
+
+
+class DeprecatedExecParamsTest(fixtures.TablesTest):
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "users",
+            metadata,
+            Column("user_id", INT, primary_key=True, autoincrement=False),
+            Column("user_name", VARCHAR(20)),
+        )
+
+        Table(
+            "users_autoinc",
+            metadata,
+            Column(
+                "user_id", INT, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("user_name", VARCHAR(20)),
+        )
+
+    def test_kwargs(self, connection):
+        users = self.tables.users
+
+        with testing.expect_deprecated_20(
+            r"The connection.execute\(\) method in "
+            "SQLAlchemy 2.0 will accept parameters as a single "
+        ):
+            connection.execute(
+                users.insert(), user_id=5, user_name="some name"
+            )
+
+        eq_(connection.execute(select(users)).all(), [(5, "some name")])
+
+    def test_positional_dicts(self, connection):
+        users = self.tables.users
+
+        with testing.expect_deprecated_20(
+            r"The connection.execute\(\) method in "
+            "SQLAlchemy 2.0 will accept parameters as a single "
+        ):
+            connection.execute(
+                users.insert(),
+                {"user_id": 5, "user_name": "some name"},
+                {"user_id": 6, "user_name": "some other name"},
+            )
+
+        eq_(
+            connection.execute(select(users).order_by(users.c.user_id)).all(),
+            [(5, "some name"), (6, "some other name")],
+        )
+
+    @testing.requires.empty_inserts
+    def test_single_scalar(self, connection):
+
+        users = self.tables.users_autoinc
+
+        with testing.expect_deprecated_20(
+            r"The connection.execute\(\) method in "
+            "SQLAlchemy 2.0 will accept parameters as a single "
+        ):
+            # TODO: I'm not even sure what this exec format is or how
+            # it worked if at all
+            connection.execute(users.insert(), "some name")
+
+        eq_(
+            connection.execute(select(users).order_by(users.c.user_id)).all(),
+            [(1, None)],
+        )
+
+
+class EngineEventsTest(fixtures.TestBase):
+    __requires__ = ("ad_hoc_engines",)
+    __backend__ = True
+
+    def teardown_test(self):
+        Engine.dispatch._clear()
+        Engine._has_events = False
+
+    def _assert_stmts(self, expected, received):
+        list(received)
+        for stmt, params, posn in expected:
+            if not received:
+                assert False, "Nothing available for stmt: %s" % stmt
+            while received:
+                teststmt, testparams, testmultiparams = received.pop(0)
+                teststmt = (
+                    re.compile(r"[\n\t ]+", re.M).sub(" ", teststmt).strip()
+                )
+                if teststmt.startswith(stmt) and (
+                    testparams == params or testparams == posn
+                ):
+                    break
+
+    @testing.combinations(
+        ((), {"z": 10}, [], {"z": 10}, testing.requires.legacy_engine),
     )
-    def test_listeners(self):
-        class InstrumentingListener(object):
-            def __init__(self):
-                if hasattr(self, "connect"):
-                    self.connect = self.inst_connect
-                if hasattr(self, "first_connect"):
-                    self.first_connect = self.inst_first_connect
-                if hasattr(self, "checkout"):
-                    self.checkout = self.inst_checkout
-                if hasattr(self, "checkin"):
-                    self.checkin = self.inst_checkin
-                self.clear()
-
-            def clear(self):
-                self.connected = []
-                self.first_connected = []
-                self.checked_out = []
-                self.checked_in = []
-
-            def assert_total(self, conn, fconn, cout, cin):
-                eq_(len(self.connected), conn)
-                eq_(len(self.first_connected), fconn)
-                eq_(len(self.checked_out), cout)
-                eq_(len(self.checked_in), cin)
-
-            def assert_in(self, item, in_conn, in_fconn, in_cout, in_cin):
-                eq_((item in self.connected), in_conn)
-                eq_((item in self.first_connected), in_fconn)
-                eq_((item in self.checked_out), in_cout)
-                eq_((item in self.checked_in), in_cin)
-
-            def inst_connect(self, con, record):
-                print("connect(%s, %s)" % (con, record))
-                assert con is not None
-                assert record is not None
-                self.connected.append(con)
-
-            def inst_first_connect(self, con, record):
-                print("first_connect(%s, %s)" % (con, record))
-                assert con is not None
-                assert record is not None
-                self.first_connected.append(con)
-
-            def inst_checkout(self, con, record, proxy):
-                print("checkout(%s, %s, %s)" % (con, record, proxy))
-                assert con is not None
-                assert record is not None
-                assert proxy is not None
-                self.checked_out.append(con)
-
-            def inst_checkin(self, con, record):
-                print("checkin(%s, %s)" % (con, record))
-                # con can be None if invalidated
-                assert record is not None
-                self.checked_in.append(con)
-
-        class ListenAll(tsa.interfaces.PoolListener, InstrumentingListener):
-            pass
-
-        class ListenConnect(InstrumentingListener):
-            def connect(self, con, record):
-                pass
-
-        class ListenFirstConnect(InstrumentingListener):
-            def first_connect(self, con, record):
-                pass
-
-        class ListenCheckOut(InstrumentingListener):
-            def checkout(self, con, record, proxy, num):
-                pass
-
-        class ListenCheckIn(InstrumentingListener):
-            def checkin(self, con, record):
-                pass
-
-        def assert_listeners(p, total, conn, fconn, cout, cin):
-            for instance in (p, p.recreate()):
-                self.assert_(len(instance.dispatch.connect) == conn)
-                self.assert_(len(instance.dispatch.first_connect) == fconn)
-                self.assert_(len(instance.dispatch.checkout) == cout)
-                self.assert_(len(instance.dispatch.checkin) == cin)
-
-        p = self._queuepool_fixture()
-        assert_listeners(p, 0, 0, 0, 0, 0)
-
-        with testing.expect_deprecated(
-            *[
-                "PoolListener.%s is deprecated." % name
-                for name in ["connect", "first_connect", "checkout", "checkin"]
-            ]
+    def test_modify_parameters_from_event_one(
+        self, multiparams, params, expected_multiparams, expected_params
+    ):
+        # this is testing both the normalization added to parameters
+        # as of I97cb4d06adfcc6b889f10d01cc7775925cffb116 as well as
+        # that the return value from the event is taken as the new set
+        # of parameters.
+        def before_execute(
+            conn, clauseelement, multiparams, params, execution_options
         ):
-            p.add_listener(ListenAll())
-        assert_listeners(p, 1, 1, 1, 1, 1)
+            eq_(multiparams, expected_multiparams)
+            eq_(params, expected_params)
+            return clauseelement, (), {"q": "15"}
 
-        with testing.expect_deprecated(
-            *["PoolListener.%s is deprecated." % name for name in ["connect"]]
+        def after_execute(
+            conn, clauseelement, multiparams, params, result, execution_options
         ):
-            p.add_listener(ListenConnect())
-        assert_listeners(p, 2, 2, 1, 1, 1)
+            eq_(multiparams, ())
+            eq_(params, {"q": "15"})
 
-        with testing.expect_deprecated(
-            *[
-                "PoolListener.%s is deprecated." % name
-                for name in ["first_connect"]
-            ]
-        ):
-            p.add_listener(ListenFirstConnect())
-        assert_listeners(p, 3, 2, 2, 1, 1)
+        e1 = testing_engine(config.db_url)
+        event.listen(e1, "before_execute", before_execute, retval=True)
+        event.listen(e1, "after_execute", after_execute)
 
-        with testing.expect_deprecated(
-            *["PoolListener.%s is deprecated." % name for name in ["checkout"]]
-        ):
-            p.add_listener(ListenCheckOut())
-        assert_listeners(p, 4, 2, 2, 2, 1)
-
-        with testing.expect_deprecated(
-            *["PoolListener.%s is deprecated." % name for name in ["checkin"]]
-        ):
-            p.add_listener(ListenCheckIn())
-        assert_listeners(p, 5, 2, 2, 2, 2)
-        del p
-
-        snoop = ListenAll()
-
-        with testing.expect_deprecated(
-            *[
-                "PoolListener.%s is deprecated." % name
-                for name in ["connect", "first_connect", "checkout", "checkin"]
-            ]
-            + [
-                "PoolListener is deprecated in favor of the PoolEvents "
-                "listener interface.  The Pool.listeners parameter "
-                "will be removed"
-            ]
-        ):
-            p = self._queuepool_fixture(listeners=[snoop])
-        assert_listeners(p, 1, 1, 1, 1, 1)
-
-        c = p.connect()
-        snoop.assert_total(1, 1, 1, 0)
-        cc = c.connection
-        snoop.assert_in(cc, True, True, True, False)
-        c.close()
-        snoop.assert_in(cc, True, True, True, True)
-        del c, cc
-
-        snoop.clear()
-
-        # this one depends on immediate gc
-        c = p.connect()
-        cc = c.connection
-        snoop.assert_in(cc, False, False, True, False)
-        snoop.assert_total(0, 0, 1, 0)
-        del c, cc
-        lazy_gc()
-        snoop.assert_total(0, 0, 1, 1)
-
-        p.dispose()
-        snoop.clear()
-
-        c = p.connect()
-        c.close()
-        c = p.connect()
-        snoop.assert_total(1, 0, 2, 1)
-        c.close()
-        snoop.assert_total(1, 0, 2, 2)
-
-        # invalidation
-        p.dispose()
-        snoop.clear()
-
-        c = p.connect()
-        snoop.assert_total(1, 0, 1, 0)
-        c.invalidate()
-        snoop.assert_total(1, 0, 1, 1)
-        c.close()
-        snoop.assert_total(1, 0, 1, 1)
-        del c
-        lazy_gc()
-        snoop.assert_total(1, 0, 1, 1)
-        c = p.connect()
-        snoop.assert_total(2, 0, 2, 1)
-        c.close()
-        del c
-        lazy_gc()
-        snoop.assert_total(2, 0, 2, 2)
-
-        # detached
-        p.dispose()
-        snoop.clear()
-
-        c = p.connect()
-        snoop.assert_total(1, 0, 1, 0)
-        c.detach()
-        snoop.assert_total(1, 0, 1, 0)
-        c.close()
-        del c
-        snoop.assert_total(1, 0, 1, 0)
-        c = p.connect()
-        snoop.assert_total(2, 0, 2, 0)
-        c.close()
-        del c
-        snoop.assert_total(2, 0, 2, 1)
-
-        # recreated
-        p = p.recreate()
-        snoop.clear()
-
-        c = p.connect()
-        snoop.assert_total(1, 1, 1, 0)
-        c.close()
-        snoop.assert_total(1, 1, 1, 1)
-        c = p.connect()
-        snoop.assert_total(1, 1, 2, 1)
-        c.close()
-        snoop.assert_total(1, 1, 2, 2)
-
-    @testing.uses_deprecated(r".*Use the PoolEvents")
-    def test_listeners_callables(self):
-        def connect(dbapi_con, con_record):
-            counts[0] += 1
-
-        def checkout(dbapi_con, con_record, con_proxy):
-            counts[1] += 1
-
-        def checkin(dbapi_con, con_record):
-            counts[2] += 1
-
-        i_all = dict(connect=connect, checkout=checkout, checkin=checkin)
-        i_connect = dict(connect=connect)
-        i_checkout = dict(checkout=checkout)
-        i_checkin = dict(checkin=checkin)
-
-        for cls in (pool.QueuePool, pool.StaticPool):
-            counts = [0, 0, 0]
-
-            def assert_listeners(p, total, conn, cout, cin):
-                for instance in (p, p.recreate()):
-                    eq_(len(instance.dispatch.connect), conn)
-                    eq_(len(instance.dispatch.checkout), cout)
-                    eq_(len(instance.dispatch.checkin), cin)
-
-            p = self._queuepool_fixture()
-            assert_listeners(p, 0, 0, 0, 0)
-
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["connect", "checkout", "checkin"]
-                ]
+        with e1.connect() as conn:
+            with testing.expect_deprecated_20(
+                r"The connection\.execute\(\) method"
             ):
-                p.add_listener(i_all)
-            assert_listeners(p, 1, 1, 1, 1)
+                result = conn.execute(
+                    select(bindparam("q", type_=String)),
+                    *multiparams,
+                    **params
+                )
+            eq_(result.all(), [("15",)])
 
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["connect"]
-                ]
+    @testing.only_on("sqlite")
+    def test_modify_statement_string(self, connection):
+        @event.listens_for(connection, "before_execute", retval=True)
+        def _modify(
+            conn, clauseelement, multiparams, params, execution_options
+        ):
+            return clauseelement.replace("hi", "there"), multiparams, params
+
+        with _string_deprecation_expect():
+            eq_(connection.scalar("select 'hi'"), "there")
+
+    def test_retval_flag(self):
+        canary = []
+
+        def tracker(name):
+            def go(conn, *args, **kw):
+                canary.append(name)
+
+            return go
+
+        def execute(conn, clauseelement, multiparams, params):
+            canary.append("execute")
+            return clauseelement, multiparams, params
+
+        def cursor_execute(
+            conn, cursor, statement, parameters, context, executemany
+        ):
+            canary.append("cursor_execute")
+            return statement, parameters
+
+        engine = engines.testing_engine()
+
+        assert_raises(
+            tsa.exc.ArgumentError,
+            event.listen,
+            engine,
+            "begin",
+            tracker("begin"),
+            retval=True,
+        )
+
+        event.listen(engine, "before_execute", execute, retval=True)
+        event.listen(
+            engine, "before_cursor_execute", cursor_execute, retval=True
+        )
+
+        with testing.expect_deprecated(
+            r"The argument signature for the "
+            r"\"ConnectionEvents.before_execute\" event listener",
+        ):
+            engine.execute(select(1))
+        eq_(canary, ["execute", "cursor_execute"])
+
+    def test_argument_format_execute(self):
+        def before_execute(conn, clauseelement, multiparams, params):
+            assert isinstance(multiparams, (list, tuple))
+            assert isinstance(params, dict)
+
+        def after_execute(conn, clauseelement, multiparams, params, result):
+            assert isinstance(multiparams, (list, tuple))
+            assert isinstance(params, dict)
+
+        e1 = testing_engine(config.db_url)
+        event.listen(e1, "before_execute", before_execute)
+        event.listen(e1, "after_execute", after_execute)
+
+        with testing.expect_deprecated(
+            r"The argument signature for the "
+            r"\"ConnectionEvents.before_execute\" event listener",
+            r"The argument signature for the "
+            r"\"ConnectionEvents.after_execute\" event listener",
+        ):
+            result = e1.execute(select(1))
+            result.close()
+
+
+class DDLExecutionTest(fixtures.TestBase):
+    def setup_test(self):
+        self.engine = engines.mock_engine()
+        self.metadata = MetaData()
+        self.users = Table(
+            "users",
+            self.metadata,
+            Column("user_id", Integer, primary_key=True),
+            Column("user_name", String(40)),
+        )
+
+    @testing.requires.sqlite
+    def test_ddl_execute(self):
+        engine = create_engine("sqlite:///")
+        cx = engine.connect()
+        table = self.users
+        ddl = DDL("SELECT 1")
+
+        eng_msg = r"The Engine.execute\(\) method is considered legacy"
+        ddl_msg = r"The DDLElement.execute\(\) method is considered legacy"
+        for spec in (
+            (engine.execute, ddl, eng_msg),
+            (engine.execute, ddl, table, eng_msg),
+            (ddl.execute, engine, ddl_msg),
+            (ddl.execute, engine, table, ddl_msg),
+            (ddl.execute, cx, ddl_msg),
+            (ddl.execute, cx, table, ddl_msg),
+        ):
+            fn = spec[0]
+            arg = spec[1:-1]
+            warning = spec[-1]
+
+            with testing.expect_deprecated_20(warning):
+                r = fn(*arg)
+            eq_(list(r), [(1,)])
+
+        for fn, kw in ((ddl.execute, {}), (ddl.execute, dict(target=table))):
+            with testing.expect_deprecated_20(ddl_msg):
+                assert_raises(exc.UnboundExecutionError, fn, **kw)
+
+        for bind in engine, cx:
+            ddl.bind = bind
+            for fn, kw in (
+                (ddl.execute, {}),
+                (ddl.execute, dict(target=table)),
             ):
-                p.add_listener(i_connect)
-            assert_listeners(p, 2, 1, 1, 1)
-
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["checkout"]
-                ]
-            ):
-                p.add_listener(i_checkout)
-            assert_listeners(p, 3, 1, 1, 1)
-
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["checkin"]
-                ]
-            ):
-                p.add_listener(i_checkin)
-            assert_listeners(p, 4, 1, 1, 1)
-            del p
-
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["connect", "checkout", "checkin"]
-                ]
-                + [".*The Pool.listeners parameter will be removed"]
-            ):
-                p = self._queuepool_fixture(listeners=[i_all])
-            assert_listeners(p, 1, 1, 1, 1)
-
-            c = p.connect()
-            assert counts == [1, 1, 0]
-            c.close()
-            assert counts == [1, 1, 1]
-
-            c = p.connect()
-            assert counts == [1, 2, 1]
-            with testing.expect_deprecated(
-                *[
-                    "PoolListener.%s is deprecated." % name
-                    for name in ["checkin"]
-                ]
-            ):
-                p.add_listener(i_checkin)
-            c.close()
-            assert counts == [1, 2, 2]
+                with testing.expect_deprecated_20(ddl_msg):
+                    r = fn(**kw)
+                eq_(list(r), [(1,)])
 
 
-class PoolTest(PoolTestBase):
-    def test_manager(self):
-        with testing.expect_deprecated(
-            r"The pool.manage\(\) function is deprecated,"
-        ):
-            manager = pool.manage(MockDBAPI(), use_threadlocal=True)
-
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            c1 = manager.connect("foo.db")
-            c2 = manager.connect("foo.db")
-            c3 = manager.connect("bar.db")
-            c4 = manager.connect("foo.db", bar="bat")
-            c5 = manager.connect("foo.db", bar="hoho")
-            c6 = manager.connect("foo.db", bar="bat")
-
-        assert c1.cursor() is not None
-        assert c1 is c2
-        assert c1 is not c3
-        assert c4 is c6
-        assert c4 is not c5
-
-    def test_manager_with_key(self):
-
-        dbapi = MockDBAPI()
-
-        with testing.expect_deprecated(
-            r"The pool.manage\(\) function is deprecated,"
-        ):
-            manager = pool.manage(dbapi, use_threadlocal=True)
-
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            c1 = manager.connect("foo.db", sa_pool_key="a")
-            c2 = manager.connect("foo.db", sa_pool_key="b")
-            c3 = manager.connect("bar.db", sa_pool_key="a")
-
-        assert c1.cursor() is not None
-        assert c1 is not c2
-        assert c1 is c3
-
-        eq_(dbapi.connect.mock_calls, [call("foo.db"), call("foo.db")])
-
-    def test_bad_args(self):
-        with testing.expect_deprecated(
-            r"The pool.manage\(\) function is deprecated,"
-        ):
-            manager = pool.manage(MockDBAPI())
-        manager.connect(None)
-
-    def test_non_thread_local_manager(self):
-        with testing.expect_deprecated(
-            r"The pool.manage\(\) function is deprecated,"
-        ):
-            manager = pool.manage(MockDBAPI(), use_threadlocal=False)
-
-        connection = manager.connect("foo.db")
-        connection2 = manager.connect("foo.db")
-
-        self.assert_(connection.cursor() is not None)
-        self.assert_(connection is not connection2)
-
-    def test_threadlocal_del(self):
-        self._do_testthreadlocal(useclose=False)
-
-    def test_threadlocal_close(self):
-        self._do_testthreadlocal(useclose=True)
-
-    def _do_testthreadlocal(self, useclose=False):
-        dbapi = MockDBAPI()
-
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            for p in (
-                pool.QueuePool(
-                    creator=dbapi.connect,
-                    pool_size=3,
-                    max_overflow=-1,
-                    use_threadlocal=True,
-                ),
-                pool.SingletonThreadPool(
-                    creator=dbapi.connect, use_threadlocal=True
-                ),
-            ):
-                c1 = p.connect()
-                c2 = p.connect()
-                self.assert_(c1 is c2)
-                c3 = p.unique_connection()
-                self.assert_(c3 is not c1)
-                if useclose:
-                    c2.close()
-                else:
-                    c2 = None
-                c2 = p.connect()
-                self.assert_(c1 is c2)
-                self.assert_(c3 is not c1)
-                if useclose:
-                    c2.close()
-                else:
-                    c2 = None
-                    lazy_gc()
-                if useclose:
-                    c1 = p.connect()
-                    c2 = p.connect()
-                    c3 = p.connect()
-                    c3.close()
-                    c2.close()
-                    self.assert_(c1.connection is not None)
-                    c1.close()
-                c1 = c2 = c3 = None
-
-                # extra tests with QueuePool to ensure connections get
-                # __del__()ed when dereferenced
-
-                if isinstance(p, pool.QueuePool):
-                    lazy_gc()
-                    self.assert_(p.checkedout() == 0)
-                    c1 = p.connect()
-                    c2 = p.connect()
-                    if useclose:
-                        c2.close()
-                        c1.close()
-                    else:
-                        c2 = None
-                        c1 = None
-                        lazy_gc()
-                    self.assert_(p.checkedout() == 0)
-
-    def test_mixed_close(self):
-        pool._refs.clear()
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            p = self._queuepool_fixture(
-                pool_size=3, max_overflow=-1, use_threadlocal=True
+class AutocommitKeywordFixture(object):
+    def _test_keyword(self, keyword, expected=True):
+        dbapi = Mock(
+            connect=Mock(
+                return_value=Mock(
+                    cursor=Mock(return_value=Mock(description=()))
+                )
             )
-        c1 = p.connect()
-        c2 = p.connect()
-        assert c1 is c2
-        c1.close()
-        c2 = None
-        assert p.checkedout() == 1
-        c1 = None
-        lazy_gc()
-        assert p.checkedout() == 0
-        lazy_gc()
-        assert not pool._refs
+        )
+        engine = engines.testing_engine(
+            options={"_initialize": False, "pool_reset_on_return": None}
+        )
+        engine.dialect.dbapi = dbapi
+
+        with engine.connect() as conn:
+            if expected:
+                with testing.expect_deprecated_20(
+                    "The current statement is being autocommitted "
+                    "using implicit autocommit"
+                ):
+                    conn.exec_driver_sql(
+                        "%s something table something" % keyword
+                    )
+            else:
+                conn.exec_driver_sql("%s something table something" % keyword)
+
+            if expected:
+                eq_(
+                    [n for (n, k, s) in dbapi.connect().mock_calls],
+                    ["cursor", "commit"],
+                )
+            else:
+                eq_(
+                    [n for (n, k, s) in dbapi.connect().mock_calls], ["cursor"]
+                )
 
 
-class QueuePoolTest(PoolTestBase):
-    def test_threadfairy(self):
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            p = self._queuepool_fixture(
-                pool_size=3, max_overflow=-1, use_threadlocal=True
-            )
-        c1 = p.connect()
-        c1.close()
-        c2 = p.connect()
-        assert c2.connection is not None
+class AutocommitTextTest(AutocommitKeywordFixture, fixtures.TestBase):
+    __backend__ = True
 
-    def test_trick_the_counter(self):
-        """this is a "flaw" in the connection pool; since threadlocal
-        uses a single ConnectionFairy per thread with an open/close
-        counter, you can fool the counter into giving you a
-        ConnectionFairy with an ambiguous counter.  i.e. its not true
-        reference counting."""
+    def test_update(self):
+        self._test_keyword("UPDATE")
 
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            p = self._queuepool_fixture(
-                pool_size=3, max_overflow=-1, use_threadlocal=True
-            )
-        c1 = p.connect()
-        c2 = p.connect()
-        assert c1 is c2
-        c1.close()
-        c2 = p.connect()
-        c2.close()
-        self.assert_(p.checkedout() != 0)
-        c2.close()
-        self.assert_(p.checkedout() == 0)
+    def test_insert(self):
+        self._test_keyword("INSERT")
 
-    @testing.requires.predictable_gc
-    def test_weakref_kaboom(self):
-        with testing.expect_deprecated(
-            r".*Pool.use_threadlocal parameter is deprecated"
-        ):
-            p = self._queuepool_fixture(
-                pool_size=3, max_overflow=-1, use_threadlocal=True
-            )
-        c1 = p.connect()
-        c2 = p.connect()
-        c1.close()
-        c2 = None
-        del c1
-        del c2
-        gc_collect()
-        assert p.checkedout() == 0
-        c3 = p.connect()
-        assert c3 is not None
+    def test_delete(self):
+        self._test_keyword("DELETE")
+
+    def test_alter(self):
+        self._test_keyword("ALTER TABLE")
+
+    def test_create(self):
+        self._test_keyword("CREATE TABLE foobar")
+
+    def test_drop(self):
+        self._test_keyword("DROP TABLE foobar")
+
+    def test_select(self):
+        self._test_keyword("SELECT foo FROM table", False)
 
 
-class ExplicitAutoCommitDeprecatedTest(fixtures.TestBase):
+class ExplicitAutoCommitTest(fixtures.TablesTest):
 
     """test the 'autocommit' flag on select() and text() objects.
 
@@ -1734,60 +1886,137 @@ class ExplicitAutoCommitDeprecatedTest(fixtures.TestBase):
     __only_on__ = "postgresql"
 
     @classmethod
-    def setup_class(cls):
-        global metadata, foo
-        metadata = MetaData(testing.db)
-        foo = Table(
+    def define_tables(cls, metadata):
+        Table(
             "foo",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("data", String(100)),
         )
-        metadata.create_all()
-        testing.db.execute(
-            "create function insert_foo(varchar) "
-            "returns integer as 'insert into foo(data) "
-            "values ($1);select 1;' language sql"
+
+        event.listen(
+            metadata,
+            "after_create",
+            DDL(
+                "create function insert_foo(varchar) "
+                "returns integer as 'insert into foo(data) "
+                "values ($1);select 1;' language sql"
+            ),
+        )
+        event.listen(
+            metadata, "before_drop", DDL("drop function insert_foo(varchar)")
         )
 
-    def teardown(self):
-        foo.delete().execute().close()
+    def test_control(self):
 
-    @classmethod
-    def teardown_class(cls):
-        testing.db.execute("drop function insert_foo(varchar)")
-        metadata.drop_all()
+        # test that not using autocommit does not commit
+        foo = self.tables.foo
 
-    def test_explicit_compiled(self):
         conn1 = testing.db.connect()
         conn2 = testing.db.connect()
-        with testing.expect_deprecated(
-            "The select.autocommit parameter is deprecated"
-        ):
-            conn1.execute(select([func.insert_foo("data1")], autocommit=True))
-        assert conn2.execute(select([foo.c.data])).fetchall() == [("data1",)]
-        with testing.expect_deprecated(
-            r"The SelectBase.autocommit\(\) method is deprecated,"
-        ):
-            conn1.execute(select([func.insert_foo("data2")]).autocommit())
-        assert conn2.execute(select([foo.c.data])).fetchall() == [
+        conn1.execute(select(func.insert_foo("data1")))
+        assert conn2.execute(select(foo.c.data)).fetchall() == []
+        conn1.execute(text("select insert_foo('moredata')"))
+        assert conn2.execute(select(foo.c.data)).fetchall() == []
+        trans = conn1.begin()
+        trans.commit()
+        assert conn2.execute(select(foo.c.data)).fetchall() == [
             ("data1",),
-            ("data2",),
+            ("moredata",),
         ]
         conn1.close()
         conn2.close()
 
-    def test_explicit_text(self):
+    def test_explicit_compiled(self):
+        foo = self.tables.foo
+
         conn1 = testing.db.connect()
         conn2 = testing.db.connect()
-        with testing.expect_deprecated(
-            "The text.autocommit parameter is deprecated"
+
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
         ):
             conn1.execute(
-                text("select insert_foo('moredata')", autocommit=True)
+                select(func.insert_foo("data1")).execution_options(
+                    autocommit=True
+                )
             )
-        assert conn2.execute(select([foo.c.data])).fetchall() == [
-            ("moredata",)
+        assert conn2.execute(select(foo.c.data)).fetchall() == [("data1",)]
+        conn1.close()
+        conn2.close()
+
+    def test_explicit_connection(self):
+        foo = self.tables.foo
+
+        conn1 = testing.db.connect()
+        conn2 = testing.db.connect()
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            conn1.execution_options(autocommit=True).execute(
+                select(func.insert_foo("data1"))
+            )
+        eq_(conn2.execute(select(foo.c.data)).fetchall(), [("data1",)])
+
+        # connection supersedes statement
+
+        conn1.execution_options(autocommit=False).execute(
+            select(func.insert_foo("data2")).execution_options(autocommit=True)
+        )
+        eq_(conn2.execute(select(foo.c.data)).fetchall(), [("data1",)])
+
+        # ditto
+
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            conn1.execution_options(autocommit=True).execute(
+                select(func.insert_foo("data3")).execution_options(
+                    autocommit=False
+                )
+            )
+        eq_(
+            conn2.execute(select(foo.c.data)).fetchall(),
+            [("data1",), ("data2",), ("data3",)],
+        )
+        conn1.close()
+        conn2.close()
+
+    def test_explicit_text(self):
+        foo = self.tables.foo
+
+        conn1 = testing.db.connect()
+        conn2 = testing.db.connect()
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            conn1.execute(
+                text("select insert_foo('moredata')").execution_options(
+                    autocommit=True
+                )
+            )
+        assert conn2.execute(select(foo.c.data)).fetchall() == [("moredata",)]
+        conn1.close()
+        conn2.close()
+
+    def test_implicit_text(self):
+        foo = self.tables.foo
+
+        conn1 = testing.db.connect()
+        conn2 = testing.db.connect()
+        with testing.expect_deprecated_20(
+            "The current statement is being autocommitted using "
+            "implicit autocommit"
+        ):
+            conn1.execute(
+                text("insert into foo (data) values ('implicitdata')")
+            )
+        assert conn2.execute(select(foo.c.data)).fetchall() == [
+            ("implicitdata",)
         ]
         conn1.close()
         conn2.close()

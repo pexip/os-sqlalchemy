@@ -15,6 +15,7 @@ from sqlalchemy.engine import default
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_deprecated
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -56,7 +57,7 @@ class DeleteTest(_DeleteTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            delete(table1, table1.c.myid == 7),
+            delete(table1).where(table1.c.myid == 7),
             "DELETE FROM mytable WHERE mytable.myid = :myid_1",
         )
 
@@ -77,12 +78,14 @@ class DeleteTest(_DeleteTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_where_empty(self):
         table1 = self.tables.mytable
 
-        self.assert_compile(
-            table1.delete().where(and_()), "DELETE FROM mytable"
-        )
-        self.assert_compile(
-            table1.delete().where(or_()), "DELETE FROM mytable"
-        )
+        with expect_deprecated():
+            self.assert_compile(
+                table1.delete().where(and_()), "DELETE FROM mytable"
+            )
+        with expect_deprecated():
+            self.assert_compile(
+                table1.delete().where(or_()), "DELETE FROM mytable"
+            )
 
     def test_prefix_with(self):
         table1 = self.tables.mytable
@@ -109,13 +112,13 @@ class DeleteTest(_DeleteTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             stmt, "DELETE FROM mytable AS t1 WHERE t1.myid = :myid_1"
         )
 
-    def test_correlated(self):
+    def test_non_correlated_select(self):
         table1, table2 = self.tables.mytable, self.tables.myothertable
 
         # test a non-correlated WHERE clause
-        s = select([table2.c.othername], table2.c.otherid == 7)
+        s = select(table2.c.othername).where(table2.c.otherid == 7)
         self.assert_compile(
-            delete(table1, table1.c.name == s),
+            delete(table1).where(table1.c.name == s.scalar_subquery()),
             "DELETE FROM mytable "
             "WHERE mytable.name = ("
             "SELECT myothertable.othername "
@@ -124,10 +127,13 @@ class DeleteTest(_DeleteTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             ")",
         )
 
+    def test_correlated_select(self):
+        table1, table2 = self.tables.mytable, self.tables.myothertable
+
         # test one that is actually correlated...
-        s = select([table2.c.othername], table2.c.otherid == table1.c.myid)
+        s = select(table2.c.othername).where(table2.c.otherid == table1.c.myid)
         self.assert_compile(
-            table1.delete(table1.c.name == s),
+            table1.delete().where(table1.c.name == s.scalar_subquery()),
             "DELETE FROM mytable "
             "WHERE mytable.name = ("
             "SELECT myothertable.othername "
@@ -302,32 +308,31 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         )
 
     @testing.requires.delete_from
-    def test_exec_two_table(self):
+    def test_exec_two_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
 
-        with testing.db.connect() as conn:
-            conn.execute(dingalings.delete())  # fk violation otherwise
+        connection.execute(dingalings.delete())  # fk violation otherwise
 
-            conn.execute(
-                addresses.delete()
-                .where(users.c.id == addresses.c.user_id)
-                .where(users.c.name == "ed")
-            )
+        connection.execute(
+            addresses.delete()
+            .where(users.c.id == addresses.c.user_id)
+            .where(users.c.name == "ed")
+        )
 
-            expected = [
-                (1, 7, "x", "jack@bean.com"),
-                (5, 9, "x", "fred@fred.com"),
-            ]
-        self._assert_table(addresses, expected)
+        expected = [
+            (1, 7, "x", "jack@bean.com"),
+            (5, 9, "x", "fred@fred.com"),
+        ]
+        self._assert_table(connection, addresses, expected)
 
     @testing.requires.delete_from
-    def test_exec_three_table(self):
+    def test_exec_three_table(self, connection):
         users = self.tables.users
         addresses = self.tables.addresses
         dingalings = self.tables.dingalings
 
-        testing.db.execute(
+        connection.execute(
             dingalings.delete()
             .where(users.c.id == addresses.c.user_id)
             .where(users.c.name == "ed")
@@ -335,34 +340,33 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         )
 
         expected = [(2, 5, "ding 2/5")]
-        self._assert_table(dingalings, expected)
+        self._assert_table(connection, dingalings, expected)
 
     @testing.requires.delete_from
-    def test_exec_two_table_plus_alias(self):
+    def test_exec_two_table_plus_alias(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
 
-        with testing.db.connect() as conn:
-            conn.execute(dingalings.delete())  # fk violation otherwise
-            a1 = addresses.alias()
-            conn.execute(
-                addresses.delete()
-                .where(users.c.id == addresses.c.user_id)
-                .where(users.c.name == "ed")
-                .where(a1.c.id == addresses.c.id)
-            )
+        connection.execute(dingalings.delete())  # fk violation otherwise
+        a1 = addresses.alias()
+        connection.execute(
+            addresses.delete()
+            .where(users.c.id == addresses.c.user_id)
+            .where(users.c.name == "ed")
+            .where(a1.c.id == addresses.c.id)
+        )
 
         expected = [(1, 7, "x", "jack@bean.com"), (5, 9, "x", "fred@fred.com")]
-        self._assert_table(addresses, expected)
+        self._assert_table(connection, addresses, expected)
 
     @testing.requires.delete_from
-    def test_exec_alias_plus_table(self):
+    def test_exec_alias_plus_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
 
         d1 = dingalings.alias()
 
-        testing.db.execute(
+        connection.execute(
             delete(d1)
             .where(users.c.id == addresses.c.user_id)
             .where(users.c.name == "ed")
@@ -370,8 +374,8 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         )
 
         expected = [(2, 5, "ding 2/5")]
-        self._assert_table(dingalings, expected)
+        self._assert_table(connection, dingalings, expected)
 
-    def _assert_table(self, table, expected):
+    def _assert_table(self, connection, table, expected):
         stmt = table.select().order_by(table.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)

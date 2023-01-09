@@ -2,13 +2,14 @@ from sqlalchemy import Column
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
+from sqlalchemy import select
 from sqlalchemy import Table
+from sqlalchemy import testing
 from sqlalchemy import util
 from sqlalchemy.ext.hybrid import hybrid_method
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
+from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import synonym
 from sqlalchemy.orm import util as orm_util
@@ -21,12 +22,13 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.util import compat
 from test.orm import _fixtures
 from .inheritance import _poly_fixtures
 
 
-class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
+class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
     __dialect__ = "default"
 
     def _fixture(self, cls, properties={}):
@@ -37,7 +39,10 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
             Column("x", Integer),
             Column("y", Integer),
         )
-        mapper(cls, table, properties=properties)
+        clear_mappers()
+        self.mapper_registry.map_imperatively(
+            cls, table, properties=properties
+        )
         return table
 
     def test_simple(self):
@@ -54,6 +59,30 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
 
         assert Point.id.__clause_element__().table is table
         assert alias.id.__clause_element__().table is not table
+
+    def test_named_entity(self):
+        class Point(object):
+            pass
+
+        self._fixture(Point)
+
+        alias = aliased(Point, name="pp")
+
+        self.assert_compile(
+            select(alias), "SELECT pp.id, pp.x, pp.y FROM point AS pp"
+        )
+
+    def test_named_selectable(self):
+        class Point(object):
+            pass
+
+        table = self._fixture(Point)
+
+        alias = aliased(table, name="pp")
+
+        self.assert_compile(
+            select(alias), "SELECT pp.id, pp.x, pp.y FROM point AS pp"
+        )
 
     def test_not_instantiatable(self):
         class Point(object):
@@ -152,7 +181,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self._fixture(Point)
         alias = aliased(Point)
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.left_of(Point)),
@@ -178,7 +207,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -211,14 +240,46 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(alias.x + 1), "point_1.x + :x_1")
         eq_(str(alias.x_alone + 1), "point_1.x + :x_1")
 
-        is_(Point.x_alone.__clause_element__(), Point.x.__clause_element__())
+        point_mapper = inspect(Point)
+
+        eq_(
+            Point.x_alone._annotations,
+            {
+                "entity_namespace": point_mapper,
+                "parententity": point_mapper,
+                "parentmapper": point_mapper,
+                "proxy_key": "x_alone",
+                "proxy_owner": point_mapper,
+            },
+        )
+        eq_(
+            Point.x._annotations,
+            {
+                "entity_namespace": point_mapper,
+                "parententity": point_mapper,
+                "parentmapper": point_mapper,
+                "proxy_key": "x",
+                "proxy_owner": point_mapper,
+            },
+        )
 
         eq_(str(alias.x_alone == alias.x), "point_1.x = point_1.x")
 
         a2 = aliased(Point)
         eq_(str(a2.x_alone == alias.x), "point_1.x = point_2.x")
 
-        sess = Session()
+        eq_(
+            a2.x._annotations,
+            {
+                "entity_namespace": inspect(a2),
+                "parententity": inspect(a2),
+                "parentmapper": point_mapper,
+                "proxy_key": "x",
+                "proxy_owner": inspect(a2),
+            },
+        )
+
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.x_alone > Point.x),
@@ -238,7 +299,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.x_syn), "Point.x_syn")
         eq_(str(alias.x_syn), "AliasedClass_Point.x_syn")
 
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(alias.x_syn).filter(alias.x_syn > Point.x_syn),
             "SELECT point_1.x AS point_1_x FROM point AS point_1, point "
@@ -277,7 +338,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         a2 = aliased(Point)
         eq_(str(a2.x_syn == alias.x), "point_1.x = point_2.x")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.x_syn > Point.x),
@@ -306,7 +367,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -336,7 +397,7 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(alias).filter(alias.double_x > Point.x),
@@ -401,50 +462,60 @@ class AliasedClassTest(fixtures.TestBase, AssertsCompiledSQL):
 class IdentityKeyTest(_fixtures.FixtureTest):
     run_inserts = None
 
-    def test_identity_key_1(self):
+    def _cases():
+        return testing.combinations(
+            (orm_util,),
+            (Session,),
+        )
+
+    @_cases()
+    def test_identity_key_1(self, ormutil):
         User, users = self.classes.User, self.tables.users
 
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
-        key = orm_util.identity_key(User, [1])
+        key = ormutil.identity_key(User, [1])
         eq_(key, (User, (1,), None))
-        key = orm_util.identity_key(User, ident=[1])
+        key = ormutil.identity_key(User, ident=[1])
         eq_(key, (User, (1,), None))
 
-    def test_identity_key_scalar(self):
+    @_cases()
+    def test_identity_key_scalar(self, ormutil):
         User, users = self.classes.User, self.tables.users
 
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
-        key = orm_util.identity_key(User, 1)
+        key = ormutil.identity_key(User, 1)
         eq_(key, (User, (1,), None))
-        key = orm_util.identity_key(User, ident=1)
+        key = ormutil.identity_key(User, ident=1)
         eq_(key, (User, (1,), None))
 
-    def test_identity_key_2(self):
+    @_cases()
+    def test_identity_key_2(self, ormutil):
         users, User = self.tables.users, self.classes.User
 
-        mapper(User, users)
-        s = create_session()
+        self.mapper_registry.map_imperatively(User, users)
+        s = fixture_session()
         u = User(name="u1")
         s.add(u)
         s.flush()
-        key = orm_util.identity_key(instance=u)
+        key = ormutil.identity_key(instance=u)
         eq_(key, (User, (u.id,), None))
 
-    def test_identity_key_3(self):
+    @_cases()
+    def test_identity_key_3(self, ormutil):
         User, users = self.classes.User, self.tables.users
 
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
         row = {users.c.id: 1, users.c.name: "Frank"}
-        key = orm_util.identity_key(User, row=row)
+        key = ormutil.identity_key(User, row=row)
         eq_(key, (User, (1,), None))
 
     def test_identity_key_token(self):
         User, users = self.classes.User, self.tables.users
 
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
         key = orm_util.identity_key(User, [1], identity_token="token")
         eq_(key, (User, (1,), "token"))

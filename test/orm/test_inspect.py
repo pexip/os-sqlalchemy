@@ -16,6 +16,7 @@ from sqlalchemy.orm.util import identity_key
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 
 
@@ -64,8 +65,6 @@ class TestORMInspection(_fixtures.FixtureTest):
         assert not insp.is_aliased_class
 
     def test_mapper_selectable_fixed(self):
-        from sqlalchemy.orm import mapper
-
         class Foo(object):
             pass
 
@@ -74,8 +73,10 @@ class TestORMInspection(_fixtures.FixtureTest):
 
         user_table = self.tables.users
         addresses_table = self.tables.addresses
-        mapper(Foo, user_table, with_polymorphic=(Bar,))
-        mapper(
+        self.mapper_registry.map_imperatively(
+            Foo, user_table, with_polymorphic=(Bar,)
+        )
+        self.mapper_registry.map_imperatively(
             Bar,
             addresses_table,
             inherits=Foo,
@@ -243,7 +244,6 @@ class TestORMInspection(_fixtures.FixtureTest):
             HYBRID_METHOD,
         )
         from sqlalchemy import Table, MetaData, Integer, Column
-        from sqlalchemy.orm import mapper
         from sqlalchemy.orm.interfaces import NOT_EXTENSION
 
         class SomeClass(self.classes.User):
@@ -277,9 +277,11 @@ class TestORMInspection(_fixtures.FixtureTest):
             Column("id", Integer, primary_key=True),
             Column("s_id", ForeignKey("sometable.id")),
         )
-        mapper(SomeClass, t, properties={"addresses": relationship(Address)})
-        mapper(Address, ta)
-        mapper(SomeSubClass, inherits=SomeClass)
+        self.mapper_registry.map_imperatively(
+            SomeClass, t, properties={"addresses": relationship(Address)}
+        )
+        self.mapper_registry.map_imperatively(Address, ta)
+        self.mapper_registry.map_imperatively(SomeSubClass, inherits=SomeClass)
 
         insp = inspect(SomeSubClass)
         eq_(
@@ -353,8 +355,8 @@ class TestORMInspection(_fixtures.FixtureTest):
         eq_(insp.attrs.addresses.loaded_value, NO_VALUE)
         # regular accessor sets it
         eq_(insp.attrs.addresses.value, [])
-        # now the None is there
-        eq_(insp.attrs.addresses.loaded_value, [])
+        # stays as NO_VALUE, this is #4519
+        eq_(insp.attrs.addresses.loaded_value, NO_VALUE)
 
     def test_instance_state_collection_attr_hist(self):
         User = self.classes.User
@@ -364,12 +366,13 @@ class TestORMInspection(_fixtures.FixtureTest):
         eq_(hist.unchanged, None)
         u1.addresses
         hist = insp.attrs.addresses.history
-        eq_(hist.unchanged, [])
+        # stays, this is #4519
+        eq_(hist.unchanged, None)
 
     def test_instance_state_scalar_attr_hist(self):
         User = self.classes.User
         u1 = User(name="ed")
-        sess = Session()
+        sess = fixture_session()
         sess.add(u1)
         sess.commit()
         assert "name" not in u1.__dict__
@@ -386,12 +389,13 @@ class TestORMInspection(_fixtures.FixtureTest):
         eq_(hist.unchanged, ())
         u1.addresses
         hist = insp.attrs.addresses.load_history()
-        eq_(hist.unchanged, [])
+        # stays, this is #4519
+        eq_(hist.unchanged, ())
 
     def test_instance_state_scalar_attr_hist_load(self):
         User = self.classes.User
         u1 = User(name="ed")
-        sess = Session()
+        sess = fixture_session()
         sess.add(u1)
         sess.commit()
         assert "name" not in u1.__dict__
@@ -408,10 +412,10 @@ class TestORMInspection(_fixtures.FixtureTest):
             __foo__ = "bar"
             __bat__ = Thing()
 
-        from sqlalchemy.orm import mapper, column_property
+        from sqlalchemy.orm import column_property
         from sqlalchemy.ext.hybrid import hybrid_property
 
-        m = mapper(AnonClass, self.tables.users)
+        m = self.mapper_registry.map_imperatively(AnonClass, self.tables.users)
 
         eq_(set(inspect(AnonClass).attrs.keys()), set(["id", "name"]))
         eq_(
@@ -513,7 +517,7 @@ class %s(SuperCls):
 
     @testing.requires.pep520
     def test_all_orm_descriptors_pep520_noinh(self):
-        from sqlalchemy.ext.declarative import declarative_base
+        from sqlalchemy.orm import declarative_base
 
         Base = declarative_base()
 
@@ -526,7 +530,7 @@ class %s(SuperCls):
 
     @testing.requires.pep520
     def test_all_orm_descriptors_pep520_onelevel_inh(self):
-        from sqlalchemy.ext.declarative import declarative_base
+        from sqlalchemy.orm import declarative_base
 
         Base = declarative_base()
 
@@ -550,7 +554,6 @@ class %s(SuperCls):
         class MyClass(object):
             pass
 
-        from sqlalchemy.orm import mapper
         from sqlalchemy import Table, MetaData, Column, Integer
 
         names = self._random_names()
@@ -563,7 +566,7 @@ class %s(SuperCls):
             *[Column(name, Integer) for name in names]
         )
 
-        m = mapper(MyClass, t)
+        m = self.mapper_registry.map_imperatively(MyClass, t)
 
         eq_(m.all_orm_descriptors.keys(), ["id"] + names)
 
@@ -581,7 +584,7 @@ class %s(SuperCls):
         s.flush()
         insp = inspect(u1)
         eq_(insp.identity, (u1.id,))
-        is_(s.query(User).get(insp.identity), u1)
+        is_(s.get(User, insp.identity), u1)
 
     def test_is_instance(self):
         User = self.classes.User
@@ -638,7 +641,7 @@ class %s(SuperCls):
         insp = inspect(u1)
 
         is_(insp.session, None)
-        s = Session()
+        s = fixture_session()
         s.add(u1)
         is_(insp.session, s)
 

@@ -2,42 +2,41 @@
 SQLALCHEMY UNIT TESTS
 =====================
 
-Updated for 1.1, 1.2
-
 Basic Test Running
 ==================
 
-A test target exists within the setup.py script.  For basic test runs::
+Tox is used to run the test suite fully.   For basic test runs against
+a single Python interpreter::
 
-    python setup.py test
+    tox
 
 
-Running with Tox
-================
+Advanced Tox Options
+====================
 
 For more elaborate CI-style test running, the tox script provided will
 run against various Python / database targets.   For a basic run against
-Python 2.7 using an in-memory SQLite database::
+Python 3.8 using an in-memory SQLite database::
 
-    tox -e py27-sqlite
+    tox -e py38-sqlite
 
 The tox runner contains a series of target combinations that can run
 against various combinations of databases.  The test suite can be
 run against SQLite with "backend" tests also running against a PostgreSQL
 database::
 
-    tox -e py36-sqlite-postgresql
+    tox -e py38-sqlite-postgresql
 
 Or to run just "backend" tests against a MySQL database::
 
-    tox -e py36-mysql-backendonly
+    tox -e py38-mysql-backendonly
 
 Running against backends other than SQLite requires that a database of that
 vendor be available at a specific URL.  See "Setting Up Databases" below
 for details.
 
 The pytest Engine
-==================
+=================
 
 The tox runner is using pytest to invoke the test suite.   Within the realm of
 pytest, SQLAlchemy itself is adding a large series of option and
@@ -86,17 +85,23 @@ a pre-set URL.  These can be seen using --dbs::
     Available --db options (use --dburi to override)
                  default    sqlite:///:memory:
                 firebird    firebird://sysdba:masterkey@localhost//Users/classic/foo.fdb
-                   mssql    mssql+pyodbc://scott:tiger@ms_2008
+                 mariadb    mariadb://scott:tiger@192.168.0.199:3307/test
+                   mssql    mssql+pyodbc://scott:tiger^5HHH@mssql2017:1433/test?driver=ODBC+Driver+13+for+SQL+Server
            mssql_pymssql    mssql+pymssql://scott:tiger@ms_2008
-                   mysql    mysql://scott:tiger@127.0.0.1:3306/test?charset=utf8
+                   mysql    mysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
                   oracle    oracle://scott:tiger@127.0.0.1:1521
                  oracle8    oracle://scott:tiger@127.0.0.1:1521/?use_ansi=0
                   pg8000    postgresql+pg8000://scott:tiger@127.0.0.1:5432/test
               postgresql    postgresql://scott:tiger@127.0.0.1:5432/test
     postgresql_psycopg2cffi postgresql+psycopg2cffi://scott:tiger@127.0.0.1:5432/test
-                 pymysql    mysql+pymysql://scott:tiger@127.0.0.1:3306/test?charset=utf8
+                 pymysql    mysql+pymysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
                   sqlite    sqlite:///:memory:
              sqlite_file    sqlite:///querytest.db
+
+Note that a pyodbc URL **must be against a hostname / database name
+combination, not a DSN name** when using the multiprocessing option; this is
+because the test suite needs to generate new URLs to refer to per-process
+databases that are created on the fly.
 
 What those mean is that if you have a database running that can be accessed
 by the above URL, you can run the test suite against it using ``--db <name>``.
@@ -125,6 +130,20 @@ of the fixed one in setup.cfg.
 Database Configuration
 ======================
 
+Step one, the **database chosen for tests must be entirely empty**.  A lot
+of what SQLAlchemy tests is creating and dropping lots of tables
+as well as running database introspection to see what is there.  If there
+are pre-existing tables or other objects in the target database already,
+these will get in the way.   A failed test run can also be followed by
+ a run that includes the "--dropfirst" option, which will try to drop
+all existing tables in the target database.
+
+The above paragraph changes somewhat when the multiprocessing option
+is used, in that separate databases will be created instead, however
+in the case of Postgresql, the starting database is used as a template,
+so the starting database must still be empty.  See below for example
+configurations using docker.
+
 The test runner will by default create and drop tables within the default
 database that's in the database URL, *unless* the multiprocessing option is in
 use via the pytest "-n" flag, which invokes pytest-xdist.   The
@@ -139,7 +158,7 @@ to a hostname/database name combination, not a DSN name.
 
 Several tests require alternate usernames or schemas to be present, which
 are used to test dotted-name access scenarios.  On some databases such
-as Oracle or Sybase, these are usernames, and others such as PostgreSQL
+as Oracle these are usernames, and others such as PostgreSQL
 and MySQL they are schemas.   The requirement applies to all backends
 except SQLite and Firebird.  The names are::
 
@@ -199,6 +218,73 @@ Additional steps specific to individual databases are as follows::
 
      ALTER DATABASE MyDatabase SET READ_COMMITTED_SNAPSHOT ON
 
+Docker Configurations
+---------------------
+
+The SQLAlchemy test can run against database running in Docker containers.
+This ensures that they are empty and that their configuration is not influenced
+by any local usage.
+
+The following configurations are just examples that developers can use to
+quickly set up a local environment for SQLAlchemy development. They are **NOT**
+intended for production use!
+
+**PostgreSQL configuration**::
+
+    # create the container with the proper configuration for sqlalchemy
+    docker run --rm -e POSTGRES_USER='scott' -e POSTGRES_PASSWORD='tiger' -e POSTGRES_DB='test' -p 127.0.0.1:5432:5432 -d --name postgres postgres
+
+    # configure the database
+    sleep 10
+    docker exec -ti postgres psql -U scott -c 'CREATE SCHEMA test_schema; CREATE SCHEMA test_schema_2;' test
+    # this last command is optional
+    docker exec -ti postgres sed -i 's/#max_prepared_transactions = 0/max_prepared_transactions = 10/g' /var/lib/postgresql/data/postgresql.conf
+
+    # To stop the container. It will also remove it.
+    docker stop postgres
+
+**MySQL configuration**::
+
+    # create the container with the proper configuration for sqlalchemy
+    docker run --rm -e MYSQL_USER='scott' -e MYSQL_PASSWORD='tiger' -e MYSQL_DATABASE='test' -e MYSQL_ROOT_PASSWORD='password' -p 127.0.0.1:3306:3306 -d --name mysql mysql --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+    # configure the database
+    sleep 20
+    docker exec -ti mysql mysql -u root -ppassword -w -e "CREATE DATABASE test_schema CHARSET utf8mb4; GRANT ALL ON test_schema.* TO scott;"
+
+    # To stop the container. It will also remove it.
+    docker stop mysql
+
+**MariaDB configuration**::
+
+    # create the container with the proper configuration for sqlalchemy
+    docker run --rm -e MARIADB_USER='scott' -e MARIADB_PASSWORD='tiger' -e MARIADB_DATABASE='test' -e MARIADB_ROOT_PASSWORD='password' -p 127.0.0.1:3306:3306 -d --name mariadb mariadb --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+
+    # configure the database
+    sleep 20
+    docker exec -ti mariadb mysql -u root -ppassword -w -e "CREATE DATABASE test_schema CHARSET utf8mb4; GRANT ALL ON test_schema.* TO scott;"
+
+    # To stop the container. It will also remove it.
+    docker stop mariadb
+
+**MSSQL configuration**::
+
+    # create the container with the proper configuration for sqlalchemy
+    # it will use the Developer version
+    docker run --rm -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=yourStrong(!)Password' -p 127.0.0.1:1433:1433 -d --name mssql mcr.microsoft.com/mssql/server
+
+    # configure the database
+    sleep 20
+    docker exec -it mssql /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'yourStrong(!)Password' -Q "sp_configure 'contained database authentication', 1; RECONFIGURE; CREATE DATABASE test CONTAINMENT = PARTIAL; ALTER DATABASE test SET ALLOW_SNAPSHOT_ISOLATION ON; ALTER DATABASE test SET READ_COMMITTED_SNAPSHOT ON; CREATE LOGIN scott WITH PASSWORD = 'tiger^5HHH'; ALTER SERVER ROLE sysadmin ADD MEMBER scott;"
+    docker exec -it mssql /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'yourStrong(!)Password' -d test -Q "CREATE SCHEMA test_schema"
+    docker exec -it mssql /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P 'yourStrong(!)Password' -d test -Q "CREATE SCHEMA test_schema_2"
+
+    # To stop the container. It will also remove it.
+    docker stop mssql
+
+NOTE: with this configuration the url to use is not the default one configured
+in setup, but ``mssql+pymssql://scott:tiger^5HHH@127.0.0.1:1433/test``.  It can
+be used with pytest by using ``--db docker_mssql``.
 
 CONFIGURING LOGGING
 -------------------

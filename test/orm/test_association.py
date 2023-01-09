@@ -3,11 +3,10 @@ from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -92,15 +91,15 @@ class AssociationTest(fixtures.MappedTest):
             "items", "item_keywords", "keywords"
         )
 
-        mapper(Keyword, keywords)
-        mapper(
+        cls.mapper_registry.map_imperatively(Keyword, keywords)
+        cls.mapper_registry.map_imperatively(
             KeywordAssociation,
             item_keywords,
             properties={"keyword": relationship(Keyword, lazy="joined")},
             primary_key=[item_keywords.c.item_id, item_keywords.c.keyword_id],
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Item,
             items,
             properties={
@@ -119,7 +118,7 @@ class AssociationTest(fixtures.MappedTest):
             self.classes.Keyword,
         )
 
-        sess = create_session()
+        sess = fixture_session()
         item1 = Item("item1")
         item2 = Item("item2")
         item1.keywords.append(
@@ -144,7 +143,7 @@ class AssociationTest(fixtures.MappedTest):
             self.classes.Keyword,
         )
 
-        sess = create_session()
+        sess = fixture_session()
         item1 = Item("item1")
         item1.keywords.append(
             KeywordAssociation(Keyword("blue"), "blue_assoc")
@@ -170,7 +169,7 @@ class AssociationTest(fixtures.MappedTest):
             self.classes.Keyword,
         )
 
-        sess = create_session()
+        sess = fixture_session()
         item1 = Item("item1")
         item2 = Item("item2")
         item1.keywords.append(
@@ -211,7 +210,7 @@ class AssociationTest(fixtures.MappedTest):
         item_keywords = self.tables.item_keywords
         Keyword = self.classes.Keyword
 
-        sess = create_session()
+        sess = fixture_session()
         item1 = Item("item1")
         item2 = Item("item2")
         item1.keywords.append(
@@ -223,9 +222,19 @@ class AssociationTest(fixtures.MappedTest):
         )
         sess.add_all((item1, item2))
         sess.flush()
-        eq_(select([func.count("*")]).select_from(item_keywords).scalar(), 3)
+        eq_(
+            sess.connection().scalar(
+                select(func.count("*")).select_from(item_keywords)
+            ),
+            3,
+        )
 
         sess.delete(item1)
         sess.delete(item2)
         sess.flush()
-        eq_(select([func.count("*")]).select_from(item_keywords).scalar(), 0)
+        eq_(
+            sess.connection().scalar(
+                select(func.count("*")).select_from(item_keywords)
+            ),
+            0,
+        )

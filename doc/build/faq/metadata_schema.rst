@@ -60,11 +60,13 @@ How can I sort Table objects in order of their dependency?
 
 This is available via the :attr:`_schema.MetaData.sorted_tables` function::
 
-    metadata = MetaData()
+    metadata_obj = MetaData()
     # ... add Table objects to metadata
-    ti = metadata.sorted_tables:
+    ti = metadata_obj.sorted_tables:
     for t in ti:
         print(t)
+
+.. _faq_ddl_as_string:
 
 How can I get the CREATE TABLE/ DROP TABLE output as a string?
 ==============================================================
@@ -80,13 +82,19 @@ To get the string specific to a certain engine::
 
     print(CreateTable(mytable).compile(engine))
 
-There's also a special form of :class:`_engine.Engine` that can let you dump an entire
-metadata creation sequence, using this recipe::
+There's also a special form of :class:`_engine.Engine` available via
+:func:`.create_mock_engine` that allows one to dump an entire
+metadata creation sequence as a string, using this recipe::
+
+    from sqlalchemy import create_mock_engine
+
 
     def dump(sql, *multiparams, **params):
         print(sql.compile(dialect=engine.dialect))
-    engine = create_engine('postgresql://', strategy='mock', executor=dump)
-    metadata.create_all(engine, checkfirst=False)
+
+
+    engine = create_mock_engine("postgresql://", dump)
+    metadata_obj.create_all(engine, checkfirst=False)
 
 The `Alembic <https://alembic.sqlalchemy.org>`_ tool also supports
 an "offline" SQL generation mode that renders database migrations as SQL scripts.
@@ -99,4 +107,4 @@ However, there are simple ways to get on-construction behaviors using creation
 functions, and behaviors related to the linkages between schema objects such as
 constraint conventions or naming conventions using attachment events.
 An example of many of these
-techniques can be seen at `Naming Conventions <http://www.sqlalchemy.org/trac/wiki/UsageRecipes/NamingConventions>`_.
+techniques can be seen at `Naming Conventions <https://www.sqlalchemy.org/trac/wiki/UsageRecipes/NamingConventions>`_.
