@@ -8,7 +8,7 @@ sqla_libdir=$(pkgdir)/usr/lib/python3/dist-packages/sqlalchemy
 sqla_ext_libdir=$(pkgdir)-ext/usr/lib/python3/dist-packages/sqlalchemy
 
 %:
-	dh $@ --buildsystem=pybuild --with python3,sphinxdoc
+	dh $@ --buildsystem=pybuild --with python3
 
 override_dh_auto_clean:
 	rm -rf $(CURDIR)/lib/SQLAlchemy.egg-info $(CURDIR)/build/
@@ -36,30 +36,30 @@ override_dh_auto_build:
 override_dh_auto_test:
 	echo "Do nothing here..."
 
-override_dh_sphinxdoc:
-	cd doc/build && python3 -m sphinx -N -E -b html . ../../debian/$(pd)/usr/share/doc/$(pd)/html/
-	rm -rf debian/$(pd)/usr/share/doc/$(pd)/html/.doctrees
+# override_dh_sphinxdoc:
+# 	cd doc/build && python3 -m sphinx -N -E -b html . ../../debian/$(pd)/usr/share/doc/$(pd)/html/
+# 	rm -rf debian/$(pd)/usr/share/doc/$(pd)/html/.doctrees
 	
-	cp -r doc/build/ debian/$(pd)/usr/share/doc/$(pd)/rst/
-	cd debian/$(pd)/usr/share/doc/$(pd)/rst/\
-		&& rm -f '*.py' '*.html' '*.png' \
-	       	&& rm -rf texinputs/
-	dh_link -p$(pd) /usr/share/javascript/jquery/jquery.js \
-		/usr/share/doc/$(pd)/html/_static/jquery.js
-	dh_link -p$(pd) /usr/share/javascript/underscore/underscore.js \
-		/usr/share/doc/$(pd)/html/_static/underscore.js
-	# link docs in python-sqlalchemy's dir
-	dh_link -p$(pd) /usr/share/doc/$(pd)/html \
-		/usr/share/doc/python3-sqlalchemy/html
-	dh_link -p$(pd) /usr/share/doc/$(pd)/rst \
-		/usr/share/doc/python3-sqlalchemy/rst
-	dh_link -p$(pd) /usr/share/javascript/sphinxdoc/1.0/searchtools.js \
-		/usr/share/doc/$(pd)/html/_static/searchtools.js
-	dh_sphinxdoc
+# 	cp -r doc/build/ debian/$(pd)/usr/share/doc/$(pd)/rst/
+# 	cd debian/$(pd)/usr/share/doc/$(pd)/rst/\
+# 		&& rm -f '*.py' '*.html' '*.png' \
+# 	       	&& rm -rf texinputs/
+# 	dh_link -p$(pd) /usr/share/javascript/jquery/jquery.js \
+# 		/usr/share/doc/$(pd)/html/_static/jquery.js
+# 	dh_link -p$(pd) /usr/share/javascript/underscore/underscore.js \
+# 		/usr/share/doc/$(pd)/html/_static/underscore.js
+# 	# link docs in python-sqlalchemy's dir
+# 	dh_link -p$(pd) /usr/share/doc/$(pd)/html \
+# 		/usr/share/doc/python3-sqlalchemy/html
+# 	dh_link -p$(pd) /usr/share/doc/$(pd)/rst \
+# 		/usr/share/doc/python3-sqlalchemy/rst
+# 	dh_link -p$(pd) /usr/share/javascript/sphinxdoc/1.0/searchtools.js \
+# 		/usr/share/doc/$(pd)/html/_static/searchtools.js
+# 	dh_sphinxdoc
 
 override_dh_installchangelogs:
-	dh_installchangelogs -i -p python-sqlalchemy-doc -X doc/changelog -X CHANGES
-	dh_installchangelogs -i -N python-sqlalchemy-doc -X doc/changelog -X CHANGES
+# 	dh_installchangelogs -i -p python-sqlalchemy-doc -X doc/changelog -X CHANGES
+# 	dh_installchangelogs -i -N python-sqlalchemy-doc -X doc/changelog -X CHANGES
 	dh_installchangelogs -a -X doc/changelog -X CHANGES
 
 override_dh_installexamples:

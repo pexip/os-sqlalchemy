@@ -1,3 +1,10 @@
+sqlalchemy (1.4.46+ds1-1pexip1) pexip; urgency=medium
+
+  * New upstream release
+  * Don't build docs
+
+ -- Huw Jones <huw@pexip.com>  Fri, 21 Apr 2023 12:30:26 +0100
+
 sqlalchemy (1.4.46+ds1-1) unstable; urgency=medium
 
   * New upstream release
