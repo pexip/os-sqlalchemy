@@ -15,39 +15,67 @@ with component dependencies organized into layers:
 .. image:: sqla_arch_small.png
 
 Above, the two most significant front-facing portions of
-SQLAlchemy are the **Object Relational Mapper** and the
-**SQL Expression Language**. SQL Expressions can be used
-independently of the ORM. When using the ORM, the SQL
-Expression language remains part of the public facing API
-as it is used within object-relational configurations and
-queries.
+SQLAlchemy are the **Object Relational Mapper (ORM)** and the
+**Core**.
+
+Core contains the breadth of SQLAlchemy's SQL and database
+integration and description services, the most prominent part of this
+being the **SQL Expression Language**.
+
+The SQL Expression Language is a toolkit all its own, independent of the ORM
+package, which provides a system of constructing SQL expressions represented by
+composable objects, which can then be "executed" against a target database
+within the scope of a specific transaction, returning a result set.
+Inserts, updates and deletes (i.e. :term:`DML`) are achieved by passing
+SQL expression objects representing these statements along with dictionaries
+that represent parameters to be used with each statement.
+
+The ORM builds upon Core to provide a means of working with a domain object
+model mapped to a database schema. When using the ORM, SQL statements are
+constructed in mostly the same way as when using Core, however the task of DML,
+which here refers to the persistence of business objects in a database, is
+automated using a pattern called :term:`unit of work`, which translates changes
+in state against mutable objects into INSERT, UPDATE and DELETE constructs
+which are then invoked in terms of those objects. SELECT statements are also
+augmented by ORM-specific automations and object-centric querying capabilities.
+
+Whereas working with Core and the SQL Expression language presents a
+schema-centric view of the database, along with a programming paradigm that is
+oriented around immutability, the ORM builds on top of this a domain-centric
+view of the database with a programming paradigm that is more explcitly
+object-oriented and reliant upon mutability.  Since a relational database is
+itself a mutable service, the difference is that Core/SQL Expression language
+is command oriented whereas the ORM is state oriented.
+
 
 .. _doc_overview:
 
 Documentation Overview
 ======================
 
-The documentation is separated into three sections: :ref:`orm_toplevel`,
-:ref:`core_toplevel`, and :ref:`dialect_toplevel`.
+The documentation is separated into four sections:
 
-In :ref:`orm_toplevel`, the Object Relational Mapper is introduced and fully
-described. New users should begin with the :ref:`ormtutorial_toplevel`. If you
-want to work with higher-level SQL which is constructed automatically for you,
-as well as management of Python objects, proceed to this tutorial.
+* :ref:`unified_tutorial` - this all-new tutorial for the 1.4/2.0 series of
+  SQLAlchemy introduces the entire library holistically, starting from a
+  description of Core and working more and more towards ORM-specific concepts.
+  New users, as well as users coming from :term:`1.x style`, who wish to work
+  in :term:`2.0 style` should start here.
 
-In :ref:`core_toplevel`, the breadth of SQLAlchemy's SQL and database
-integration and description services are documented, the core of which is the
-SQL Expression language. The SQL Expression Language is a toolkit all its own,
-independent of the ORM package, which can be used to construct manipulable SQL
-expressions which can be programmatically constructed, modified, and executed,
-returning cursor-like result sets. In contrast to the ORM's domain-centric
-mode of usage, the expression language provides a schema-centric usage
-paradigm. New users should begin here with :ref:`sqlexpression_toplevel`.
-SQLAlchemy engine, connection, and pooling services are also described in
-:ref:`core_toplevel`.
+* :ref:`orm_toplevel` - In this section, reference documentation for the ORM is
+  presented; this section also includes the now-legacy
+  :ref:`ormtutorial_toplevel`.
 
-In :ref:`dialect_toplevel`, reference documentation for all provided
-database and DBAPI backends is provided.
+* :ref:`core_toplevel` - Here, reference documentation for
+  everything else within Core is presented; section also includes the legacy
+  :ref:`sqlexpression_toplevel`. SQLAlchemy engine, connection, and pooling
+  services are also described here.
+
+* :ref:`dialect_toplevel` - Provides reference documentation
+  for all :term:`dialect` implementations, including :term:`DBAPI` specifics.
+
+
+
+
 
 Code Examples
 =============
@@ -58,7 +86,7 @@ applications is at :ref:`examples_toplevel`.
 
 There is also a wide variety of examples involving both core SQLAlchemy
 constructs as well as the ORM on the wiki.  See
-`Theatrum Chemicum <http://www.sqlalchemy.org/trac/wiki/UsageRecipes>`_.
+`Theatrum Chemicum <https://www.sqlalchemy.org/trac/wiki/UsageRecipes>`_.
 
 .. _installation:
 
@@ -71,26 +99,33 @@ Supported Platforms
 SQLAlchemy has been tested against the following platforms:
 
 * cPython 2.7
-* cPython 3.4 and higher
-* `PyPy <http://pypy.org/>`_ 2.1 or greater
+* cPython 3.6 and higher
+* `PyPy <https://pypy.org/>`_ 2.1 or greater
 
-.. versionchanged:: 1.2
-   Python 2.7 is now the minimum Python version supported.
+.. versionchanged:: 1.4
+   Within the Python 3 series, 3.6 is now the minimum Python 3 version supported.
 
-.. versionchanged:: 1.3
-   Within the Python 3 series, 3.4 is now the minimum Python 3 version supported.
+   .. seealso::
 
-Platforms that don't currently have support include Jython and IronPython.
-Jython has been supported in the past and may be supported in future
-releases as well, depending on the state of Jython itself.
+      :ref:`change_5634`
+
+AsyncIO Support
+----------------
+
+SQLAlchemy's ``asyncio`` support depends upon the
+`greenlet <https://pypi.org/project/greenlet/>`_ project.    This dependency
+will be installed by default on common machine platforms, however is not
+supported on every architecture and also may not install by default on
+less common architectures.  See the section :ref:`asyncio_install` for
+additional details on ensuring asyncio support is present.
 
 Supported Installation Methods
 -------------------------------
 
 SQLAlchemy installation is via standard Python methodologies that are
-based on `setuptools <http://pypi.python.org/pypi/setuptools/>`_, either
+based on `setuptools <https://pypi.org/project/setuptools/>`_, either
 by referring to ``setup.py`` directly or by using
-`pip <http://pypi.python.org/pypi/pip/>`_ or other setuptools-compatible
+`pip <https://pypi.org/project/pip/>`_ or other setuptools-compatible
 approaches.
 
 .. versionchanged:: 1.1 setuptools is now required by the setup.py file;
@@ -105,9 +140,9 @@ downloaded from PyPI and installed in one step::
     pip install SQLAlchemy
 
 This command will download the latest **released** version of SQLAlchemy from the `Python
-Cheese Shop <http://pypi.python.org/pypi/SQLAlchemy>`_ and install it to your system.
+Cheese Shop <https://pypi.org/project/SQLAlchemy>`_ and install it to your system.
 
-In order to install the latest **prerelease** version, such as ``1.3.0b1``,
+In order to install the latest **prerelease** version, such as ``1.4.0b1``,
 pip requires that the ``--pre`` flag be used::
 
     pip install --pre SQLAlchemy
@@ -150,7 +185,6 @@ mechanism::
    setuptools.
 
 
-
 Installing a Database API
 ----------------------------------
 
@@ -162,19 +196,25 @@ the available DBAPIs for each database, including external links.
 Checking the Installed SQLAlchemy Version
 ------------------------------------------
 
-This documentation covers SQLAlchemy version 1.3. If you're working on a
+This documentation covers SQLAlchemy version 1.4. If you're working on a
 system that already has SQLAlchemy installed, check the version from your
 Python prompt like this:
 
 .. sourcecode:: python+sql
 
      >>> import sqlalchemy
-     >>> sqlalchemy.__version__ # doctest: +SKIP
-     1.3.0
+     >>> sqlalchemy.__version__  # doctest: +SKIP
+     1.4.0
+
+Next Steps
+----------
+
+With SQLAlchemy installed, new and old users alike can
+:ref:`Proceed to the SQLAlchemy Tutorial <unified_tutorial>`.
 
 .. _migration:
 
-1.2 to 1.3 Migration
+1.3 to 1.4 Migration
 =====================
 
-Notes on what's changed from 1.2 to 1.3 is available here at :doc:`changelog/migration_13`.
+Notes on what's changed from 1.3 to 1.4 is available here at :doc:`changelog/migration_14`.

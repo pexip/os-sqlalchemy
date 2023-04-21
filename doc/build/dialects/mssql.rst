@@ -19,15 +19,45 @@ As with all SQLAlchemy dialects, all UPPERCASE types that are known to be
 valid with SQL server are importable from the top level dialect, whether
 they originate from :mod:`sqlalchemy.types` or from the local dialect::
 
-    from sqlalchemy.dialects.mssql import \
-        BIGINT, BINARY, BIT, CHAR, DATE, DATETIME, DATETIME2, \
-        DATETIMEOFFSET, DECIMAL, FLOAT, IMAGE, INTEGER, MONEY, \
-        NCHAR, NTEXT, NUMERIC, NVARCHAR, REAL, SMALLDATETIME, \
-        SMALLINT, SMALLMONEY, SQL_VARIANT, TEXT, TIME, \
-        TIMESTAMP, TINYINT, UNIQUEIDENTIFIER, VARBINARY, VARCHAR
+    from sqlalchemy.dialects.mssql import (
+        BIGINT,
+        BINARY,
+        BIT,
+        CHAR,
+        DATE,
+        DATETIME,
+        DATETIME2,
+        DATETIMEOFFSET,
+        DECIMAL,
+        FLOAT,
+        IMAGE,
+        INTEGER,
+        JSON,
+        MONEY,
+        NCHAR,
+        NTEXT,
+        NUMERIC,
+        NVARCHAR,
+        REAL,
+        SMALLDATETIME,
+        SMALLINT,
+        SMALLMONEY,
+        SQL_VARIANT,
+        TEXT,
+        TIME,
+        TIMESTAMP,
+        TINYINT,
+        UNIQUEIDENTIFIER,
+        VARBINARY,
+        VARCHAR,
+    )
 
 Types which are specific to SQL Server, or have SQL Server-specific
 construction arguments, are as follows:
+
+.. note: where :noindex: is used, indicates a type that is not redefined
+   in the dialect module, just imported from sqltypes.  this avoids warnings
+   in the sphinx build
 
 .. currentmodule:: sqlalchemy.dialects.mssql
 
@@ -37,6 +67,7 @@ construction arguments, are as follows:
 
 .. autoclass:: CHAR
    :members: __init__
+   :noindex:
 
 
 .. autoclass:: DATETIME2
@@ -51,12 +82,17 @@ construction arguments, are as follows:
    :members: __init__
 
 
+.. autoclass:: JSON
+   :members: __init__
+
+
 .. autoclass:: MONEY
    :members: __init__
 
 
 .. autoclass:: NCHAR
    :members: __init__
+   :noindex:
 
 
 .. autoclass:: NTEXT
@@ -65,7 +101,7 @@ construction arguments, are as follows:
 
 .. autoclass:: NVARCHAR
    :members: __init__
-
+   :noindex:
 
 .. autoclass:: REAL
    :members: __init__
@@ -87,7 +123,7 @@ construction arguments, are as follows:
 
 .. autoclass:: TEXT
    :members: __init__
-
+   :noindex:
 
 .. autoclass:: TIME
    :members: __init__
@@ -104,8 +140,13 @@ construction arguments, are as follows:
    :members: __init__
 
 
+.. autoclass:: VARBINARY
+   :members: __init__
+   :noindex:
+
 .. autoclass:: VARCHAR
    :members: __init__
+   :noindex:
 
 
 .. autoclass:: XML
@@ -123,13 +164,4 @@ mxODBC
 pymssql
 -------
 .. automodule:: sqlalchemy.dialects.mssql.pymssql
-
-zxjdbc
-------
-
-.. automodule:: sqlalchemy.dialects.mssql.zxjdbc
-
-AdoDBAPI
---------
-.. automodule:: sqlalchemy.dialects.mssql.adodbapi
 

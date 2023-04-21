@@ -1,7 +1,24 @@
+
 .. currentmodule:: sqlalchemy.orm
 
 Class Mapping API
 =================
+
+.. autoclass:: registry
+    :members:
+
+.. autofunction:: declarative_base
+
+.. autofunction:: declarative_mixin
+
+.. autofunction:: as_declarative
+
+.. autoclass:: declared_attr
+    :members:
+
+.. autofunction:: has_inherited_table
+
+.. autofunction:: synonym_for
 
 .. autofunction:: mapper
 
@@ -16,6 +33,8 @@ Class Mapping API
 .. autofunction:: sqlalchemy.orm.util.identity_key
 
 .. autofunction:: polymorphic_union
+
+.. autofunction:: reconstructor
 
 .. autoclass:: Mapper
    :members:

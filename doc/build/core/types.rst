@@ -1,10 +1,10 @@
 .. _types_toplevel:
 
-Column and Data Types
+SQL Datatype Objects
 =====================
 
 .. toctree::
-    :maxdepth: 2
+    :maxdepth: 3
 
     type_basics
     custom_types

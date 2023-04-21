@@ -3,153 +3,34 @@
 import copy
 import datetime
 import inspect
+import sys
 
 from sqlalchemy import exc
 from sqlalchemy import sql
 from sqlalchemy import testing
 from sqlalchemy import util
 from sqlalchemy.sql import column
+from sqlalchemy.sql.base import DedupeColumnCollection
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
-from sqlalchemy.testing import fails_if
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing import ne_
 from sqlalchemy.testing.util import gc_collect
 from sqlalchemy.testing.util import picklers
+from sqlalchemy.util import _preloaded
 from sqlalchemy.util import classproperty
 from sqlalchemy.util import compat
 from sqlalchemy.util import get_callable_argspec
 from sqlalchemy.util import langhelpers
 from sqlalchemy.util import timezone
 from sqlalchemy.util import WeakSequence
-
-
-class _KeyedTupleTest(object):
-    def _fixture(self, values, labels):
-        raise NotImplementedError()
-
-    def test_empty(self):
-        keyed_tuple = self._fixture([], [])
-        eq_(str(keyed_tuple), "()")
-        eq_(len(keyed_tuple), 0)
-
-        eq_(list(keyed_tuple.keys()), [])
-        eq_(keyed_tuple._fields, ())
-        eq_(keyed_tuple._asdict(), {})
-
-    def test_values_but_no_labels(self):
-        keyed_tuple = self._fixture([1, 2], [])
-        eq_(str(keyed_tuple), "(1, 2)")
-        eq_(len(keyed_tuple), 2)
-
-        eq_(list(keyed_tuple.keys()), [])
-        eq_(keyed_tuple._fields, ())
-        eq_(keyed_tuple._asdict(), {})
-
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-
-    def test_basic_creation(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(str(keyed_tuple), "(1, 2)")
-        eq_(list(keyed_tuple.keys()), ["a", "b"])
-        eq_(keyed_tuple._fields, ("a", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 2})
-
-    def test_basic_index_access(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-
-        def should_raise():
-            keyed_tuple[2]
-
-        assert_raises(IndexError, should_raise)
-
-    def test_basic_attribute_access(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 2)
-
-        def should_raise():
-            keyed_tuple.c
-
-        assert_raises(AttributeError, should_raise)
-
-    def test_none_label(self):
-        keyed_tuple = self._fixture([1, 2, 3], ["a", None, "b"])
-        eq_(str(keyed_tuple), "(1, 2, 3)")
-
-        eq_(list(keyed_tuple.keys()), ["a", "b"])
-        eq_(keyed_tuple._fields, ("a", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 3})
-
-        # attribute access: can't get at value 2
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 3)
-
-        # index access: can get at value 2
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-        eq_(keyed_tuple[2], 3)
-
-    def test_duplicate_labels(self):
-        keyed_tuple = self._fixture([1, 2, 3], ["a", "b", "b"])
-        eq_(str(keyed_tuple), "(1, 2, 3)")
-
-        eq_(list(keyed_tuple.keys()), ["a", "b", "b"])
-        eq_(keyed_tuple._fields, ("a", "b", "b"))
-        eq_(keyed_tuple._asdict(), {"a": 1, "b": 3})
-
-        # attribute access: can't get at value 2
-        eq_(keyed_tuple.a, 1)
-        eq_(keyed_tuple.b, 3)
-
-        # index access: can get at value 2
-        eq_(keyed_tuple[0], 1)
-        eq_(keyed_tuple[1], 2)
-        eq_(keyed_tuple[2], 3)
-
-    def test_immutable(self):
-        keyed_tuple = self._fixture([1, 2], ["a", "b"])
-        eq_(str(keyed_tuple), "(1, 2)")
-
-        eq_(keyed_tuple.a, 1)
-
-        assert_raises(AttributeError, setattr, keyed_tuple, "a", 5)
-
-        def should_raise():
-            keyed_tuple[0] = 100
-
-        assert_raises(TypeError, should_raise)
-
-    def test_serialize(self):
-
-        keyed_tuple = self._fixture([1, 2, 3], ["a", None, "b"])
-
-        for loads, dumps in picklers():
-            kt = loads(dumps(keyed_tuple))
-
-            eq_(str(kt), "(1, 2, 3)")
-
-            eq_(list(kt.keys()), ["a", "b"])
-            eq_(kt._fields, ("a", "b"))
-            eq_(kt._asdict(), {"a": 1, "b": 3})
-
-
-class KeyedTupleTest(_KeyedTupleTest, fixtures.TestBase):
-    def _fixture(self, values, labels):
-        return util.KeyedTuple(values, labels)
-
-
-class LWKeyedTupleTest(_KeyedTupleTest, fixtures.TestBase):
-    def _fixture(self, values, labels):
-        return util.lightweight_named_tuple("n", labels)(values)
 
 
 class WeakSequenceTest(fixtures.TestBase):
@@ -250,6 +131,33 @@ class OrderedDictTest(fixtures.TestBase):
         o3 = copy.copy(o)
         eq_(list(o3.keys()), list(o.keys()))
 
+    def test_no_sort_legacy_dictionary(self):
+        d1 = {"c": 1, "b": 2, "a": 3}
+
+        if testing.requires.python37.enabled:
+            util.sort_dictionary(d1)
+            eq_(list(d1), ["a", "b", "c"])
+        else:
+            assert_raises(AttributeError, util.sort_dictionary, d1)
+
+    def test_sort_dictionary(self):
+        o = util.OrderedDict()
+
+        o["za"] = 1
+        o["az"] = 2
+        o["cc"] = 3
+
+        eq_(
+            list(o),
+            ["za", "az", "cc"],
+        )
+
+        util.sort_dictionary(o)
+        eq_(list(o), ["az", "cc", "za"])
+
+        util.sort_dictionary(o, lambda key: key[1])
+        eq_(list(o), ["za", "cc", "az"])
+
 
 class OrderedSetTest(fixtures.TestBase):
     def test_mutators_against_iter(self):
@@ -261,11 +169,109 @@ class OrderedSetTest(fixtures.TestBase):
         eq_(o.union(iter([3, 4, 6])), util.OrderedSet([2, 3, 4, 5, 6]))
 
 
-class FrozenDictTest(fixtures.TestBase):
+class ImmutableDictTest(fixtures.TestBase):
+    def test_union_no_change(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union({})
+
+        is_(d2, d)
+
+    def test_merge_with_no_change(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with({}, None)
+
+        eq_(d2, {1: 2, 3: 4})
+        is_(d2, d)
+
+    def test_merge_with_dicts(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with({3: 5, 7: 12}, {9: 18, 15: 25})
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12, 9: 18, 15: 25})
+        assert isinstance(d2, util.immutabledict)
+
+        d3 = d.merge_with({17: 42})
+
+        eq_(d3, {1: 2, 3: 4, 17: 42})
+
+    def test_merge_with_tuples(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.merge_with([(3, 5), (7, 12)], [(9, 18), (15, 25)])
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12, 9: 18, 15: 25})
+
+    def test_union_dictionary(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union({3: 5, 7: 12})
+        assert isinstance(d2, util.immutabledict)
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12})
+
+    def _dont_test_union_kw(self):
+        d = util.immutabledict({"a": "b", "c": "d"})
+
+        d2 = d.union(e="f", g="h")
+        assert isinstance(d2, util.immutabledict)
+
+        eq_(d, {"a": "b", "c": "d"})
+        eq_(d2, {"a": "b", "c": "d", "e": "f", "g": "h"})
+
+    def test_union_tuples(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        d2 = d.union([(3, 5), (7, 12)])
+
+        eq_(d, {1: 2, 3: 4})
+        eq_(d2, {1: 2, 3: 5, 7: 12})
+
+    def test_keys(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.keys()), {1, 3})
+
+    def test_values(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.values()), {2, 4})
+
+    def test_items(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        eq_(set(d.items()), {(1, 2), (3, 4)})
+
+    def test_contains(self):
+        d = util.immutabledict({1: 2, 3: 4})
+
+        assert 1 in d
+        assert "foo" not in d
+
+    def test_rich_compare(self):
+        d = util.immutabledict({1: 2, 3: 4})
+        d2 = util.immutabledict({1: 2, 3: 4})
+        d3 = util.immutabledict({5: 12})
+        d4 = {5: 12}
+
+        eq_(d, d2)
+        ne_(d, d3)
+        ne_(d, d4)
+        eq_(d3, d4)
+
     def test_serialize(self):
         d = util.immutabledict({1: 2, 3: 4})
         for loads, dumps in picklers():
-            print(loads(dumps(d)))
+            d2 = loads(dumps(d))
+
+            eq_(d2, {1: 2, 3: 4})
+
+            assert isinstance(d2, util.immutabledict)
 
 
 class MemoizedAttrTest(fixtures.TestBase):
@@ -411,7 +417,8 @@ class WrapCallableTest(fixtures.TestBase):
             lambda: my_functools_default(), my_functools_default
         )
         eq_(c.__name__, "partial")
-        eq_(c.__doc__, my_functools_default.__call__.__doc__)
+        if not compat.pypy:  # pypy fails this check
+            eq_(c.__doc__, my_functools_default.__call__.__doc__)
         eq_(c(), 5)
 
 
@@ -442,37 +449,322 @@ class ToListTest(fixtures.TestBase):
         )
 
 
-class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
+class ColumnCollectionCommon(testing.AssertsCompiledSQL):
+    def _assert_collection_integrity(self, coll):
+        eq_(coll._colset, set(c for k, c in coll._collection))
+        d = {}
+        for k, col in coll._collection:
+            d.setdefault(k, col)
+        d.update({idx: col for idx, (k, col) in enumerate(coll._collection)})
+        eq_(coll._index, d)
+
+    def test_keys(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        c2.key = "foo"
+        cc = self._column_collection(
+            columns=[("c1", c1), ("foo", c2), ("c3", c3)]
+        )
+        keys = cc.keys()
+        eq_(keys, ["c1", "foo", "c3"])
+        ne_(id(keys), id(cc.keys()))
+
+        ci = cc.as_immutable()
+        eq_(ci.keys(), ["c1", "foo", "c3"])
+
+    def test_values(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        c2.key = "foo"
+        cc = self._column_collection(
+            columns=[("c1", c1), ("foo", c2), ("c3", c3)]
+        )
+        val = cc.values()
+        eq_(val, [c1, c2, c3])
+        ne_(id(val), id(cc.values()))
+
+        ci = cc.as_immutable()
+        eq_(ci.values(), [c1, c2, c3])
+
+    def test_items(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        c2.key = "foo"
+        cc = self._column_collection(
+            columns=[("c1", c1), ("foo", c2), ("c3", c3)]
+        )
+        items = cc.items()
+        eq_(items, [("c1", c1), ("foo", c2), ("c3", c3)])
+        ne_(id(items), id(cc.items()))
+
+        ci = cc.as_immutable()
+        eq_(ci.items(), [("c1", c1), ("foo", c2), ("c3", c3)])
+
+    def test_key_index_error(self):
+        cc = self._column_collection(
+            columns=[
+                ("col1", sql.column("col1")),
+                ("col2", sql.column("col2")),
+            ]
+        )
+        assert_raises(KeyError, lambda: cc["foo"])
+        assert_raises(KeyError, lambda: cc[object()])
+        assert_raises(IndexError, lambda: cc[5])
+
+    def test_contains_column(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        cc = self._column_collection(columns=[("c1", c1), ("c2", c2)])
+
+        is_true(cc.contains_column(c1))
+        is_false(cc.contains_column(c3))
+
+    def test_contains_column_not_column(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        cc = self._column_collection(columns=[("c1", c1), ("c2", c2)])
+
+        is_false(cc.contains_column(c3 == 2))
+
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            "contains_column cannot be used with string arguments",
+        ):
+            cc.contains_column("c1")
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            "contains_column cannot be used with string arguments",
+        ):
+            cc.contains_column("foo")
+
     def test_in(self):
-        cc = sql.ColumnCollection()
-        cc.add(sql.column("col1"))
-        cc.add(sql.column("col2"))
-        cc.add(sql.column("col3"))
+        col1 = sql.column("col1")
+        cc = self._column_collection(
+            columns=[
+                ("col1", col1),
+                ("col2", sql.column("col2")),
+                ("col3", sql.column("col3")),
+            ]
+        )
         assert "col1" in cc
         assert "col2" in cc
 
-        try:
-            cc["col1"] in cc
-            assert False
-        except exc.ArgumentError as e:
-            eq_(str(e), "__contains__ requires a string argument")
+        assert_raises_message(
+            exc.ArgumentError,
+            "__contains__ requires a string argument",
+            lambda: col1 in cc,
+        )
 
     def test_compare(self):
-        cc1 = sql.ColumnCollection()
-        cc2 = sql.ColumnCollection()
-        cc3 = sql.ColumnCollection()
         c1 = sql.column("col1")
         c2 = c1.label("col2")
         c3 = sql.column("col3")
-        cc1.add(c1)
-        cc2.add(c2)
-        cc3.add(c3)
-        assert (cc1 == cc2).compare(c1 == c2)
-        assert not (cc1 == cc3).compare(c2 == c3)
 
-    @testing.emits_warning("Column ")
+        is_true(
+            self._column_collection(
+                [("col1", c1), ("col2", c2), ("col3", c3)]
+            ).compare(
+                self._column_collection(
+                    [("col1", c1), ("col2", c2), ("col3", c3)]
+                )
+            )
+        )
+        is_false(
+            self._column_collection(
+                [("col1", c1), ("col2", c2), ("col3", c3)]
+            ).compare(self._column_collection([("col1", c1), ("col2", c2)]))
+        )
+
+    def test_str(self):
+        c1 = sql.column("col1")
+        c2 = c1.label("col2")
+        c3 = sql.column("col3")
+        cc = self._column_collection(
+            [("col1", c1), ("col2", c2), ("col3", c3)]
+        )
+
+        eq_(str(cc), "%s(%s, %s, %s)" % (type(cc).__name__, c1, c2, c3))
+        eq_(repr(cc), object.__repr__(cc))
+
+
+class ColumnCollectionTest(ColumnCollectionCommon, fixtures.TestBase):
+    def _column_collection(self, columns=None):
+        return sql.ColumnCollection(columns=columns)
+
+    def test_separate_key_all_cols(self):
+        c1, c2 = sql.column("col1"), sql.column("col2")
+        cc = self._column_collection([("kcol1", c1), ("kcol2", c2)])
+        eq_(cc._all_columns, [c1, c2])
+
+    def test_separate_key_get(self):
+        c1, c2 = sql.column("col1"), sql.column("col2")
+        cc = self._column_collection([("kcol1", c1), ("kcol2", c2)])
+        is_(cc.kcol1, c1)
+        is_(cc.kcol2, c2)
+
+    def test_separate_key_in(self):
+        cc = self._column_collection(
+            columns=[
+                ("kcol1", sql.column("col1")),
+                ("kcol2", sql.column("col2")),
+                ("kcol3", sql.column("col3")),
+            ]
+        )
+        assert "col1" not in cc
+        assert "kcol2" in cc
+
     def test_dupes_add(self):
+
+        c1, c2a, c3, c2b = (
+            column("c1"),
+            column("c2"),
+            column("c3"),
+            column("c2"),
+        )
+
         cc = sql.ColumnCollection()
+
+        cc.add(c1)
+        cc.add(c2a, "c2")
+        cc.add(c3)
+        cc.add(c2b)
+
+        eq_(cc._all_columns, [c1, c2a, c3, c2b])
+
+        eq_(list(cc), [c1, c2a, c3, c2b])
+        eq_(cc.keys(), ["c1", "c2", "c3", "c2"])
+
+        assert cc.contains_column(c2a)
+        assert cc.contains_column(c2b)
+
+        # this is deterministic
+        is_(cc["c2"], c2a)
+
+        self._assert_collection_integrity(cc)
+
+        ci = cc.as_immutable()
+        eq_(ci._all_columns, [c1, c2a, c3, c2b])
+        eq_(list(ci), [c1, c2a, c3, c2b])
+        eq_(ci.keys(), ["c1", "c2", "c3", "c2"])
+
+    def test_dupes_construct(self):
+
+        c1, c2a, c3, c2b = (
+            column("c1"),
+            column("c2"),
+            column("c3"),
+            column("c2"),
+        )
+
+        cc = sql.ColumnCollection(
+            columns=[("c1", c1), ("c2", c2a), ("c3", c3), ("c2", c2b)]
+        )
+
+        eq_(cc._all_columns, [c1, c2a, c3, c2b])
+
+        eq_(list(cc), [c1, c2a, c3, c2b])
+        eq_(cc.keys(), ["c1", "c2", "c3", "c2"])
+
+        assert cc.contains_column(c2a)
+        assert cc.contains_column(c2b)
+
+        # this is deterministic
+        is_(cc["c2"], c2a)
+
+        self._assert_collection_integrity(cc)
+
+        ci = cc.as_immutable()
+        eq_(ci._all_columns, [c1, c2a, c3, c2b])
+        eq_(list(ci), [c1, c2a, c3, c2b])
+        eq_(ci.keys(), ["c1", "c2", "c3", "c2"])
+
+    def test_identical_dupe_construct(self):
+
+        c1, c2, c3 = (column("c1"), column("c2"), column("c3"))
+
+        cc = sql.ColumnCollection(
+            columns=[("c1", c1), ("c2", c2), ("c3", c3), ("c2", c2)]
+        )
+
+        eq_(cc._all_columns, [c1, c2, c3, c2])
+
+        # for iter, c2a is replaced by c2b, ordering
+        # is maintained in that way.  ideally, iter would be
+        # the same as the "_all_columns" collection.
+        eq_(list(cc), [c1, c2, c3, c2])
+
+        assert cc.contains_column(c2)
+        self._assert_collection_integrity(cc)
+
+        ci = cc.as_immutable()
+        eq_(ci._all_columns, [c1, c2, c3, c2])
+        eq_(list(ci), [c1, c2, c3, c2])
+
+
+class DedupeColumnCollectionTest(ColumnCollectionCommon, fixtures.TestBase):
+    def _column_collection(self, columns=None):
+        return DedupeColumnCollection(columns=columns)
+
+    def test_separate_key_cols(self):
+        c1, c2 = sql.column("col1"), sql.column("col2")
+        assert_raises_message(
+            exc.ArgumentError,
+            "DedupeColumnCollection requires columns be under "
+            "the same key as their .key",
+            self._column_collection,
+            [("kcol1", c1), ("kcol2", c2)],
+        )
+
+        cc = self._column_collection()
+        assert_raises_message(
+            exc.ArgumentError,
+            "DedupeColumnCollection requires columns be under "
+            "the same key as their .key",
+            cc.add,
+            c1,
+            "kcol1",
+        )
+
+    def test_pickle_w_mutation(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+
+        c2.key = "foo"
+
+        cc = self._column_collection(columns=[("c1", c1), ("foo", c2)])
+        ci = cc.as_immutable()
+
+        d = {"cc": cc, "ci": ci}
+
+        for loads, dumps in picklers():
+            dp = loads(dumps(d))
+
+            cp = dp["cc"]
+            cpi = dp["ci"]
+            self._assert_collection_integrity(cp)
+            self._assert_collection_integrity(cpi)
+
+            assert cp._colset is cpi._colset
+            assert cp._index is cpi._index
+            assert cp._collection is cpi._collection
+
+            cp.add(c3)
+
+            eq_(cp.keys(), ["c1", "foo", "c3"])
+            eq_(cpi.keys(), ["c1", "foo", "c3"])
+
+            assert cp.contains_column(c3)
+            assert cpi.contains_column(c3)
+
+    def test_keys_after_replace(self):
+        c1, c2, c3 = sql.column("c1"), sql.column("c2"), sql.column("c3")
+        c2.key = "foo"
+        cc = self._column_collection(
+            columns=[("c1", c1), ("foo", c2), ("c3", c3)]
+        )
+        eq_(cc.keys(), ["c1", "foo", "c3"])
+
+        c4 = sql.column("c3")
+        cc.replace(c4)
+        eq_(cc.keys(), ["c1", "foo", "c3"])
+        self._assert_collection_integrity(cc)
+
+    def test_dupes_add_dedupe(self):
+        cc = DedupeColumnCollection()
 
         c1, c2a, c3, c2b = (
             column("c1"),
@@ -486,22 +778,37 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
         cc.add(c3)
         cc.add(c2b)
 
-        eq_(cc._all_columns, [c1, c2a, c3, c2b])
+        eq_(cc._all_columns, [c1, c2b, c3])
 
-        # for iter, c2a is replaced by c2b, ordering
-        # is maintained in that way.  ideally, iter would be
-        # the same as the "_all_columns" collection.
         eq_(list(cc), [c1, c2b, c3])
 
-        assert cc.contains_column(c2a)
+        assert not cc.contains_column(c2a)
         assert cc.contains_column(c2b)
+        self._assert_collection_integrity(cc)
 
-        ci = cc.as_immutable()
-        eq_(ci._all_columns, [c1, c2a, c3, c2b])
-        eq_(list(ci), [c1, c2b, c3])
+    def test_dupes_construct_dedupe(self):
 
-    def test_identical_dupe_add(self):
-        cc = sql.ColumnCollection()
+        c1, c2a, c3, c2b = (
+            column("c1"),
+            column("c2"),
+            column("c3"),
+            column("c2"),
+        )
+
+        cc = DedupeColumnCollection(
+            columns=[("c1", c1), ("c2", c2a), ("c3", c3), ("c2", c2b)]
+        )
+
+        eq_(cc._all_columns, [c1, c2b, c3])
+
+        eq_(list(cc), [c1, c2b, c3])
+
+        assert not cc.contains_column(c2a)
+        assert cc.contains_column(c2b)
+        self._assert_collection_integrity(cc)
+
+    def test_identical_dupe_add_dedupes(self):
+        cc = DedupeColumnCollection()
 
         c1, c2, c3 = (column("c1"), column("c2"), column("c3"))
 
@@ -512,9 +819,27 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
 
         eq_(cc._all_columns, [c1, c2, c3])
 
-        self.assert_compile(
-            cc == [c1, c2, c3], "c1 = c1 AND c2 = c2 AND c3 = c3"
+        # for iter, c2a is replaced by c2b, ordering
+        # is maintained in that way.  ideally, iter would be
+        # the same as the "_all_columns" collection.
+        eq_(list(cc), [c1, c2, c3])
+
+        assert cc.contains_column(c2)
+        self._assert_collection_integrity(cc)
+
+        ci = cc.as_immutable()
+        eq_(ci._all_columns, [c1, c2, c3])
+        eq_(list(ci), [c1, c2, c3])
+
+    def test_identical_dupe_construct_dedupes(self):
+
+        c1, c2, c3 = (column("c1"), column("c2"), column("c3"))
+
+        cc = DedupeColumnCollection(
+            columns=[("c1", c1), ("c2", c2), ("c3", c3), ("c2", c2)]
         )
+
+        eq_(cc._all_columns, [c1, c2, c3])
 
         # for iter, c2a is replaced by c2b, ordering
         # is maintained in that way.  ideally, iter would be
@@ -522,17 +847,15 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
         eq_(list(cc), [c1, c2, c3])
 
         assert cc.contains_column(c2)
+        self._assert_collection_integrity(cc)
 
         ci = cc.as_immutable()
         eq_(ci._all_columns, [c1, c2, c3])
         eq_(list(ci), [c1, c2, c3])
 
-        self.assert_compile(
-            ci == [c1, c2, c3], "c1 = c1 AND c2 = c2 AND c3 = c3"
-        )
-
     def test_replace(self):
-        cc = sql.ColumnCollection()
+        cc = DedupeColumnCollection()
+        ci = cc.as_immutable()
 
         c1, c2a, c3, c2b = (
             column("c1"),
@@ -549,16 +872,49 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
 
         eq_(cc._all_columns, [c1, c2b, c3])
         eq_(list(cc), [c1, c2b, c3])
+        is_(cc[1], c2b)
+
+        assert not cc.contains_column(c2a)
+        assert cc.contains_column(c2b)
+        self._assert_collection_integrity(cc)
+
+        eq_(ci._all_columns, [c1, c2b, c3])
+        eq_(list(ci), [c1, c2b, c3])
+        is_(ci[1], c2b)
+
+    def test_replace_key_matches_name_of_another(self):
+        cc = DedupeColumnCollection()
+        ci = cc.as_immutable()
+
+        c1, c2a, c3, c2b = (
+            column("c1"),
+            column("c2"),
+            column("c3"),
+            column("c4"),
+        )
+        c2b.key = "c2"
+
+        cc.add(c1)
+        cc.add(c2a)
+        cc.add(c3)
+
+        cc.replace(c2b)
+
+        eq_(cc._all_columns, [c1, c2b, c3])
+        eq_(list(cc), [c1, c2b, c3])
+        is_(cc[1], c2b)
+        self._assert_collection_integrity(cc)
 
         assert not cc.contains_column(c2a)
         assert cc.contains_column(c2b)
 
-        ci = cc.as_immutable()
         eq_(ci._all_columns, [c1, c2b, c3])
         eq_(list(ci), [c1, c2b, c3])
+        is_(ci[1], c2b)
 
     def test_replace_key_matches(self):
-        cc = sql.ColumnCollection()
+        cc = DedupeColumnCollection()
+        ci = cc.as_immutable()
 
         c1, c2a, c3, c2b = (
             column("c1"),
@@ -576,16 +932,21 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
 
         assert not cc.contains_column(c2a)
         assert cc.contains_column(c2b)
+        is_(cc[1], c2b)
+        assert_raises(IndexError, lambda: cc[3])
+        self._assert_collection_integrity(cc)
 
         eq_(cc._all_columns, [c1, c2b, c3])
         eq_(list(cc), [c1, c2b, c3])
 
-        ci = cc.as_immutable()
         eq_(ci._all_columns, [c1, c2b, c3])
         eq_(list(ci), [c1, c2b, c3])
+        is_(ci[1], c2b)
+        assert_raises(IndexError, lambda: ci[3])
 
     def test_replace_name_matches(self):
-        cc = sql.ColumnCollection()
+        cc = DedupeColumnCollection()
+        ci = cc.as_immutable()
 
         c1, c2a, c3, c2b = (
             column("c1"),
@@ -605,14 +966,19 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
         assert cc.contains_column(c2b)
 
         eq_(cc._all_columns, [c1, c2b, c3])
-        eq_(list(cc), [c1, c3, c2b])
+        eq_(list(cc), [c1, c2b, c3])
+        eq_(len(cc), 3)
+        is_(cc[1], c2b)
+        self._assert_collection_integrity(cc)
 
-        ci = cc.as_immutable()
         eq_(ci._all_columns, [c1, c2b, c3])
-        eq_(list(ci), [c1, c3, c2b])
+        eq_(list(ci), [c1, c2b, c3])
+        eq_(len(ci), 3)
+        is_(ci[1], c2b)
 
     def test_replace_no_match(self):
-        cc = sql.ColumnCollection()
+        cc = DedupeColumnCollection()
+        ci = cc.as_immutable()
 
         c1, c2, c3, c4 = column("c1"), column("c2"), column("c3"), column("c4")
         c4.key = "X"
@@ -628,42 +994,102 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
 
         eq_(cc._all_columns, [c1, c2, c3, c4])
         eq_(list(cc), [c1, c2, c3, c4])
+        is_(cc[3], c4)
+        self._assert_collection_integrity(cc)
 
-        ci = cc.as_immutable()
         eq_(ci._all_columns, [c1, c2, c3, c4])
         eq_(list(ci), [c1, c2, c3, c4])
+        is_(ci[3], c4)
+
+    def test_replace_switch_key_name(self):
+        c1 = column("id")
+        c2 = column("street")
+        c3 = column("user_id")
+
+        cc = DedupeColumnCollection(
+            columns=[("id", c1), ("street", c2), ("user_id", c3)]
+        )
+
+        # for replace col with different key than name, it necessarily
+        # removes two columns
+
+        c4 = column("id")
+        c4.key = "street"
+
+        cc.replace(c4)
+
+        eq_(list(cc), [c4, c3])
+        self._assert_collection_integrity(cc)
+
+    def test_remove(self):
+
+        c1, c2, c3 = column("c1"), column("c2"), column("c3")
+
+        cc = DedupeColumnCollection(
+            columns=[("c1", c1), ("c2", c2), ("c3", c3)]
+        )
+        ci = cc.as_immutable()
+
+        eq_(cc._all_columns, [c1, c2, c3])
+        eq_(list(cc), [c1, c2, c3])
+        assert cc.contains_column(c2)
+        assert "c2" in cc
+
+        eq_(ci._all_columns, [c1, c2, c3])
+        eq_(list(ci), [c1, c2, c3])
+        assert ci.contains_column(c2)
+        assert "c2" in ci
+
+        cc.remove(c2)
+
+        eq_(cc._all_columns, [c1, c3])
+        eq_(list(cc), [c1, c3])
+        is_(cc[0], c1)
+        is_(cc[1], c3)
+        assert not cc.contains_column(c2)
+        assert "c2" not in cc
+        self._assert_collection_integrity(cc)
+
+        eq_(ci._all_columns, [c1, c3])
+        eq_(list(ci), [c1, c3])
+        is_(ci[0], c1)
+        is_(ci[1], c3)
+        assert not ci.contains_column(c2)
+        assert "c2" not in ci
+
+        assert_raises(IndexError, lambda: ci[2])
+
+    def test_remove_doesnt_change_iteration(self):
+
+        c1, c2, c3, c4, c5 = (
+            column("c1"),
+            column("c2"),
+            column("c3"),
+            column("c4"),
+            column("c5"),
+        )
+
+        cc = DedupeColumnCollection(
+            columns=[
+                ("c1", c1),
+                ("c2", c2),
+                ("c3", c3),
+                ("c4", c4),
+                ("c5", c5),
+            ]
+        )
+
+        for col in cc:
+            if col.name not in ["c1", "c2"]:
+                cc.remove(col)
+
+        eq_(cc.keys(), ["c1", "c2"])
+        eq_([c.name for c in cc], ["c1", "c2"])
+        self._assert_collection_integrity(cc)
 
     def test_dupes_extend(self):
-        cc = sql.ColumnCollection()
-
-        c1, c2a, c3, c2b = (
-            column("c1"),
-            column("c2"),
-            column("c3"),
-            column("c2"),
-        )
-
-        cc.add(c1)
-        cc.add(c2a)
-
-        cc.extend([c3, c2b])
-
-        eq_(cc._all_columns, [c1, c2a, c3, c2b])
-
-        # for iter, c2a is replaced by c2b, ordering
-        # is maintained in that way.  ideally, iter would be
-        # the same as the "_all_columns" collection.
-        eq_(list(cc), [c1, c2b, c3])
-
-        assert cc.contains_column(c2a)
-        assert cc.contains_column(c2b)
-
+        cc = DedupeColumnCollection()
         ci = cc.as_immutable()
-        eq_(ci._all_columns, [c1, c2a, c3, c2b])
-        eq_(list(ci), [c1, c2b, c3])
-
-    def test_dupes_update(self):
-        cc = sql.ColumnCollection()
 
         c1, c2a, c3, c2b = (
             column("c1"),
@@ -675,20 +1101,29 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
         cc.add(c1)
         cc.add(c2a)
 
-        cc.update([(c3.key, c3), (c2b.key, c2b)])
+        cc.extend([c3, c2b])  # this should remove c2a
 
-        eq_(cc._all_columns, [c1, c2a, c3, c2b])
+        eq_(cc._all_columns, [c1, c2b, c3])
+        eq_(list(cc), [c1, c2b, c3])
+        is_(cc[1], c2b)
+        is_(cc[2], c3)
+        assert_raises(IndexError, lambda: cc[3])
+        self._assert_collection_integrity(cc)
 
-        assert cc.contains_column(c2a)
+        assert not cc.contains_column(c2a)
         assert cc.contains_column(c2b)
 
-        # for iter, c2a is replaced by c2b, ordering
-        # is maintained in that way.  ideally, iter would be
-        # the same as the "_all_columns" collection.
-        eq_(list(cc), [c1, c2b, c3])
+        eq_(ci._all_columns, [c1, c2b, c3])
+        eq_(list(ci), [c1, c2b, c3])
+        is_(ci[1], c2b)
+        is_(ci[2], c3)
+        assert_raises(IndexError, lambda: ci[3])
 
-    def test_extend_existing(self):
-        cc = sql.ColumnCollection()
+        assert not ci.contains_column(c2a)
+        assert ci.contains_column(c2b)
+
+    def test_extend_existing_maintains_ordering(self):
+        cc = DedupeColumnCollection()
 
         c1, c2, c3, c4, c5 = (
             column("c1"),
@@ -700,32 +1135,16 @@ class ColumnCollectionTest(testing.AssertsCompiledSQL, fixtures.TestBase):
 
         cc.extend([c1, c2])
         eq_(cc._all_columns, [c1, c2])
+        self._assert_collection_integrity(cc)
 
         cc.extend([c3])
         eq_(cc._all_columns, [c1, c2, c3])
+        self._assert_collection_integrity(cc)
+
         cc.extend([c4, c2, c5])
 
         eq_(cc._all_columns, [c1, c2, c3, c4, c5])
-
-    def test_update_existing(self):
-        cc = sql.ColumnCollection()
-
-        c1, c2, c3, c4, c5 = (
-            column("c1"),
-            column("c2"),
-            column("c3"),
-            column("c4"),
-            column("c5"),
-        )
-
-        cc.update([("c1", c1), ("c2", c2)])
-        eq_(cc._all_columns, [c1, c2])
-
-        cc.update([("c3", c3)])
-        eq_(cc._all_columns, [c1, c2, c3])
-        cc.update([("c4", c4), ("c2", c2), ("c5", c5)])
-
-        eq_(cc._all_columns, [c1, c2, c3, c4, c5])
+        self._assert_collection_integrity(cc)
 
 
 class LRUTest(fixtures.TestBase):
@@ -1327,12 +1746,10 @@ class IdentitySetTest(fixtures.TestBase):
         return super_, sub_, twin1, twin2, unique1, unique2
 
     def _assert_unorderable_types(self, callable_):
-        if util.py36:
+        if util.py3k:
             assert_raises_message(
                 TypeError, "not supported between instances of", callable_
             )
-        elif util.py3k:
-            assert_raises_message(TypeError, "unorderable types", callable_)
         else:
             assert_raises_message(
                 TypeError, "cannot compare sets using cmp()", callable_
@@ -1719,13 +2136,13 @@ class ArgInspectionTest(fixtures.TestBase):
             ),
         )
 
-    @fails_if(lambda: util.pypy, "pypy returns plain *arg, **kw")
+    @testing.requires.cpython
     def test_callable_argspec_py_builtin(self):
         import datetime
 
         assert_raises(TypeError, get_callable_argspec, datetime.datetime.now)
 
-    @fails_if(lambda: util.pypy, "pypy returns plain *arg, **kw")
+    @testing.requires.cpython
     def test_callable_argspec_obj_init(self):
         assert_raises(TypeError, get_callable_argspec, object)
 
@@ -1807,7 +2224,7 @@ class ArgInspectionTest(fixtures.TestBase):
             compat.FullArgSpec(["x", "y"], None, None, None, [], None, {}),
         )
 
-    @fails_if(lambda: util.pypy, "pypy returns plain *arg, **kw")
+    @testing.requires.cpython
     def test_callable_argspec_partial(self):
         from functools import partial
 
@@ -1953,7 +2370,14 @@ class SymbolTest(fixtures.TestBase):
 
 
 class _Py3KFixtures(object):
-    pass
+    def _kw_only_fixture(self):
+        pass
+
+    def _kw_plus_posn_fixture(self):
+        pass
+
+    def _kw_opt_fixture(self):
+        pass
 
 
 if util.py3k:
@@ -1974,9 +2398,209 @@ def _kw_opt_fixture(self, a, *, b, c="c"):
     for k in _locals:
         setattr(_Py3KFixtures, k, _locals[k])
 
+py3k_fixtures = _Py3KFixtures()
+
 
 class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
-    def _test_format_argspec_plus(self, fn, wanted, grouped=None):
+    @testing.combinations(
+        (
+            lambda: None,
+            {
+                "args": "()",
+                "self_arg": None,
+                "apply_kw": "()",
+                "apply_pos": "()",
+                "apply_pos_proxied": "()",
+                "apply_kw_proxied": "()",
+            },
+            True,
+        ),
+        (
+            lambda: None,
+            {
+                "args": "",
+                "self_arg": None,
+                "apply_kw": "",
+                "apply_pos": "",
+                "apply_pos_proxied": "",
+                "apply_kw_proxied": "",
+            },
+            False,
+        ),
+        (
+            lambda self: None,
+            {
+                "args": "(self)",
+                "self_arg": "self",
+                "apply_kw": "(self)",
+                "apply_pos": "(self)",
+                "apply_pos_proxied": "()",
+                "apply_kw_proxied": "()",
+            },
+            True,
+        ),
+        (
+            lambda self: None,
+            {
+                "args": "self",
+                "self_arg": "self",
+                "apply_kw": "self",
+                "apply_pos": "self",
+                "apply_pos_proxied": "",
+                "apply_kw_proxied": "",
+            },
+            False,
+        ),
+        (
+            lambda *a: None,
+            {
+                "args": "(*a)",
+                "self_arg": "a[0]",
+                "apply_kw": "(*a)",
+                "apply_pos": "(*a)",
+                "apply_pos_proxied": "(*a)",
+                "apply_kw_proxied": "(*a)",
+            },
+            True,
+        ),
+        (
+            lambda **kw: None,
+            {
+                "args": "(**kw)",
+                "self_arg": None,
+                "apply_kw": "(**kw)",
+                "apply_pos": "(**kw)",
+                "apply_pos_proxied": "(**kw)",
+                "apply_kw_proxied": "(**kw)",
+            },
+            True,
+        ),
+        (
+            lambda *a, **kw: None,
+            {
+                "args": "(*a, **kw)",
+                "self_arg": "a[0]",
+                "apply_kw": "(*a, **kw)",
+                "apply_pos": "(*a, **kw)",
+                "apply_pos_proxied": "(*a, **kw)",
+                "apply_kw_proxied": "(*a, **kw)",
+            },
+            True,
+        ),
+        (
+            lambda a, *b: None,
+            {
+                "args": "(a, *b)",
+                "self_arg": "a",
+                "apply_kw": "(a, *b)",
+                "apply_pos": "(a, *b)",
+                "apply_pos_proxied": "(*b)",
+                "apply_kw_proxied": "(*b)",
+            },
+            True,
+        ),
+        (
+            lambda a, **b: None,
+            {
+                "args": "(a, **b)",
+                "self_arg": "a",
+                "apply_kw": "(a, **b)",
+                "apply_pos": "(a, **b)",
+                "apply_pos_proxied": "(**b)",
+                "apply_kw_proxied": "(**b)",
+            },
+            True,
+        ),
+        (
+            lambda a, *b, **c: None,
+            {
+                "args": "(a, *b, **c)",
+                "self_arg": "a",
+                "apply_kw": "(a, *b, **c)",
+                "apply_pos": "(a, *b, **c)",
+                "apply_pos_proxied": "(*b, **c)",
+                "apply_kw_proxied": "(*b, **c)",
+            },
+            True,
+        ),
+        (
+            lambda a, b=1, **c: None,
+            {
+                "args": "(a, b=1, **c)",
+                "self_arg": "a",
+                "apply_kw": "(a, b=b, **c)",
+                "apply_pos": "(a, b, **c)",
+                "apply_pos_proxied": "(b, **c)",
+                "apply_kw_proxied": "(b=b, **c)",
+            },
+            True,
+        ),
+        (
+            lambda a=1, b=2: None,
+            {
+                "args": "(a=1, b=2)",
+                "self_arg": "a",
+                "apply_kw": "(a=a, b=b)",
+                "apply_pos": "(a, b)",
+                "apply_pos_proxied": "(b)",
+                "apply_kw_proxied": "(b=b)",
+            },
+            True,
+        ),
+        (
+            lambda a=1, b=2: None,
+            {
+                "args": "a=1, b=2",
+                "self_arg": "a",
+                "apply_kw": "a=a, b=b",
+                "apply_pos": "a, b",
+                "apply_pos_proxied": "b",
+                "apply_kw_proxied": "b=b",
+            },
+            False,
+        ),
+        (
+            py3k_fixtures._kw_only_fixture,
+            {
+                "args": "self, a, *, b, c",
+                "self_arg": "self",
+                "apply_pos": "self, a, *, b, c",
+                "apply_kw": "self, a, b=b, c=c",
+                "apply_pos_proxied": "a, *, b, c",
+                "apply_kw_proxied": "a, b=b, c=c",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        (
+            py3k_fixtures._kw_plus_posn_fixture,
+            {
+                "args": "self, a, *args, b, c",
+                "self_arg": "self",
+                "apply_pos": "self, a, *args, b, c",
+                "apply_kw": "self, a, b=b, c=c, *args",
+                "apply_pos_proxied": "a, *args, b, c",
+                "apply_kw_proxied": "a, b=b, c=c, *args",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        (
+            py3k_fixtures._kw_opt_fixture,
+            {
+                "args": "self, a, *, b, c='c'",
+                "self_arg": "self",
+                "apply_pos": "self, a, *, b, c",
+                "apply_kw": "self, a, b=b, c=c",
+                "apply_pos_proxied": "a, *, b, c",
+                "apply_kw_proxied": "a, b=b, c=c",
+            },
+            False,
+            testing.requires.python3,
+        ),
+        argnames="fn,wanted,grouped",
+    )
+    def test_specs(self, fn, wanted, grouped):
 
         # test direct function
         if grouped is None:
@@ -1993,216 +2617,61 @@ class TestFormatArgspec(_Py3KFixtures, fixtures.TestBase):
             parsed = util.format_argspec_plus(spec, grouped=grouped)
         eq_(parsed, wanted)
 
-    def test_specs(self):
-        self._test_format_argspec_plus(
-            lambda: None,
-            {
-                "args": "()",
-                "self_arg": None,
-                "apply_kw": "()",
-                "apply_pos": "()",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda: None,
-            {"args": "", "self_arg": None, "apply_kw": "", "apply_pos": ""},
-            grouped=False,
-        )
-
-        self._test_format_argspec_plus(
-            lambda self: None,
-            {
-                "args": "(self)",
-                "self_arg": "self",
-                "apply_kw": "(self)",
-                "apply_pos": "(self)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda self: None,
-            {
-                "args": "self",
-                "self_arg": "self",
-                "apply_kw": "self",
-                "apply_pos": "self",
-            },
-            grouped=False,
-        )
-
-        self._test_format_argspec_plus(
-            lambda *a: None,
-            {
-                "args": "(*a)",
-                "self_arg": "a[0]",
-                "apply_kw": "(*a)",
-                "apply_pos": "(*a)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda **kw: None,
-            {
-                "args": "(**kw)",
-                "self_arg": None,
-                "apply_kw": "(**kw)",
-                "apply_pos": "(**kw)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda *a, **kw: None,
-            {
-                "args": "(*a, **kw)",
-                "self_arg": "a[0]",
-                "apply_kw": "(*a, **kw)",
-                "apply_pos": "(*a, **kw)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, *b: None,
-            {
-                "args": "(a, *b)",
-                "self_arg": "a",
-                "apply_kw": "(a, *b)",
-                "apply_pos": "(a, *b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, **b: None,
-            {
-                "args": "(a, **b)",
-                "self_arg": "a",
-                "apply_kw": "(a, **b)",
-                "apply_pos": "(a, **b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, *b, **c: None,
-            {
-                "args": "(a, *b, **c)",
-                "self_arg": "a",
-                "apply_kw": "(a, *b, **c)",
-                "apply_pos": "(a, *b, **c)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a, b=1, **c: None,
-            {
-                "args": "(a, b=1, **c)",
-                "self_arg": "a",
-                "apply_kw": "(a, b=b, **c)",
-                "apply_pos": "(a, b, **c)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a=1, b=2: None,
-            {
-                "args": "(a=1, b=2)",
-                "self_arg": "a",
-                "apply_kw": "(a=a, b=b)",
-                "apply_pos": "(a, b)",
-            },
-        )
-
-        self._test_format_argspec_plus(
-            lambda a=1, b=2: None,
-            {
-                "args": "a=1, b=2",
-                "self_arg": "a",
-                "apply_kw": "a=a, b=b",
-                "apply_pos": "a, b",
-            },
-            grouped=False,
-        )
-
-        if util.py3k:
-            self._test_format_argspec_plus(
-                self._kw_only_fixture,
-                {
-                    "args": "self, a, *, b, c",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *, b, c",
-                    "apply_kw": "self, a, b=b, c=c",
-                },
-                grouped=False,
-            )
-            self._test_format_argspec_plus(
-                self._kw_plus_posn_fixture,
-                {
-                    "args": "self, a, *args, b, c",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *args, b, c",
-                    "apply_kw": "self, a, b=b, c=c, *args",
-                },
-                grouped=False,
-            )
-            self._test_format_argspec_plus(
-                self._kw_opt_fixture,
-                {
-                    "args": "self, a, *, b, c='c'",
-                    "self_arg": "self",
-                    "apply_pos": "self, a, *, b, c",
-                    "apply_kw": "self, a, b=b, c=c",
-                },
-                grouped=False,
-            )
-
-    @testing.fails_if(
-        lambda: util.pypy,
-        "pypy doesn't report Obj.__init__ as object.__init__",
-    )
+    @testing.requires.cpython
     def test_init_grouped(self):
         object_spec = {
             "args": "(self)",
             "self_arg": "self",
             "apply_pos": "(self)",
             "apply_kw": "(self)",
+            "apply_pos_proxied": "()",
+            "apply_kw_proxied": "()",
         }
         wrapper_spec = {
             "args": "(self, *args, **kwargs)",
             "self_arg": "self",
             "apply_pos": "(self, *args, **kwargs)",
             "apply_kw": "(self, *args, **kwargs)",
+            "apply_pos_proxied": "(*args, **kwargs)",
+            "apply_kw_proxied": "(*args, **kwargs)",
         }
         custom_spec = {
             "args": "(slef, a=123)",
             "self_arg": "slef",  # yes, slef
             "apply_pos": "(slef, a)",
+            "apply_pos_proxied": "(a)",
+            "apply_kw_proxied": "(a=a)",
             "apply_kw": "(slef, a=a)",
         }
 
         self._test_init(None, object_spec, wrapper_spec, custom_spec)
         self._test_init(True, object_spec, wrapper_spec, custom_spec)
 
-    @testing.fails_if(
-        lambda: util.pypy,
-        "pypy doesn't report Obj.__init__ as object.__init__",
-    )
+    @testing.requires.cpython
     def test_init_bare(self):
         object_spec = {
             "args": "self",
             "self_arg": "self",
             "apply_pos": "self",
             "apply_kw": "self",
+            "apply_pos_proxied": "",
+            "apply_kw_proxied": "",
         }
         wrapper_spec = {
             "args": "self, *args, **kwargs",
             "self_arg": "self",
             "apply_pos": "self, *args, **kwargs",
             "apply_kw": "self, *args, **kwargs",
+            "apply_pos_proxied": "*args, **kwargs",
+            "apply_kw_proxied": "*args, **kwargs",
         }
         custom_spec = {
             "args": "slef, a=123",
             "self_arg": "slef",  # yes, slef
             "apply_pos": "slef, a",
             "apply_kw": "slef, a=a",
+            "apply_pos_proxied": "a",
+            "apply_kw_proxied": "a=a",
         }
 
         self._test_init(False, object_spec, wrapper_spec, custom_spec)
@@ -2824,8 +3293,6 @@ class TimezoneTest(fixtures.TestBase):
         ),
     )
     def test_tzname(self, td, expected):
-        if expected == "UTC" and util.py3k and not util.py36:
-            expected += "+00:00"
         eq_(timezone(td).tzname(None), expected)
 
     def test_utcoffset(self):
@@ -2862,3 +3329,124 @@ class TimezoneTest(fixtures.TestBase):
             repr(timezone(datetime.timedelta(hours=5))),
             "sqlalchemy.util.timezone(%r)" % (datetime.timedelta(hours=5)),
         )
+
+
+class TestModuleRegistry(fixtures.TestBase):
+    def test_modules_are_loaded(self):
+        to_restore = []
+        for m in ("xml.dom", "wsgiref.simple_server"):
+            to_restore.append((m, sys.modules.pop(m, None)))
+        try:
+            mr = _preloaded._ModuleRegistry()
+
+            ret = mr.preload_module(
+                "xml.dom", "wsgiref.simple_server", "sqlalchemy.sql.util"
+            )
+            o = object()
+            is_(ret(o), o)
+
+            is_false(hasattr(mr, "xml_dom"))
+            mr.import_prefix("xml")
+            is_true("xml.dom" in sys.modules)
+            is_(sys.modules["xml.dom"], mr.xml_dom)
+
+            is_true("wsgiref.simple_server" not in sys.modules)
+            mr.import_prefix("wsgiref")
+            is_true("wsgiref.simple_server" in sys.modules)
+            is_(sys.modules["wsgiref.simple_server"], mr.wsgiref_simple_server)
+
+            mr.import_prefix("sqlalchemy")
+            is_(sys.modules["sqlalchemy.sql.util"], mr.sql_util)
+        finally:
+            for name, mod in to_restore:
+                if mod is not None:
+                    sys.modules[name] = mod
+
+
+class MethodOveriddenTest(fixtures.TestBase):
+    def test_subclass_overrides_cls_given(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bar, Foo.bar))
+
+    def test_subclass_overrides(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bar(), Foo.bar))
+
+    def test_subclass_overrides_skiplevel(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        class Bat(Bar):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(Bat(), Foo.bar))
+
+    def test_subclass_overrides_twolevels(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            def bar(self):
+                pass
+
+        class Bat(Bar):
+            pass
+
+        is_true(util.method_is_overridden(Bat(), Foo.bar))
+
+    def test_subclass_doesnt_override_cls_given(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        is_false(util.method_is_overridden(Bar, Foo.bar))
+
+    def test_subclass_doesnt_override(self):
+        class Foo(object):
+            def bar(self):
+                pass
+
+        class Bar(Foo):
+            pass
+
+        is_false(util.method_is_overridden(Bar(), Foo.bar))
+
+    def test_subclass_overrides_multi_mro(self):
+        class Base(object):
+            pass
+
+        class Foo(object):
+            pass
+
+        class Bat(Base):
+            def bar(self):
+                pass
+
+        class HoHo(Foo, Bat):
+            def bar(self):
+                pass
+
+        is_true(util.method_is_overridden(HoHo(), Bat.bar))

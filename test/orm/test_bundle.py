@@ -1,17 +1,21 @@
+from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
+from sqlalchemy import testing
+from sqlalchemy import tuple_
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Bundle
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ClauseList
+from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -56,12 +60,14 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.Data,
             cls.tables.data,
             properties={"others": relationship(cls.classes.Other)},
         )
-        mapper(cls.classes.Other, cls.tables.other)
+        cls.mapper_registry.map_imperatively(
+            cls.classes.Other, cls.tables.other
+        )
 
     @classmethod
     def insert_data(cls, connection):
@@ -82,6 +88,34 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
         sess.commit()
 
+    def test_tuple_suggests_bundle(self, connection):
+        Data, Other = self.classes("Data", "Other")
+
+        sess = Session(connection)
+        q = sess.query(tuple_(Data.id, Other.id)).join(Data.others)
+
+        assert_raises_message(
+            exc.CompileError,
+            r"Most backends don't support SELECTing from a tuple\(\) object.  "
+            "If this is an ORM query, consider using the Bundle object.",
+            q.all,
+        )
+
+    def test_tuple_suggests_bundle_future(self, connection):
+        Data, Other = self.classes("Data", "Other")
+
+        stmt = select(tuple_(Data.id, Other.id)).join(Data.others)
+
+        sess = Session(connection, future=True)
+
+        assert_raises_message(
+            exc.CompileError,
+            r"Most backends don't support SELECTing from a tuple\(\) object.  "
+            "If this is an ORM query, consider using the Bundle object.",
+            sess.execute,
+            stmt,
+        )
+
     def test_same_named_col_clauselist(self):
         Data, Other = self.classes("Data", "Other")
         bundle = Bundle("pk", Data.id, Other.id)
@@ -92,7 +126,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_same_named_col_in_orderby(self):
         Data, Other = self.classes("Data", "Other")
         bundle = Bundle("pk", Data.id, Other.id)
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(Data, Other).order_by(bundle),
@@ -106,7 +140,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_same_named_col_in_fetch(self):
         Data, Other = self.classes("Data", "Other")
         bundle = Bundle("pk", Data.id, Other.id)
-        sess = Session()
+        sess = fixture_session()
 
         eq_(
             sess.query(bundle)
@@ -122,12 +156,12 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
         b1 = Bundle("b1", Data.d1, Data.d2)
 
         self.assert_compile(
-            select([b1.c.d1, b1.c.d2]), "SELECT data.d1, data.d2 FROM data"
+            select(b1.c.d1, b1.c.d2), "SELECT data.d1, data.d2 FROM data"
         )
 
     def test_result(self):
         Data = self.classes.Data
-        sess = Session()
+        sess = fixture_session()
 
         b1 = Bundle("b1", Data.d1, Data.d2)
 
@@ -138,7 +172,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     def test_subclass(self):
         Data = self.classes.Data
-        sess = Session()
+        sess = fixture_session()
 
         class MyBundle(Bundle):
             def create_row_processor(self, query, procs, labels):
@@ -167,7 +201,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
         b1 = Bundle("b1", d1.d1, d1.d2)
         b2 = Bundle("b2", Data.d1, Other.o1)
 
-        sess = Session()
+        sess = fixture_session()
 
         q = (
             sess.query(b1, b2)
@@ -186,9 +220,38 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
             ],
         )
 
-    def test_single_entity(self):
+    def test_multi_bundle_future(self):
         Data = self.classes.Data
-        sess = Session()
+        Other = self.classes.Other
+
+        d1 = aliased(Data)
+
+        b1 = Bundle("b1", d1.d1, d1.d2)
+        b2 = Bundle("b2", Data.d1, Other.o1)
+
+        sess = Session(testing.db, future=True)
+
+        stmt = (
+            select(b1, b2)
+            .join(Data.others)
+            .join(d1, d1.id == Data.id)
+            .filter(b1.c.d1 == "d3d1")
+        )
+
+        eq_(
+            sess.execute(stmt).all(),
+            [
+                (("d3d1", "d3d2"), ("d3d1", "d3o0")),
+                (("d3d1", "d3d2"), ("d3d1", "d3o1")),
+                (("d3d1", "d3d2"), ("d3d1", "d3o2")),
+                (("d3d1", "d3d2"), ("d3d1", "d3o3")),
+                (("d3d1", "d3d2"), ("d3d1", "d3o4")),
+            ],
+        )
+
+    def test_single_entity_legacy_query(self):
+        Data = self.classes.Data
+        sess = fixture_session()
 
         b1 = Bundle("b1", Data.d1, Data.d2, single_entity=True)
 
@@ -197,9 +260,89 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
             [("d3d1", "d3d2"), ("d4d1", "d4d2"), ("d5d1", "d5d2")],
         )
 
+    def test_labeled_cols_non_single_entity_legacy_query(self):
+        Data = self.classes.Data
+        sess = fixture_session()
+
+        b1 = Bundle("b1", Data.d1.label("x"), Data.d2.label("y"))
+
+        eq_(
+            sess.query(b1).filter(b1.c.x.between("d3d1", "d5d1")).all(),
+            [(("d3d1", "d3d2"),), (("d4d1", "d4d2"),), (("d5d1", "d5d2"),)],
+        )
+
+    def test_labeled_cols_single_entity_legacy_query(self):
+        Data = self.classes.Data
+        sess = fixture_session()
+
+        b1 = Bundle(
+            "b1", Data.d1.label("x"), Data.d2.label("y"), single_entity=True
+        )
+
+        eq_(
+            sess.query(b1).filter(b1.c.x.between("d3d1", "d5d1")).all(),
+            [("d3d1", "d3d2"), ("d4d1", "d4d2"), ("d5d1", "d5d2")],
+        )
+
+    def test_labeled_cols_as_rows_future(self):
+        Data = self.classes.Data
+        sess = fixture_session()
+
+        b1 = Bundle("b1", Data.d1.label("x"), Data.d2.label("y"))
+
+        stmt = select(b1).filter(b1.c.x.between("d3d1", "d5d1"))
+
+        eq_(
+            sess.execute(stmt).all(),
+            [(("d3d1", "d3d2"),), (("d4d1", "d4d2"),), (("d5d1", "d5d2"),)],
+        )
+
+    def test_labeled_cols_as_scalars_future(self):
+        Data = self.classes.Data
+        sess = fixture_session()
+
+        b1 = Bundle("b1", Data.d1.label("x"), Data.d2.label("y"))
+
+        stmt = select(b1).filter(b1.c.x.between("d3d1", "d5d1"))
+        eq_(
+            sess.scalars(stmt).all(),
+            [("d3d1", "d3d2"), ("d4d1", "d4d2"), ("d5d1", "d5d2")],
+        )
+
+    def test_single_entity_flag_is_legacy_w_future(self):
+        Data = self.classes.Data
+        sess = Session(testing.db, future=True)
+
+        # flag has no effect
+        b1 = Bundle("b1", Data.d1, Data.d2, single_entity=True)
+
+        stmt = select(b1).filter(b1.c.d1.between("d3d1", "d5d1"))
+
+        with testing.expect_deprecated_20(
+            "The Bundle.single_entity flag has no effect when "
+            "using 2.0 style execution."
+        ):
+            rows = sess.execute(stmt).all()
+        eq_(
+            rows,
+            [(("d3d1", "d3d2"),), (("d4d1", "d4d2"),), (("d5d1", "d5d2"),)],
+        )
+
+    def test_as_scalars_future(self):
+        Data = self.classes.Data
+        sess = Session(testing.db)
+
+        b1 = Bundle("b1", Data.d1, Data.d2)
+
+        stmt = select(b1).filter(b1.c.d1.between("d3d1", "d5d1"))
+        eq_(
+            sess.scalars(stmt).all(),
+            [("d3d1", "d3d2"), ("d4d1", "d4d2"), ("d5d1", "d5d2")],
+        )
+
     def test_single_entity_flag_but_multi_entities(self):
         Data = self.classes.Data
-        sess = Session()
+        sess = fixture_session()
 
         b1 = Bundle("b1", Data.d1, Data.d2, single_entity=True)
         b2 = Bundle("b1", Data.d3, single_entity=True)
@@ -215,7 +358,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     def test_bundle_nesting(self):
         Data = self.classes.Data
-        sess = Session()
+        sess = fixture_session()
 
         b1 = Bundle("b1", Data.d1, Bundle("b2", Data.d2, Data.d3))
 
@@ -233,7 +376,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     def test_bundle_nesting_unions(self):
         Data = self.classes.Data
-        sess = Session()
+        sess = fixture_session()
 
         b1 = Bundle("b1", Data.d1, Bundle("b2", Data.d2, Data.d3))
 
@@ -266,12 +409,12 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
     def test_query_count(self):
         Data = self.classes.Data
         b1 = Bundle("b1", Data.d1, Data.d2)
-        eq_(Session().query(b1).count(), 10)
+        eq_(fixture_session().query(b1).count(), 10)
 
     def test_join_relationship(self):
         Data = self.classes.Data
 
-        sess = Session()
+        sess = fixture_session()
         b1 = Bundle("b1", Data.d1, Data.d2)
         q = sess.query(b1).join(Data.others)
         self.assert_compile(
@@ -285,7 +428,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
         Data = self.classes.Data
         Other = self.classes.Other
 
-        sess = Session()
+        sess = fixture_session()
         b1 = Bundle("b1", Data.d1, Data.d2)
         q = sess.query(b1).join(Other)
         self.assert_compile(
@@ -303,7 +446,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
         b1 = Bundle("b1", Data.id, Data.d1, Data.d2)
 
-        session = Session()
+        session = fixture_session()
         first = session.query(b1)
         second = session.query(b1)
         unioned = first.union(second)
@@ -347,7 +490,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
         b1 = Bundle("b1", Data.id, Data.d1, Data.d2)
 
-        sess = Session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(b1).filter_by(d1="d1"),
@@ -360,7 +503,7 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
         b1 = Bundle("b1", Data.id, Data.d1, Data.d2)
 
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Data).order_by(b1),
             "SELECT data.id AS data_id, data.d1 AS data_d1, "
@@ -372,4 +515,26 @@ class BundleTest(fixtures.MappedTest, AssertsCompiledSQL):
             sess.query(func.row_number().over(order_by=b1)),
             "SELECT row_number() OVER (ORDER BY data.id, data.d1, data.d2) "
             "AS anon_1 FROM data",
+        )
+
+    def test_non_mapped_columns_non_single_entity(self):
+        data_table = self.tables.data
+
+        b1 = Bundle("b1", data_table.c.d1, data_table.c.d2)
+
+        sess = fixture_session()
+        eq_(
+            sess.query(b1).filter(b1.c.d1.between("d3d1", "d5d1")).all(),
+            [(("d3d1", "d3d2"),), (("d4d1", "d4d2"),), (("d5d1", "d5d2"),)],
+        )
+
+    def test_non_mapped_columns_single_entity(self):
+        data_table = self.tables.data
+
+        b1 = Bundle("b1", data_table.c.d1, data_table.c.d2, single_entity=True)
+
+        sess = fixture_session()
+        eq_(
+            sess.query(b1).filter(b1.c.d1.between("d3d1", "d5d1")).all(),
+            [("d3d1", "d3d2"), ("d4d1", "d4d2"), ("d5d1", "d5d2")],
         )

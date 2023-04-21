@@ -4,11 +4,11 @@ from sqlalchemy import MetaData
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.ext.orderinglist import ordering_list
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
+from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.testing.util import picklers
@@ -18,7 +18,7 @@ metadata = None
 
 
 def step_numbering(step):
-    """ order in whole steps """
+    """order in whole steps"""
 
     def f(index, collection):
         return step * index
@@ -59,12 +59,12 @@ def alpha_ordering(index, collection):
     return s
 
 
-class OrderingListTest(fixtures.TestBase):
-    def setup(self):
+class OrderingListTest(fixtures.MappedTest):
+    def setup_test(self):
         global metadata, slides_table, bullets_table, Slide, Bullet
         slides_table, bullets_table = None, None
         Slide, Bullet = None, None
-        metadata = MetaData(testing.db)
+        metadata = MetaData()
 
     def _setup(self, test_collection_class):
         """Build a relationship situation using the given
@@ -105,7 +105,8 @@ class OrderingListTest(fixtures.TestBase):
             def __repr__(self):
                 return '<Bullet "%s" pos %s>' % (self.text, self.position)
 
-        mapper(
+        clear_mappers()
+        self.mapper_registry.map_imperatively(
             Slide,
             slides_table,
             properties={
@@ -118,12 +119,12 @@ class OrderingListTest(fixtures.TestBase):
                 )
             },
         )
-        mapper(Bullet, bullets_table)
+        self.mapper_registry.map_imperatively(Bullet, bullets_table)
 
-        metadata.create_all()
+        metadata.create_all(testing.db)
 
-    def teardown(self):
-        metadata.drop_all()
+    def teardown_test(self):
+        metadata.drop_all(testing.db)
 
     def test_append_no_reorder(self):
         self._setup(
@@ -167,7 +168,7 @@ class OrderingListTest(fixtures.TestBase):
         self.assert_(s1.bullets[2].position == 3)
         self.assert_(s1.bullets[3].position == 4)
 
-        session = create_session()
+        session = fixture_session()
         session.add(s1)
         session.flush()
 
@@ -175,7 +176,7 @@ class OrderingListTest(fixtures.TestBase):
         session.expunge_all()
         del s1
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
 
         self.assert_(srt.bullets)
         self.assert_(len(srt.bullets) == 4)
@@ -232,7 +233,7 @@ class OrderingListTest(fixtures.TestBase):
 
         s1.bullets._reorder()
         self.assert_(s1.bullets[4].position == 5)
-        session = create_session()
+        session = fixture_session()
         session.add(s1)
         session.flush()
 
@@ -240,7 +241,7 @@ class OrderingListTest(fixtures.TestBase):
         session.expunge_all()
         del s1
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
 
         self.assert_(srt.bullets)
         self.assert_(len(srt.bullets) == 5)
@@ -254,7 +255,7 @@ class OrderingListTest(fixtures.TestBase):
         session.flush()
         session.expunge_all()
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
         titles = ["s1/b1", "s1/b2", "s1/b100", "s1/b4", "raw", "raw2"]
         found = [b.text for b in srt.bullets]
         eq_(titles, found)
@@ -289,7 +290,7 @@ class OrderingListTest(fixtures.TestBase):
         self.assert_(len(s1.bullets) == 6)
         self.assert_(s1.bullets[5].position == 5)
 
-        session = create_session()
+        session = fixture_session()
         session.add(s1)
         session.flush()
 
@@ -297,7 +298,7 @@ class OrderingListTest(fixtures.TestBase):
         session.expunge_all()
         del s1
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
 
         self.assert_(srt.bullets)
         self.assert_(len(srt.bullets) == 6)
@@ -338,7 +339,7 @@ class OrderingListTest(fixtures.TestBase):
             self.assert_(s1.bullets[li].position == li)
             self.assert_(s1.bullets[li] == b[bi])
 
-        session = create_session()
+        session = fixture_session()
         session.add(s1)
         session.flush()
 
@@ -346,7 +347,7 @@ class OrderingListTest(fixtures.TestBase):
         session.expunge_all()
         del s1
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
 
         self.assert_(srt.bullets)
         self.assert_(len(srt.bullets) == 3)
@@ -365,7 +366,7 @@ class OrderingListTest(fixtures.TestBase):
         self.assert_(len(s1.bullets) == 3)
         self.assert_(s1.bullets[2].position == 2)
 
-        session = create_session()
+        session = fixture_session()
         session.add(s1)
         session.flush()
 
@@ -384,7 +385,7 @@ class OrderingListTest(fixtures.TestBase):
         session.flush()
         session.expunge_all()
 
-        srt = session.query(Slide).get(id_)
+        srt = session.get(Slide, id_)
 
         self.assert_(srt.bullets)
         self.assert_(len(srt.bullets) == 3)

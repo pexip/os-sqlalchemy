@@ -6,6 +6,7 @@ from sqlalchemy import create_engine
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
+from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.ext.automap import automap_base
@@ -17,6 +18,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.schema import Column
@@ -30,7 +32,7 @@ class AutomapTest(fixtures.MappedTest):
         FixtureTest.define_tables(metadata)
 
     def test_relationship_o2m_default(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         User = Base.classes.users
@@ -41,7 +43,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.users is u1
 
     def test_relationship_explicit_override_o2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         prop = relationship("addresses", collection_class=set)
 
         class User(Base):
@@ -57,8 +59,18 @@ class AutomapTest(fixtures.MappedTest):
         u1 = User(name="u1", addresses_collection=set([a1]))
         assert a1.user is u1
 
+    def test_prepare_w_only(self):
+        Base = automap_base()
+
+        Base.prepare(
+            testing.db,
+            reflection_options={"only": ["users"], "resolve_fks": False},
+        )
+        assert hasattr(Base.classes, "users")
+        assert not hasattr(Base.classes, "addresses")
+
     def test_exception_prepare_not_called(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         class User(Base):
             __tablename__ = "users"
@@ -75,7 +87,7 @@ class AutomapTest(fixtures.MappedTest):
         )
 
     def test_relationship_explicit_override_m2o(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         prop = relationship("users")
 
@@ -93,7 +105,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.users is u1
 
     def test_relationship_self_referential(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         Node = Base.classes.nodes
@@ -110,10 +122,10 @@ class AutomapTest(fixtures.MappedTest):
         This test verifies that prepare can accept an optional schema
         argument and pass it to reflect.
         """
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         engine_mock = Mock()
         with patch.object(Base.metadata, "reflect") as reflect_mock:
-            Base.prepare(engine_mock, reflect=True, schema="some_schema")
+            Base.prepare(autoload_with=engine_mock, schema="some_schema")
             reflect_mock.assert_called_once_with(
                 engine_mock,
                 schema="some_schema",
@@ -128,10 +140,10 @@ class AutomapTest(fixtures.MappedTest):
         This test verifies that prepare passes a default None if no schema is
         provided.
         """
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         engine_mock = Mock()
         with patch.object(Base.metadata, "reflect") as reflect_mock:
-            Base.prepare(engine_mock, reflect=True)
+            Base.prepare(autoload_with=engine_mock)
             reflect_mock.assert_called_once_with(
                 engine_mock,
                 schema=None,
@@ -139,8 +151,24 @@ class AutomapTest(fixtures.MappedTest):
                 autoload_replace=False,
             )
 
+    def test_prepare_w_dialect_kwargs(self):
+        Base = automap_base(metadata=self.tables_test_metadata)
+        engine_mock = Mock()
+        with patch.object(Base.metadata, "reflect") as reflect_mock:
+            Base.prepare(
+                autoload_with=engine_mock,
+                reflection_options={"oracle_resolve_synonyms": True},
+            )
+            reflect_mock.assert_called_once_with(
+                engine_mock,
+                schema=None,
+                extend_existing=True,
+                autoload_replace=False,
+                oracle_resolve_synonyms=True,
+            )
+
     def test_naming_schemes(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         def classname_for_table(base, tablename, table):
             return str("cls_" + tablename)
@@ -170,7 +198,7 @@ class AutomapTest(fixtures.MappedTest):
         assert a1.scalar_cls_users is u1
 
     def test_relationship_m2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         Base.prepare()
 
@@ -182,7 +210,7 @@ class AutomapTest(fixtures.MappedTest):
         assert o1 in i1.orders_collection
 
     def test_relationship_explicit_override_forwards_m2m(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         class Order(Base):
             __tablename__ = "orders"
@@ -204,8 +232,47 @@ class AutomapTest(fixtures.MappedTest):
         assert isinstance(i1.order_collection, list)
         assert o1 in i1.order_collection
 
+    def test_m2m_relationship_also_map_the_secondary(self):
+        """test #6679"""
+
+        Base = automap_base(metadata=self.tables_test_metadata)
+
+        # extend the table to have pk cols
+        Table(
+            "order_items",
+            self.tables_test_metadata,
+            Column("item_id", None, ForeignKey("items.id"), primary_key=True),
+            Column(
+                "order_id", None, ForeignKey("orders.id"), primary_key=True
+            ),
+            extend_existing=True,
+        )
+
+        # then also map to it
+        class OrderItem(Base):
+            __tablename__ = "order_items"
+
+        Base.prepare()
+
+        Order = Base.classes["orders"]
+        Item = Base.classes["items"]
+
+        o1 = Order()
+        i1 = Item(description="x")
+        o1.items_collection.append(i1)
+
+        s = fixtures.fixture_session()
+
+        s.add(o1)
+        s.flush()
+
+        oi = s.execute(select(OrderItem)).scalars().one()
+
+        is_(oi.items, i1)
+        is_(oi.orders, o1)
+
     def test_relationship_pass_params(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
 
         mock = Mock()
 
@@ -269,7 +336,7 @@ class CascadeTest(fixtures.MappedTest):
         )
 
     def test_o2m_relationship_cascade(self):
-        Base = automap_base(metadata=self.metadata)
+        Base = automap_base(metadata=self.tables_test_metadata)
         Base.prepare()
 
         configure_mappers()
@@ -352,7 +419,7 @@ class AutomapInhTest(fixtures.MappedTest):
         class SubUser2(Single):
             __mapper_args__ = {"polymorphic_identity": "u2"}
 
-        Base.prepare(engine=testing.db, reflect=True)
+        Base.prepare(autoload_with=testing.db)
 
         assert SubUser2.__mapper__.inherits is Single.__mapper__
 
@@ -373,7 +440,7 @@ class AutomapInhTest(fixtures.MappedTest):
             __tablename__ = "joined_inh"
             __mapper_args__ = {"polymorphic_identity": "u1"}
 
-        Base.prepare(engine=testing.db, reflect=True)
+        Base.prepare(autoload_with=testing.db)
 
         assert SubJoined.__mapper__.inherits is Joined.__mapper__
 
@@ -387,8 +454,7 @@ class AutomapInhTest(fixtures.MappedTest):
             return None
 
         Base.prepare(
-            engine=testing.db,
-            reflect=True,
+            autoload_with=testing.db,
             generate_relationship=_gen_relationship,
         )
 
@@ -416,7 +482,7 @@ class ConcurrentAutomapTest(fixtures.TestBase):
     def _automap(self, e):
         Base = automap_base()
 
-        Base.prepare(e, reflect=True)
+        Base.prepare(autoload_with=e)
 
         time.sleep(0.01)
         configure_mappers()
@@ -435,6 +501,7 @@ class ConcurrentAutomapTest(fixtures.TestBase):
         finally:
             e.dispose()
 
+    @testing.requires.timing_intensive
     def test_concurrent_automaps_w_configure(self):
         self._success = True
         threads = [threading.Thread(target=self._chaos) for i in range(30)]

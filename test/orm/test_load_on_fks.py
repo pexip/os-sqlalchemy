@@ -2,21 +2,18 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import backref
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import instance_state
 from sqlalchemy.testing import AssertsExecutionResults
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
 
-engine = testing.db
-
-
 class FlushOnPendingTest(AssertsExecutionResults, fixtures.TestBase):
-    def setUp(self):
+    def setup_test(self):
         global Parent, Child, Base
         Base = declarative_base()
 
@@ -36,27 +33,27 @@ class FlushOnPendingTest(AssertsExecutionResults, fixtures.TestBase):
             )
             parent_id = Column(Integer, ForeignKey("parent.id"))
 
-        Base.metadata.create_all(engine)
+        Base.metadata.create_all(testing.db)
 
-    def tearDown(self):
-        Base.metadata.drop_all(engine)
+    def teardown_test(self):
+        Base.metadata.drop_all(testing.db)
 
     def test_annoying_autoflush_one(self):
-        sess = Session(engine)
+        sess = fixture_session()
 
         p1 = Parent()
         sess.add(p1)
         p1.children = []
 
     def test_annoying_autoflush_two(self):
-        sess = Session(engine)
+        sess = fixture_session()
 
         p1 = Parent()
         sess.add(p1)
         assert p1.children == []
 
     def test_dont_load_if_no_keys(self):
-        sess = Session(engine)
+        sess = fixture_session()
 
         p1 = Parent()
         sess.add(p1)
@@ -67,10 +64,10 @@ class FlushOnPendingTest(AssertsExecutionResults, fixtures.TestBase):
         self.assert_sql_count(testing.db, go, 0)
 
 
-class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
-    def setUp(self):
-        global Parent, Child, Base
-        Base = declarative_base()
+class LoadOnFKsTest(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
 
         class Parent(Base):
             __tablename__ = "parent"
@@ -91,11 +88,11 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
 
             parent = relationship(Parent, backref=backref("children"))
 
-        Base.metadata.create_all(engine)
+    @testing.fixture
+    def parent_fixture(self, connection):
+        Parent, Child = self.classes("Parent", "Child")
 
-        global sess, p1, p2, c1, c2
-        sess = Session(bind=engine)
-
+        sess = fixture_session(bind=connection)
         p1 = Parent()
         p2 = Parent()
         c1, c2 = Child(), Child()
@@ -103,18 +100,52 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
         sess.add_all([p1, p2])
         assert c1 in sess
 
-        sess.commit()
+        sess.flush()
 
-    def tearDown(self):
-        sess.rollback()
-        Base.metadata.drop_all(engine)
+        Child.parent.property.load_on_pending = False
 
-    def test_load_on_pending_allows_backref_event(self):
-        Child.parent.property.load_on_pending = True
-        sess.autoflush = False
+        sess.expire_all()
+
+        yield sess, p1, p2, c1, c2
+
+        sess.close()
+
+    def test_m2o_history_on_persistent_allows_backref_event(
+        self, parent_fixture
+    ):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
         c3 = Child()
         sess.add(c3)
         c3.parent_id = p1.id
+        c3.parent = p1
+
+        assert c3 in p1.children
+
+    def test_load_on_persistent_allows_backref_event(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
+        Child.parent.property.load_on_pending = True
+        c3 = Child()
+        sess.add(c3)
+        c3.parent_id = p1.id
+        c3.parent = p1
+
+        assert c3 in p1.children
+
+    def test_load_on_pending_allows_backref_event(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
+        sess.autoflush = False
+
+        Child.parent.property.load_on_pending = True
+        c3 = Child()
+        sess.add(c3)
+        c3.parent_id = p1.id
+
         c3.parent = p1
 
         # backref fired off when c3.parent was set,
@@ -122,47 +153,10 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
         # change as of [ticket:3708]
         assert c3 in p1.children
 
-    def test_enable_rel_loading_allows_backref_event(self):
-        sess.autoflush = False
-        c3 = Child()
-        sess.enable_relationship_loading(c3)
-        c3.parent_id = p1.id
-        c3.parent = p1
+    def test_no_load_on_pending_allows_backref_event(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
 
-        # backref fired off when c3.parent was set,
-        # because the "old" value was None
-        # change as of [ticket:3708]
-        assert c3 in p1.children
-
-    def test_m2o_history_on_persistent_allows_backref_event(self):
-        c3 = Child()
-        sess.add(c3)
-        c3.parent_id = p1.id
-        c3.parent = p1
-
-        assert c3 in p1.children
-
-    def test_load_on_persistent_allows_backref_event(self):
-        Child.parent.property.load_on_pending = True
-        c3 = Child()
-        sess.add(c3)
-        c3.parent_id = p1.id
-        c3.parent = p1
-
-        assert c3 in p1.children
-
-    def test_enable_rel_loading_on_persistent_allows_backref_event(self):
-        c3 = Child()
-        sess.enable_relationship_loading(c3)
-        c3.parent_id = p1.id
-        c3.parent = p1
-
-        # backref fired off when c3.parent was set,
-        # because the "old" value was None
-        # change as of [ticket:3708]
-        assert c3 in p1.children
-
-    def test_no_load_on_pending_allows_backref_event(self):
         # users who stick with the program and don't use
         # 'load_on_pending' get expected behavior
 
@@ -175,7 +169,13 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
 
         assert c3 in p1.children
 
-    def test_autoflush_on_pending(self):
+    def test_autoflush_on_pending(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
+        # ensure p1.id is not expired
+        p1.id
+
         c3 = Child()
         sess.add(c3)
         c3.parent_id = p1.id
@@ -183,7 +183,13 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
         # pendings don't autoflush
         assert c3.parent is None
 
-    def test_autoflush_load_on_pending_on_pending(self):
+    def test_autoflush_load_on_pending_on_pending(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
+        # ensure p1.id is not expired
+        p1.id
+
         Child.parent.property.load_on_pending = True
         c3 = Child()
         sess.add(c3)
@@ -192,7 +198,10 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
         # ...unless the flag is on
         assert c3.parent is p1
 
-    def test_collection_load_from_pending_populated(self):
+    def test_collection_load_from_pending_populated(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
         Parent.children.property.load_on_pending = True
         p2 = Parent(id=p1.id)
         sess.add(p2)
@@ -203,7 +212,10 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
 
         self.assert_sql_count(testing.db, go, 1)
 
-    def test_collection_load_from_pending_no_sql(self):
+    def test_collection_load_from_pending_no_sql(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
         Parent.children.property.load_on_pending = True
         p2 = Parent(id=None)
         sess.add(p2)
@@ -215,7 +227,10 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
 
         self.assert_sql_count(testing.db, go, 0)
 
-    def test_load_on_pending_with_set(self):
+    def test_load_on_pending_with_set(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
         Child.parent.property.load_on_pending = True
 
         p1.children
@@ -230,7 +245,10 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
 
         self.assert_sql_count(testing.db, go, 0)
 
-    def test_backref_doesnt_double(self):
+    def test_backref_doesnt_double(self, parent_fixture):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
+
         Child.parent.property.load_on_pending = True
         sess.autoflush = False
         p1.children
@@ -242,112 +260,133 @@ class LoadOnFKsTest(AssertsExecutionResults, fixtures.TestBase):
         c3.parent = p1
         assert len(p1.children) == 2
 
-    def test_m2o_lazy_loader_on_persistent(self):
+    @testing.combinations(True, False, argnames="loadfk")
+    @testing.combinations(True, False, argnames="loadrel")
+    @testing.combinations(True, False, argnames="autoflush")
+    @testing.combinations(True, False, argnames="manualflush")
+    @testing.combinations(True, False, argnames="fake_autoexpire")
+    def test_m2o_lazy_loader_on_persistent(
+        self,
+        parent_fixture,
+        loadfk,
+        loadrel,
+        autoflush,
+        manualflush,
+        fake_autoexpire,
+    ):
         """Compare the behaviors from the lazyloader using
         the "committed" state in all cases, vs. the lazyloader
         using the "current" state in all cases except during flush.
 
         """
 
-        for loadfk in (True, False):
-            for loadrel in (True, False):
-                for autoflush in (True, False):
-                    for manualflush in (True, False):
-                        for fake_autoexpire in (True, False):
-                            sess.autoflush = autoflush
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
 
-                            if loadfk:
-                                c1.parent_id
-                            if loadrel:
-                                c1.parent
+        sess.autoflush = autoflush
 
-                            c1.parent_id = p2.id
+        if loadfk:
+            c1.parent_id
+        if loadrel:
+            c1.parent
 
-                            if manualflush:
-                                sess.flush()
+        c1.parent_id = p2.id
 
-                            # fake_autoexpire refers to the eventual
-                            # auto-expire of 'parent' when c1.parent_id
-                            # is altered.
-                            if fake_autoexpire:
-                                sess.expire(c1, ["parent"])
+        if manualflush:
+            sess.flush()
 
-                            # old 0.6 behavior
-                            # if manualflush and (not loadrel or
-                            #                     fake_autoexpire):
-                            #    # a flush occurs, we get p2
-                            #    assert c1.parent is p2
-                            # elif not loadrel and not loadfk:
-                            #    # problematically - we get None since
-                            #    # committed state
-                            #    # is empty when c1.parent_id was mutated,
-                            #    # since we want
-                            #    # to save on selects.  this is
-                            #    # why the patch goes in in 0.6 - this is
-                            #    # mostly a bug.
-                            #    assert c1.parent is None
-                            # else:
-                            #    # if things were loaded, autoflush doesn't
-                            #    # even happen.
-                            #    assert c1.parent is p1
+        # fake_autoexpire refers to the eventual
+        # auto-expire of 'parent' when c1.parent_id
+        # is altered.
+        if fake_autoexpire:
+            sess.expire(c1, ["parent"])
 
-                            # new behavior
-                            if loadrel and not fake_autoexpire:
-                                assert c1.parent is p1
-                            else:
-                                assert c1.parent is p2
+        # old 0.6 behavior
+        # if manualflush and (not loadrel or
+        #                     fake_autoexpire):
+        #    # a flush occurs, we get p2
+        #    assert c1.parent is p2
+        # elif not loadrel and not loadfk:
+        #    # problematically - we get None since
+        #    # committed state
+        #    # is empty when c1.parent_id was mutated,
+        #    # since we want
+        #    # to save on selects.  this is
+        #    # why the patch goes in in 0.6 - this is
+        #    # mostly a bug.
+        #    assert c1.parent is None
+        # else:
+        #    # if things were loaded, autoflush doesn't
+        #    # even happen.
+        #    assert c1.parent is p1
 
-                            sess.rollback()
+        # new behavior
+        if loadrel and not fake_autoexpire:
+            assert c1.parent is p1
+        else:
+            assert c1.parent is p2
 
-    def test_m2o_lazy_loader_on_pending(self):
-        for loadonpending in (False, True):
-            for autoflush in (False, True):
-                for manualflush in (False, True):
-                    Child.parent.property.load_on_pending = loadonpending
-                    sess.autoflush = autoflush
-                    c2 = Child()
-                    sess.add(c2)
-                    c2.parent_id = p2.id
+    @testing.combinations(True, False, argnames="loadonpending")
+    @testing.combinations(True, False, argnames="autoflush")
+    @testing.combinations(True, False, argnames="manualflush")
+    def test_m2o_lazy_loader_on_pending(
+        self, parent_fixture, loadonpending, autoflush, manualflush
+    ):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
 
-                    if manualflush:
-                        sess.flush()
+        Child.parent.property.load_on_pending = loadonpending
+        sess.autoflush = autoflush
 
-                    if loadonpending or manualflush:
-                        assert c2.parent is p2
-                    else:
-                        assert c2.parent is None
+        # ensure p2.id not expired
+        p2.id
 
-                    sess.rollback()
+        c2 = Child()
+        sess.add(c2)
+        c2.parent_id = p2.id
 
-    def test_m2o_lazy_loader_on_transient(self):
-        for loadonpending in (False, True):
-            for attach in (False, True):
-                for autoflush in (False, True):
-                    for manualflush in (False, True):
-                        for enable_relationship_rel in (False, True):
-                            Child.parent.property.load_on_pending = (
-                                loadonpending
-                            )
-                            sess.autoflush = autoflush
-                            c2 = Child()
+        if manualflush:
+            sess.flush()
 
-                            if attach:
-                                state = instance_state(c2)
-                                state.session_id = sess.hash_key
+        if loadonpending or manualflush:
+            assert c2.parent is p2
+        else:
+            assert c2.parent is None
 
-                            if enable_relationship_rel:
-                                sess.enable_relationship_loading(c2)
+    @testing.combinations(True, False, argnames="loadonpending")
+    @testing.combinations(True, False, argnames="attach")
+    @testing.combinations(True, False, argnames="autoflush")
+    @testing.combinations(True, False, argnames="manualflush")
+    @testing.combinations(True, False, argnames="enable_relationship_rel")
+    def test_m2o_lazy_loader_on_transient(
+        self,
+        parent_fixture,
+        loadonpending,
+        attach,
+        autoflush,
+        manualflush,
+        enable_relationship_rel,
+    ):
+        sess, p1, p2, c1, c2 = parent_fixture
+        Parent, Child = self.classes("Parent", "Child")
 
-                            c2.parent_id = p2.id
+        Child.parent.property.load_on_pending = loadonpending
+        sess.autoflush = autoflush
+        c2 = Child()
 
-                            if manualflush:
-                                sess.flush()
+        if attach:
+            state = instance_state(c2)
+            state.session_id = sess.hash_key
 
-                            if (
-                                loadonpending and attach
-                            ) or enable_relationship_rel:
-                                assert c2.parent is p2
-                            else:
-                                assert c2.parent is None
+        if enable_relationship_rel:
+            sess.enable_relationship_loading(c2)
 
-                            sess.rollback()
+        c2.parent_id = p2.id
+
+        if manualflush:
+            sess.flush()
+
+        if (loadonpending and attach) or enable_relationship_rel:
+            assert c2.parent is p2
+        else:
+            assert c2.parent is None

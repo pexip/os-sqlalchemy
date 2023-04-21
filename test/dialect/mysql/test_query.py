@@ -9,7 +9,6 @@ from sqlalchemy import Column
 from sqlalchemy import false
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
-from sqlalchemy import MetaData
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import String
@@ -22,60 +21,65 @@ from sqlalchemy.testing import is_
 
 
 class IdiosyncrasyTest(fixtures.TestBase):
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     @testing.emits_warning()
-    def test_is_boolean_symbols_despite_no_native(self):
+    def test_is_boolean_symbols_despite_no_native(self, connection):
+
         is_(
-            testing.db.scalar(select([cast(true().is_(true()), Boolean)])),
+            connection.scalar(select(cast(true().is_(true()), Boolean))),
             True,
         )
 
         is_(
-            testing.db.scalar(select([cast(true().isnot(true()), Boolean)])),
+            connection.scalar(select(cast(true().is_not(true()), Boolean))),
             False,
         )
 
         is_(
-            testing.db.scalar(select([cast(false().is_(false()), Boolean)])),
+            connection.scalar(select(cast(false().is_(false()), Boolean))),
             True,
         )
 
 
-class MatchTest(fixtures.TestBase):
-    __only_on__ = "mysql"
+class MatchTest(fixtures.TablesTest):
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        global metadata, cattable, matchtable
-        metadata = MetaData(testing.db)
-
-        cattable = Table(
+    def define_tables(cls, metadata):
+        Table(
             "cattable",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("description", String(50)),
             mysql_engine="MyISAM",
+            mariadb_engine="MyISAM",
         )
-        matchtable = Table(
+        Table(
             "matchtable",
             metadata,
             Column("id", Integer, primary_key=True),
             Column("title", String(200)),
             Column("category_id", Integer, ForeignKey("cattable.id")),
             mysql_engine="MyISAM",
+            mariadb_engine="MyISAM",
         )
-        metadata.create_all()
 
-        cattable.insert().execute(
+    @classmethod
+    def insert_data(cls, connection):
+        cattable, matchtable = cls.tables("cattable", "matchtable")
+
+        connection.execute(
+            cattable.insert(),
             [
                 {"id": 1, "description": "Python"},
                 {"id": 2, "description": "Ruby"},
-            ]
+            ],
         )
-        matchtable.insert().execute(
+        connection.execute(
+            matchtable.insert(),
             [
                 {
                     "id": 1,
@@ -94,53 +98,44 @@ class MatchTest(fixtures.TestBase):
                     "category_id": 1,
                 },
                 {"id": 5, "title": "Python in a Nutshell", "category_id": 1},
-            ]
+            ],
         )
 
-    @classmethod
-    def teardown_class(cls):
-        metadata.drop_all()
-
-    def test_simple_match(self):
-        results = (
+    def test_simple_match(self, connection):
+        matchtable = self.tables.matchtable
+        results = connection.execute(
             matchtable.select()
             .where(matchtable.c.title.match("python"))
             .order_by(matchtable.c.id)
-            .execute()
-            .fetchall()
-        )
+        ).fetchall()
         eq_([2, 5], [r.id for r in results])
 
-    def test_not_match(self):
-        results = (
+    def test_not_match(self, connection):
+        matchtable = self.tables.matchtable
+        results = connection.execute(
             matchtable.select()
             .where(~matchtable.c.title.match("python"))
             .order_by(matchtable.c.id)
-            .execute()
-            .fetchall()
         )
         eq_([1, 3, 4], [r.id for r in results])
 
-    def test_simple_match_with_apostrophe(self):
-        results = (
-            matchtable.select()
-            .where(matchtable.c.title.match("Matz's"))
-            .execute()
-            .fetchall()
-        )
+    def test_simple_match_with_apostrophe(self, connection):
+        matchtable = self.tables.matchtable
+        results = connection.execute(
+            matchtable.select().where(matchtable.c.title.match("Matz's"))
+        ).fetchall()
         eq_([3], [r.id for r in results])
 
-    def test_return_value(self):
+    def test_return_value(self, connection):
+        matchtable = self.tables.matchtable
         # test [ticket:3263]
-        result = testing.db.execute(
+        result = connection.execute(
             select(
-                [
-                    matchtable.c.title.match("Agile Ruby Programming").label(
-                        "ruby"
-                    ),
-                    matchtable.c.title.match("Dive Python").label("python"),
-                    matchtable.c.title,
-                ]
+                matchtable.c.title.match("Agile Ruby Programming").label(
+                    "ruby"
+                ),
+                matchtable.c.title.match("Dive Python").label("python"),
+                matchtable.c.title,
             ).order_by(matchtable.c.id)
         ).fetchall()
         eq_(
@@ -154,8 +149,9 @@ class MatchTest(fixtures.TestBase):
             ],
         )
 
-    def test_or_match(self):
-        results1 = (
+    def test_or_match(self, connection):
+        matchtable = self.tables.matchtable
+        results1 = connection.execute(
             matchtable.select()
             .where(
                 or_(
@@ -164,42 +160,37 @@ class MatchTest(fixtures.TestBase):
                 )
             )
             .order_by(matchtable.c.id)
-            .execute()
-            .fetchall()
-        )
+        ).fetchall()
         eq_([1, 3, 5], [r.id for r in results1])
-        results2 = (
+        results2 = connection.execute(
             matchtable.select()
             .where(matchtable.c.title.match("nutshell ruby"))
             .order_by(matchtable.c.id)
-            .execute()
-            .fetchall()
-        )
+        ).fetchall()
         eq_([1, 3, 5], [r.id for r in results2])
 
-    def test_and_match(self):
-        results1 = (
-            matchtable.select()
-            .where(
+    def test_and_match(self, connection):
+        matchtable = self.tables.matchtable
+        results1 = connection.execute(
+            matchtable.select().where(
                 and_(
                     matchtable.c.title.match("python"),
                     matchtable.c.title.match("nutshell"),
                 )
             )
-            .execute()
-            .fetchall()
-        )
+        ).fetchall()
         eq_([5], [r.id for r in results1])
-        results2 = (
-            matchtable.select()
-            .where(matchtable.c.title.match("+python +nutshell"))
-            .execute()
-            .fetchall()
-        )
+        results2 = connection.execute(
+            matchtable.select().where(
+                matchtable.c.title.match("+python +nutshell")
+            )
+        ).fetchall()
         eq_([5], [r.id for r in results2])
 
-    def test_match_across_joins(self):
-        results = (
+    def test_match_across_joins(self, connection):
+        matchtable = self.tables.matchtable
+        cattable = self.tables.cattable
+        results = connection.execute(
             matchtable.select()
             .where(
                 and_(
@@ -211,14 +202,12 @@ class MatchTest(fixtures.TestBase):
                 )
             )
             .order_by(matchtable.c.id)
-            .execute()
-            .fetchall()
-        )
+        ).fetchall()
         eq_([1, 3, 5], [r.id for r in results])
 
 
 class AnyAllTest(fixtures.TablesTest):
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     @classmethod
@@ -244,24 +233,24 @@ class AnyAllTest(fixtures.TablesTest):
             ],
         )
 
-    def test_any_w_comparator(self):
+    def test_any_w_comparator(self, connection):
         stuff = self.tables.stuff
-        stmt = select([stuff.c.id]).where(
-            stuff.c.value > any_(select([stuff.c.value]))
+        stmt = select(stuff.c.id).where(
+            stuff.c.value > any_(select(stuff.c.value).scalar_subquery())
         )
 
-        eq_(testing.db.execute(stmt).fetchall(), [(2,), (3,), (4,), (5,)])
+        eq_(connection.execute(stmt).fetchall(), [(2,), (3,), (4,), (5,)])
 
-    def test_all_w_comparator(self):
+    def test_all_w_comparator(self, connection):
         stuff = self.tables.stuff
-        stmt = select([stuff.c.id]).where(
-            stuff.c.value >= all_(select([stuff.c.value]))
+        stmt = select(stuff.c.id).where(
+            stuff.c.value >= all_(select(stuff.c.value).scalar_subquery())
         )
 
-        eq_(testing.db.execute(stmt).fetchall(), [(5,)])
+        eq_(connection.execute(stmt).fetchall(), [(5,)])
 
-    def test_any_literal(self):
+    def test_any_literal(self, connection):
         stuff = self.tables.stuff
-        stmt = select([4 == any_(select([stuff.c.value]))])
+        stmt = select(4 == any_(select(stuff.c.value).scalar_subquery()))
 
-        is_(testing.db.execute(stmt).scalar(), True)
+        is_(connection.execute(stmt).scalar(), True)

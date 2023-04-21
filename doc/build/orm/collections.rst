@@ -32,32 +32,42 @@ loading of child items both at load time as well as deletion time.
 Dynamic Relationship Loaders
 ----------------------------
 
-A key feature to enable management of a large collection is the so-called "dynamic"
-relationship.  This is an optional form of :func:`~sqlalchemy.orm.relationship` which
-returns a :class:`~sqlalchemy.orm.query.Query` object in place of a collection
-when accessed. :func:`~sqlalchemy.orm.query.Query.filter` criterion may be
-applied as well as limits and offsets, either explicitly or via array slices::
+.. note:: SQLAlchemy 2.0 will have a slightly altered pattern for "dynamic"
+   loaders that does not rely upon the :class:`_orm.Query` object, which
+   will be legacy in 2.0.   For current migration strategies,
+   see :ref:`migration_20_dynamic_loaders`.
+
+.. note:: This loader is in the general case not compatible with the :ref:`asyncio_toplevel` extension.
+   It can be used with some limitations, as indicated in :ref:`Asyncio dynamic guidelines <dynamic_asyncio>`.
+
+A :func:`_orm.relationship` which corresponds to a large collection can be
+configured so that it returns a legacy :class:`_orm.Query` object when
+accessed, which allows filtering of the relationship on criteria. The class is
+a special class :class:`_orm.AppenderQuery` returned in place of a collection
+when accessed. Filtering criterion may be applied as well as limits and
+offsets, either explicitly or via array slices::
 
     class User(Base):
-        __tablename__ = 'user'
+        __tablename__ = "user"
 
         posts = relationship(Post, lazy="dynamic")
 
-    jack = session.query(User).get(id)
+
+    jack = session.get(User, id)
 
     # filter Jack's blog posts
-    posts = jack.posts.filter(Post.headline=='this is a post')
+    posts = jack.posts.filter(Post.headline == "this is a post")
 
     # apply array slices
     posts = jack.posts[5:20]
 
 The dynamic relationship supports limited write operations, via the
-``append()`` and ``remove()`` methods::
+:meth:`_orm.AppenderQuery.append` and :meth:`_orm.AppenderQuery.remove` methods::
 
-    oldpost = jack.posts.filter(Post.headline=='old post').one()
+    oldpost = jack.posts.filter(Post.headline == "old post").one()
     jack.posts.remove(oldpost)
 
-    jack.posts.append(Post('new post'))
+    jack.posts.append(Post("new post"))
 
 Since the read side of the dynamic relationship always queries the
 database, changes to the underlying collection will not be visible
@@ -72,11 +82,12 @@ function in conjunction with ``lazy='dynamic'``::
     class Post(Base):
         __table__ = posts_table
 
-        user = relationship(User,
-                    backref=backref('posts', lazy='dynamic')
-                )
+        user = relationship(User, backref=backref("posts", lazy="dynamic"))
 
 Note that eager/lazy loading options cannot be used in conjunction dynamic relationships at this time.
+
+.. autoclass:: sqlalchemy.orm.AppenderQuery
+    :members:
 
 .. note::
 
@@ -99,9 +110,9 @@ A "noload" relationship never loads from the database, even when
 accessed.   It is configured using ``lazy='noload'``::
 
     class MyClass(Base):
-        __tablename__ = 'some_table'
+        __tablename__ = "some_table"
 
-        children = relationship(MyOtherClass, lazy='noload')
+        children = relationship(MyOtherClass, lazy="noload")
 
 Above, the ``children`` collection is fully writeable, and changes to it will
 be persisted to the database as well as locally available for reading at the
@@ -115,9 +126,9 @@ Alternatively, a "raise"-loaded relationship will raise an
 emit a lazy load::
 
     class MyClass(Base):
-        __tablename__ = 'some_table'
+        __tablename__ = "some_table"
 
-        children = relationship(MyOtherClass, lazy='raise')
+        children = relationship(MyOtherClass, lazy="raise")
 
 Above, attribute access on the ``children`` collection will raise an exception
 if it was not previously eagerloaded.  This includes read access but for
@@ -154,10 +165,11 @@ values accessible through an attribute on the parent instance. By default,
 this collection is a ``list``::
 
     class Parent(Base):
-        __tablename__ = 'parent'
+        __tablename__ = "parent"
         parent_id = Column(Integer, primary_key=True)
 
         children = relationship(Child)
+
 
     parent = Parent()
     parent.children.append(Child())
@@ -169,11 +181,12 @@ default list, by specifying the :paramref:`_orm.relationship.collection_class` o
 :func:`~sqlalchemy.orm.relationship`::
 
     class Parent(Base):
-        __tablename__ = 'parent'
+        __tablename__ = "parent"
         parent_id = Column(Integer, primary_key=True)
 
         # use a set
         children = relationship(Child, collection_class=set)
+
 
     parent = Parent()
     child = Child()
@@ -191,24 +204,27 @@ to achieve a simple dictionary collection.  It produces a dictionary class that 
 of the mapped class as a key.   Below we map an ``Item`` class containing
 a dictionary of ``Note`` items keyed to the ``Note.keyword`` attribute::
 
-    from sqlalchemy import Column, Integer, String, ForeignKey
-    from sqlalchemy.orm import relationship
+    from sqlalchemy import Column, ForeignKey, Integer, String
+    from sqlalchemy.orm import declarative_base, relationship
     from sqlalchemy.orm.collections import attribute_mapped_collection
-    from sqlalchemy.ext.declarative import declarative_base
 
     Base = declarative_base()
 
+
     class Item(Base):
-        __tablename__ = 'item'
+        __tablename__ = "item"
         id = Column(Integer, primary_key=True)
-        notes = relationship("Note",
-                    collection_class=attribute_mapped_collection('keyword'),
-                    cascade="all, delete-orphan")
+        notes = relationship(
+            "Note",
+            collection_class=attribute_mapped_collection("keyword"),
+            cascade="all, delete-orphan",
+        )
+
 
     class Note(Base):
-        __tablename__ = 'note'
+        __tablename__ = "note"
         id = Column(Integer, primary_key=True)
-        item_id = Column(Integer, ForeignKey('item.id'), nullable=False)
+        item_id = Column(Integer, ForeignKey("item.id"), nullable=False)
         keyword = Column(String)
         text = Column(String)
 
@@ -219,7 +235,7 @@ a dictionary of ``Note`` items keyed to the ``Note.keyword`` attribute::
 ``Item.notes`` is then a dictionary::
 
     >>> item = Item()
-    >>> item.notes['a'] = Note('a', 'atext')
+    >>> item.notes["a"] = Note("a", "atext")
     >>> item.notes.items()
     {'a': <__main__.Note object at 0x2eaaf0>}
 
@@ -230,9 +246,9 @@ key we supply must match that of the actual ``Note`` object::
 
     item = Item()
     item.notes = {
-                'a': Note('a', 'atext'),
-                'b': Note('b', 'btext')
-            }
+        "a": Note("a", "atext"),
+        "b": Note("b", "btext"),
+    }
 
 The attribute which :func:`.attribute_mapped_collection` uses as a key
 does not need to be mapped at all!  Using a regular Python ``@property`` allows virtually
@@ -241,17 +257,20 @@ below when we establish it as a tuple of ``Note.keyword`` and the first ten lett
 of the ``Note.text`` field::
 
     class Item(Base):
-        __tablename__ = 'item'
+        __tablename__ = "item"
         id = Column(Integer, primary_key=True)
-        notes = relationship("Note",
-                    collection_class=attribute_mapped_collection('note_key'),
-                    backref="item",
-                    cascade="all, delete-orphan")
+        notes = relationship(
+            "Note",
+            collection_class=attribute_mapped_collection("note_key"),
+            backref="item",
+            cascade="all, delete-orphan",
+        )
+
 
     class Note(Base):
-        __tablename__ = 'note'
+        __tablename__ = "note"
         id = Column(Integer, primary_key=True)
-        item_id = Column(Integer, ForeignKey('item.id'), nullable=False)
+        item_id = Column(Integer, ForeignKey("item.id"), nullable=False)
         keyword = Column(String)
         text = Column(String)
 
@@ -278,12 +297,15 @@ object directly::
 
     from sqlalchemy.orm.collections import column_mapped_collection
 
+
     class Item(Base):
-        __tablename__ = 'item'
+        __tablename__ = "item"
         id = Column(Integer, primary_key=True)
-        notes = relationship("Note",
-                    collection_class=column_mapped_collection(Note.__table__.c.keyword),
-                    cascade="all, delete-orphan")
+        notes = relationship(
+            "Note",
+            collection_class=column_mapped_collection(Note.__table__.c.keyword),
+            cascade="all, delete-orphan",
+        )
 
 as well as :func:`.mapped_collection` which is passed any callable function.
 Note that it's usually easier to use :func:`.attribute_mapped_collection` along
@@ -291,12 +313,15 @@ with a ``@property`` as mentioned earlier::
 
     from sqlalchemy.orm.collections import mapped_collection
 
+
     class Item(Base):
-        __tablename__ = 'item'
+        __tablename__ = "item"
         id = Column(Integer, primary_key=True)
-        notes = relationship("Note",
-                    collection_class=mapped_collection(lambda note: note.text[0:10]),
-                    cascade="all, delete-orphan")
+        notes = relationship(
+            "Note",
+            collection_class=mapped_collection(lambda note: note.text[0:10]),
+            cascade="all, delete-orphan",
+        )
 
 Dictionary mappings are often combined with the "Association Proxy" extension to produce
 streamlined dictionary views.  See :ref:`proxying_dictionaries` and :ref:`composite_association_proxy`
@@ -345,7 +370,7 @@ if the value of ``B.data`` is not set yet, the key will be ``None``::
 
 Setting ``b1.data`` after the fact does not update the collection::
 
-    >>> b1.data = 'the key'
+    >>> b1.data = "the key"
     >>> a1.bs
     {None: <test3.B object at 0x7f7b1023ef70>}
 
@@ -353,14 +378,14 @@ Setting ``b1.data`` after the fact does not update the collection::
 This can also be seen if one attempts to set up ``B()`` in the constructor.
 The order of arguments changes the result::
 
-    >>> B(a=a1, data='the key')
+    >>> B(a=a1, data="the key")
     <test3.B object at 0x7f7b10114280>
     >>> a1.bs
     {None: <test3.B object at 0x7f7b10114280>}
 
 vs::
 
-    >>> B(data='the key', a=a1)
+    >>> B(data="the key", a=a1)
     <test3.B object at 0x7f7b10114340>
     >>> a1.bs
     {'the key': <test3.B object at 0x7f7b10114340>}
@@ -372,8 +397,8 @@ An event handler such as the following may also be used to track changes in the
 collection as well::
 
     from sqlalchemy import event
-
     from sqlalchemy.orm import attributes
+
 
     @event.listens_for(B.data, "set")
     def set_item(obj, value, previous, initiator):
@@ -381,8 +406,6 @@ collection as well::
             previous = None if previous == attributes.NO_VALUE else previous
             obj.a.bs[value] = obj
             obj.a.bs.pop(previous)
-
-
 
 .. autofunction:: attribute_mapped_collection
 
@@ -444,16 +467,21 @@ interface are detected and instrumented via duck-typing:
     class ListLike(object):
         def __init__(self):
             self.data = []
+
         def append(self, item):
             self.data.append(item)
+
         def remove(self, item):
             self.data.remove(item)
+
         def extend(self, items):
             self.data.extend(items)
+
         def __iter__(self):
             return iter(self.data)
+
         def foo(self):
-            return 'foo'
+            return "foo"
 
 ``append``, ``remove``, and ``extend`` are known list-like methods, and will
 be instrumented automatically. ``__iter__`` is not a mutator method and won't
@@ -468,10 +496,13 @@ explicit about the interface you are implementing by providing an
 
         def __init__(self):
             self.data = set()
+
         def append(self, item):
             self.data.add(item)
+
         def remove(self, item):
             self.data.remove(item)
+
         def __iter__(self):
             return iter(self.data)
 
@@ -498,6 +529,7 @@ get the job done.
 .. sourcecode:: python
 
     from sqlalchemy.orm.collections import collection
+
 
     class SetLike(object):
         __emulates__ = set
@@ -557,6 +589,7 @@ collection support to other classes. It uses a keying function to delegate to
     from sqlalchemy.util import OrderedDict
     from sqlalchemy.orm.collections import MappedCollection
 
+
     class NodeMap(OrderedDict, MappedCollection):
         """Holds 'Node' objects, keyed by the 'name' attribute with insert order maintained."""
 
@@ -573,8 +606,8 @@ from within an already instrumented call can cause events to be fired off
 repeatedly, or inappropriately, leading to internal state corruption in
 rare cases::
 
-    from sqlalchemy.orm.collections import MappedCollection,\
-                                        collection
+    from sqlalchemy.orm.collections import MappedCollection, collection
+
 
     class MyMappedCollection(MappedCollection):
         """Use @internally_instrumented when your methods
@@ -599,20 +632,6 @@ must decorate appender and remover methods, however- there are no compatible
 methods in the basic dictionary interface for SQLAlchemy to use by default.
 Iteration will go through ``itervalues()`` unless otherwise decorated.
 
-.. note::
-
-   Due to a bug in MappedCollection prior to version 0.7.6, this
-   workaround usually needs to be called before a custom subclass
-   of :class:`.MappedCollection` which uses :meth:`.collection.internally_instrumented`
-   can be used::
-
-    from sqlalchemy.orm.collections import _instrument_class, MappedCollection
-    _instrument_class(MappedCollection)
-
-   This will ensure that the :class:`.MappedCollection` has been properly
-   initialized with custom ``__setitem__()`` and ``__delitem__()``
-   methods before used in a custom subclass.
-
 .. autoclass:: sqlalchemy.orm.collections.MappedCollection
    :members:
 
@@ -634,6 +653,7 @@ to restrict the decorations to just your usage in relationships. For example:
     class MyAwesomeList(some.great.library.AwesomeList):
         pass
 
+
     # ... relationship(..., collection_class=MyAwesomeList)
 
 The ORM uses this approach for built-ins, quietly substituting a trivial
@@ -645,8 +665,6 @@ Collection Internals
 Various internal methods.
 
 .. autofunction:: bulk_replace
-
-.. autoclass:: collection
 
 .. autodata:: collection_adapter
 

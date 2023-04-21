@@ -8,8 +8,9 @@ The Frequently Asked Questions section is a growing collection of commonly
 observed questions to well-known issues.
 
 .. toctree::
-    :maxdepth: 1
+    :maxdepth: 2
 
+    installation
     connections
     metadata_schema
     sqlexpressions

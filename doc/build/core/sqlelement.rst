@@ -14,15 +14,15 @@ in a SQL statement, such as in the columns clause, WHERE clause, and ORDER BY
 clause, and :class:`.FromClause`, which represents the role of a token that
 is placed in the FROM clause of a SELECT statement.
 
-.. autofunction:: all_
+.. _sqlelement_foundational_constructors:
+
+Column Element Foundational Constructors
+-----------------------------------------
+
+Standalone functions imported from the ``sqlalchemy`` namespace which are
+used when building up SQLAlchemy Expression Language constructs.
 
 .. autofunction:: and_
-
-.. autofunction:: any_
-
-.. autofunction:: asc
-
-.. autofunction:: between
 
 .. autofunction:: bindparam
 
@@ -30,11 +30,10 @@ is placed in the FROM clause of a SELECT statement.
 
 .. autofunction:: cast
 
-.. autofunction:: sqlalchemy.sql.expression.column
+.. autofunction:: column
 
-.. autofunction:: collate
-
-.. autofunction:: desc
+.. autoclass:: custom_op
+   :members:
 
 .. autofunction:: distinct
 
@@ -44,9 +43,7 @@ is placed in the FROM clause of a SELECT statement.
 
 .. autodata:: func
 
-.. autofunction:: funcfilter
-
-.. autofunction:: label
+.. autofunction:: lambda_stmt
 
 .. autofunction:: literal
 
@@ -56,15 +53,9 @@ is placed in the FROM clause of a SELECT statement.
 
 .. autofunction:: null
 
-.. autofunction:: nullsfirst
-
-.. autofunction:: nullslast
-
 .. autofunction:: or_
 
 .. autofunction:: outparam
-
-.. autofunction:: over
 
 .. autofunction:: text
 
@@ -74,7 +65,54 @@ is placed in the FROM clause of a SELECT statement.
 
 .. autofunction:: type_coerce
 
+.. autoclass:: quoted_name
+
+   .. attribute:: quote
+
+      whether the string should be unconditionally quoted
+
+
+.. _sqlelement_modifier_constructors:
+
+Column Element Modifier Constructors
+-------------------------------------
+
+Functions listed here are more commonly available as methods from any
+:class:`_sql.ColumnElement` construct, for example, the
+:func:`_sql.label` function is usually invoked via the
+:meth:`_sql.ColumnElement.label` method.
+
+.. autofunction:: all_
+
+.. autofunction:: any_
+
+.. autofunction:: asc
+
+.. autofunction:: between
+
+.. autofunction:: collate
+
+.. autofunction:: desc
+
+.. autofunction:: funcfilter
+
+.. autofunction:: label
+
+.. autofunction:: nulls_first
+
+.. autofunction:: nulls_last
+
+.. autofunction:: over
+
 .. autofunction:: within_group
+
+Column Element Class Documentation
+-----------------------------------
+
+The classes here are generated using the constructors listed at
+:ref:`sqlelement_foundational_constructors` and
+:ref:`sqlelement_modifier_constructors`.
+
 
 .. autoclass:: BinaryExpression
    :members:
@@ -87,10 +125,6 @@ is placed in the FROM clause of a SELECT statement.
 
 .. autoclass:: Cast
    :members:
-
-.. autoclass:: ClauseElement
-   :members:
-
 
 .. autoclass:: ClauseList
    :members:
@@ -108,18 +142,16 @@ is placed in the FROM clause of a SELECT statement.
    :inherited-members:
    :undoc-members:
 
-.. autoclass:: sqlalchemy.sql.operators.ColumnOperators
+.. autoclass:: ColumnOperators
    :members:
    :special-members:
    :inherited-members:
 
-.. autoclass:: sqlalchemy.sql.base.DialectKWArgs
-   :members:
 
 .. autoclass:: Extract
    :members:
 
-.. autoclass:: sqlalchemy.sql.elements.False_
+.. autoclass:: False_
    :members:
 
 .. autoclass:: FunctionFilter
@@ -128,8 +160,12 @@ is placed in the FROM clause of a SELECT statement.
 .. autoclass:: Label
    :members:
 
-.. autoclass:: sqlalchemy.sql.elements.Null
+.. autoclass:: Null
    :members:
+
+.. autoclass:: Operators
+   :members:
+   :special-members:
 
 .. autoclass:: Over
    :members:
@@ -143,24 +179,14 @@ is placed in the FROM clause of a SELECT statement.
 .. autoclass:: WithinGroup
    :members:
 
-.. autoclass:: sqlalchemy.sql.elements.True_
+.. autoclass:: sqlalchemy.sql.elements.WrapsColumnExpression
+   :members:
+
+.. autoclass:: True_
    :members:
 
 .. autoclass:: TypeCoerce
    :members:
-
-.. autoclass:: sqlalchemy.sql.operators.custom_op
-   :members:
-
-.. autoclass:: sqlalchemy.sql.operators.Operators
-   :members:
-   :special-members:
-
-.. autoclass:: sqlalchemy.sql.elements.quoted_name
-
-   .. attribute:: quote
-
-      whether the string should be unconditionally quoted
 
 .. autoclass:: UnaryExpression
    :members:

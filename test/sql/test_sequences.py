@@ -1,4 +1,5 @@
 import sqlalchemy as sa
+from sqlalchemy import BigInteger
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import Sequence
@@ -13,6 +14,8 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.assertsql import EachOf
@@ -26,7 +29,8 @@ class SequenceDDLTest(fixtures.TestBase, testing.AssertsCompiledSQL):
 
     def test_create_drop_ddl(self):
         self.assert_compile(
-            CreateSequence(Sequence("foo_seq")), "CREATE SEQUENCE foo_seq"
+            CreateSequence(Sequence("foo_seq")),
+            "CREATE SEQUENCE foo_seq START WITH 1",
         )
 
         self.assert_compile(
@@ -36,7 +40,7 @@ class SequenceDDLTest(fixtures.TestBase, testing.AssertsCompiledSQL):
 
         self.assert_compile(
             CreateSequence(Sequence("foo_seq", increment=2)),
-            "CREATE SEQUENCE foo_seq INCREMENT BY 2",
+            "CREATE SEQUENCE foo_seq INCREMENT BY 2 START WITH 1",
         )
 
         self.assert_compile(
@@ -81,12 +85,12 @@ class SequenceDDLTest(fixtures.TestBase, testing.AssertsCompiledSQL):
 
         self.assert_compile(
             CreateSequence(Sequence("foo_seq", cache=1000, order=True)),
-            "CREATE SEQUENCE foo_seq CACHE 1000 ORDER",
+            "CREATE SEQUENCE foo_seq START WITH 1 CACHE 1000 ORDER",
         )
 
         self.assert_compile(
             CreateSequence(Sequence("foo_seq", order=True)),
-            "CREATE SEQUENCE foo_seq ORDER",
+            "CREATE SEQUENCE foo_seq START WITH 1 ORDER",
         )
 
         self.assert_compile(
@@ -94,82 +98,24 @@ class SequenceDDLTest(fixtures.TestBase, testing.AssertsCompiledSQL):
         )
 
 
-class LegacySequenceExecTest(fixtures.TestBase):
-    __requires__ = ("sequences",)
-    __backend__ = True
-
-    @classmethod
-    def setup_class(cls):
-        cls.seq = Sequence("my_sequence")
-        cls.seq.create(testing.db)
-
-    @classmethod
-    def teardown_class(cls):
-        cls.seq.drop(testing.db)
-
-    def _assert_seq_result(self, ret):
-        """asserts return of next_value is an int"""
-
-        assert isinstance(ret, util.int_types)
-        assert ret > 0
-
-    def test_implicit_connectionless(self):
-        s = Sequence("my_sequence", metadata=MetaData(testing.db))
-        self._assert_seq_result(s.execute())
-
-    def test_explicit(self, connection):
-        s = Sequence("my_sequence")
-        self._assert_seq_result(s.execute(connection))
-
-    def test_explicit_optional(self):
-        """test dialect executes a Sequence, returns nextval, whether
-        or not "optional" is set"""
-
-        s = Sequence("my_sequence", optional=True)
-        self._assert_seq_result(s.execute(testing.db))
-
-    def test_func_implicit_connectionless_execute(self):
-        """test func.next_value().execute()/.scalar() works
-        with connectionless execution."""
-
-        s = Sequence("my_sequence", metadata=MetaData(testing.db))
-        self._assert_seq_result(s.next_value().execute().scalar())
-
-    def test_func_explicit(self):
-        s = Sequence("my_sequence")
-        self._assert_seq_result(testing.db.scalar(s.next_value()))
-
-    def test_func_implicit_connectionless_scalar(self):
-        """test func.next_value().execute()/.scalar() works. """
-
-        s = Sequence("my_sequence", metadata=MetaData(testing.db))
-        self._assert_seq_result(s.next_value().scalar())
-
-    def test_func_embedded_select(self):
-        """test can use next_value() in select column expr"""
-
-        s = Sequence("my_sequence")
-        self._assert_seq_result(testing.db.scalar(select([s.next_value()])))
-
-
 class SequenceExecTest(fixtures.TestBase):
     __requires__ = ("sequences",)
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         cls.seq = Sequence("my_sequence")
         cls.seq.create(testing.db)
 
     @classmethod
-    def teardown_class(cls):
+    def teardown_test_class(cls):
         cls.seq.drop(testing.db)
 
     def _assert_seq_result(self, ret):
         """asserts return of next_value is an int"""
 
         assert isinstance(ret, util.int_types)
-        assert ret > 0
+        assert ret >= testing.db.dialect.default_sequence_base
 
     def test_execute(self, connection):
         s = Sequence("my_sequence")
@@ -200,9 +146,9 @@ class SequenceExecTest(fixtures.TestBase):
         """test can use next_value() in select column expr"""
 
         s = Sequence("my_sequence")
-        self._assert_seq_result(connection.scalar(select([s.next_value()])))
+        self._assert_seq_result(connection.scalar(select(s.next_value())))
 
-    @testing.fails_on("oracle", "ORA-02287: sequence number not allowed here")
+    @testing.requires.sequences_in_other_clauses
     @testing.provide_metadata
     def test_func_embedded_whereclause(self, connection):
         """test can use next_value() in whereclause"""
@@ -224,43 +170,148 @@ class SequenceExecTest(fixtures.TestBase):
         """test can use next_value() in values() of _ValuesBase"""
 
         metadata = self.metadata
-        t1 = Table("t", metadata, Column("x", Integer))
+        t1 = Table(
+            "t",
+            metadata,
+            Column("x", Integer),
+        )
         t1.create(testing.db)
         s = Sequence("my_sequence")
         connection.execute(t1.insert().values(x=s.next_value()))
         self._assert_seq_result(connection.scalar(t1.select()))
 
-    @testing.requires.supports_lastrowid
     @testing.provide_metadata
-    def test_inserted_pk_no_returning_w_lastrowid(self):
-        """test inserted_primary_key contains the pk when
-        pk_col=next_value(), lastrowid is supported."""
-
-        metadata = self.metadata
-        t1 = Table("t", metadata, Column("x", Integer, primary_key=True))
-        t1.create(testing.db)
-        e = engines.testing_engine(options={"implicit_returning": False})
-        s = Sequence("my_sequence")
-
-        with e.connect() as conn:
-            r = conn.execute(t1.insert().values(x=s.next_value()))
-            self._assert_seq_result(r.inserted_primary_key[0])
-
-    @testing.requires.no_lastrowid_support
-    @testing.provide_metadata
-    def test_inserted_pk_no_returning_no_lastrowid(self):
+    def test_inserted_pk_no_returning(self):
         """test inserted_primary_key contains [None] when
         pk_col=next_value(), implicit returning is not used."""
 
+        # I'm not really sure what this test wants to accomlish.
+
         metadata = self.metadata
         t1 = Table("t", metadata, Column("x", Integer, primary_key=True))
-        t1.create(testing.db)
+        s = Sequence("my_sequence_here", metadata=metadata)
 
         e = engines.testing_engine(options={"implicit_returning": False})
-        s = Sequence("my_sequence")
-        with e.connect() as conn:
+        with e.begin() as conn:
+
+            t1.create(conn)
+            s.create(conn)
+
             r = conn.execute(t1.insert().values(x=s.next_value()))
-            eq_(r.inserted_primary_key, [None])
+
+            if testing.requires.emulated_lastrowid_even_with_sequences.enabled:
+                eq_(r.inserted_primary_key, (1,))
+            else:
+                eq_(r.inserted_primary_key, (None,))
+
+    @testing.combinations(
+        ("implicit_returning",),
+        ("no_implicit_returning",),
+        ("explicit_returning", testing.requires.returning),
+        ("return_defaults_no_implicit_returning", testing.requires.returning),
+        ("return_defaults_implicit_returning", testing.requires.returning),
+        argnames="returning",
+    )
+    @testing.requires.multivalues_inserts
+    def test_seq_multivalues_inline(self, metadata, testing_engine, returning):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("x", Integer, Sequence("my_seq"), primary_key=True),
+            Column("data", String(50)),
+        )
+
+        e = engines.testing_engine(
+            options={
+                "implicit_returning": "no_implicit_returning" not in returning
+            }
+        )
+        metadata.create_all(e)
+        with e.begin() as conn:
+
+            stmt = t1.insert().values(
+                [{"data": "d1"}, {"data": "d2"}, {"data": "d3"}]
+            )
+            if returning == "explicit_returning":
+                stmt = stmt.returning(t1.c.x)
+            elif "return_defaults" in returning:
+                stmt = stmt.return_defaults()
+
+            r = conn.execute(stmt)
+            if returning == "explicit_returning":
+                eq_(r.all(), [(1,), (2,), (3,)])
+            elif "return_defaults" in returning:
+                eq_(r.returned_defaults_rows, None)
+
+                # TODO: not sure what this is
+                eq_(r.inserted_primary_key_rows, [(None,)])
+
+            eq_(
+                conn.execute(t1.select().order_by(t1.c.x)).all(),
+                [(1, "d1"), (2, "d2"), (3, "d3")],
+            )
+
+    @testing.combinations(
+        ("implicit_returning",),
+        ("no_implicit_returning",),
+        (
+            "explicit_returning",
+            testing.requires.returning
+            + testing.requires.insert_executemany_returning,
+        ),
+        (
+            "return_defaults_no_implicit_returning",
+            testing.requires.returning
+            + testing.requires.insert_executemany_returning,
+        ),
+        (
+            "return_defaults_implicit_returning",
+            testing.requires.returning
+            + testing.requires.insert_executemany_returning,
+        ),
+        argnames="returning",
+    )
+    def test_seq_multivalues_executemany(
+        self, metadata, testing_engine, returning
+    ):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("x", Integer, Sequence("my_seq"), primary_key=True),
+            Column("data", String(50)),
+        )
+
+        e = engines.testing_engine(
+            options={
+                "implicit_returning": "no_implicit_returning" not in returning
+            }
+        )
+        metadata.create_all(e)
+        with e.begin() as conn:
+
+            stmt = t1.insert()
+            if returning == "explicit_returning":
+                stmt = stmt.returning(t1.c.x)
+            elif "return_defaults" in returning:
+                stmt = stmt.return_defaults()
+
+            r = conn.execute(
+                stmt, [{"data": "d1"}, {"data": "d2"}, {"data": "d3"}]
+            )
+            if returning == "explicit_returning":
+                eq_(r.all(), [(1,), (2,), (3,)])
+            elif "return_defaults" in returning:
+                if "no_implicit_returning" in returning:
+                    eq_(r.returned_defaults_rows, None)
+                    eq_(r.inserted_primary_key_rows, [(1,), (2,), (3,)])
+                else:
+                    eq_(r.returned_defaults_rows, [(1,), (2,), (3,)])
+                    eq_(r.inserted_primary_key_rows, [(1,), (2,), (3,)])
+
+            eq_(
+                conn.execute(t1.select().order_by(t1.c.x)).all(),
+                [(1, "d1"), (2, "d2"), (3, "d3")],
+            )
 
     @testing.requires.returning
     @testing.provide_metadata
@@ -270,13 +321,26 @@ class SequenceExecTest(fixtures.TestBase):
 
         metadata = self.metadata
         s = Sequence("my_sequence")
-        t1 = Table("t", metadata, Column("x", Integer, primary_key=True))
+        t1 = Table(
+            "t",
+            metadata,
+            Column(
+                "x",
+                Integer,
+                primary_key=True,
+            ),
+        )
         t1.create(testing.db)
 
         e = engines.testing_engine(options={"implicit_returning": True})
-        with e.connect() as conn:
+        with e.begin() as conn:
             r = conn.execute(t1.insert().values(x=s.next_value()))
             self._assert_seq_result(r.inserted_primary_key[0])
+
+
+class FutureSequenceExecTest(fixtures.FutureEngineMixin, SequenceExecTest):
+    __requires__ = ("sequences",)
+    __backend__ = True
 
 
 class SequenceTest(fixtures.TestBase, testing.AssertsCompiledSQL):
@@ -293,7 +357,7 @@ class SequenceTest(fixtures.TestBase, testing.AssertsCompiledSQL):
         try:
             with testing.db.connect() as conn:
                 values = [conn.execute(seq) for i in range(3)]
-                start = seq.start or 1
+                start = seq.start or testing.db.dialect.default_sequence_base
                 inc = seq.increment or 1
                 eq_(values, list(range(start, start + inc * 3, inc)))
 
@@ -375,6 +439,7 @@ class SequenceTest(fixtures.TestBase, testing.AssertsCompiledSQL):
         assert not self._has_sequence(connection, "s2")
 
     @testing.requires.returning
+    @testing.requires.supports_sequence_for_autoincrement_column
     @testing.provide_metadata
     def test_freestanding_sequence_via_autoinc(self, connection):
         t = Table(
@@ -393,7 +458,53 @@ class SequenceTest(fixtures.TestBase, testing.AssertsCompiledSQL):
         self.metadata.create_all(connection)
 
         result = connection.execute(t.insert())
-        eq_(result.inserted_primary_key, [1])
+        eq_(result.inserted_primary_key, (1,))
+
+    @testing.requires.sequences_as_server_defaults
+    @testing.provide_metadata
+    def test_shared_sequence(self, connection):
+        # test case for #6071
+        common_seq = Sequence("common_sequence", metadata=self.metadata)
+        Table(
+            "table_1",
+            self.metadata,
+            Column(
+                "id",
+                Integer,
+                common_seq,
+                server_default=common_seq.next_value(),
+                primary_key=True,
+            ),
+        )
+        Table(
+            "table_2",
+            self.metadata,
+            Column(
+                "id",
+                Integer,
+                common_seq,
+                server_default=common_seq.next_value(),
+                primary_key=True,
+            ),
+        )
+
+        self.metadata.create_all(connection)
+        is_true(self._has_sequence(connection, "common_sequence"))
+        is_true(testing.db.dialect.has_table(connection, "table_1"))
+        is_true(testing.db.dialect.has_table(connection, "table_2"))
+        self.metadata.drop_all(connection)
+        is_false(self._has_sequence(connection, "common_sequence"))
+        is_false(testing.db.dialect.has_table(connection, "table_1"))
+        is_false(testing.db.dialect.has_table(connection, "table_2"))
+
+    def test_next_value_type(self):
+        seq = Sequence("my_sequence", data_type=BigInteger)
+        assert isinstance(seq.next_value().type, BigInteger)
+
+
+class FutureSequenceTest(fixtures.FutureEngineMixin, SequenceTest):
+    __requires__ = ("sequences",)
+    __backend__ = True
 
 
 class TableBoundSequenceTest(fixtures.TablesTest):
@@ -406,7 +517,11 @@ class TableBoundSequenceTest(fixtures.TablesTest):
             "cartitems",
             metadata,
             Column(
-                "cart_id", Integer, Sequence("cart_id_seq"), primary_key=True
+                "cart_id",
+                Integer,
+                Sequence("cart_id_seq"),
+                primary_key=True,
+                autoincrement=False,
             ),
             Column("description", String(40)),
             Column("createdate", sa.DateTime()),
@@ -416,7 +531,11 @@ class TableBoundSequenceTest(fixtures.TablesTest):
         Table(
             "Manager",
             metadata,
-            Column("obj_id", Integer, Sequence("obj_id_seq")),
+            Column(
+                "obj_id",
+                Integer,
+                Sequence("obj_id_seq"),
+            ),
             Column("name", String(128)),
             Column(
                 "id",
@@ -433,15 +552,16 @@ class TableBoundSequenceTest(fixtures.TablesTest):
         connection.execute(cartitems.insert(), dict(description="there"))
         r = connection.execute(cartitems.insert(), dict(description="lala"))
 
-        eq_(r.inserted_primary_key[0], 3)
+        expected = 2 + testing.db.dialect.default_sequence_base
+        eq_(r.inserted_primary_key[0], expected)
 
         eq_(
             connection.scalar(
-                sa.select([cartitems.c.cart_id]).where(
+                sa.select(cartitems.c.cart_id).where(
                     cartitems.c.description == "lala"
                 ),
             ),
-            3,
+            expected,
         )
 
     def test_seq_nonpk(self):
@@ -451,7 +571,7 @@ class TableBoundSequenceTest(fixtures.TablesTest):
 
         engine = engines.testing_engine(options={"implicit_returning": False})
 
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             result = conn.execute(sometable.insert(), dict(name="somename"))
 
             eq_(result.postfetch_cols(), [sometable.c.obj_id])
@@ -461,15 +581,33 @@ class TableBoundSequenceTest(fixtures.TablesTest):
             conn.execute(
                 sometable.insert(), [{"name": "name3"}, {"name": "name4"}]
             )
+
+            dsb = testing.db.dialect.default_sequence_base
             eq_(
                 list(
                     conn.execute(sometable.select().order_by(sometable.c.id))
                 ),
                 [
-                    (1, "somename", 1),
-                    (2, "someother", 2),
-                    (3, "name3", 3),
-                    (4, "name4", 4),
+                    (
+                        dsb,
+                        "somename",
+                        dsb,
+                    ),
+                    (
+                        dsb + 1,
+                        "someother",
+                        dsb + 1,
+                    ),
+                    (
+                        dsb + 2,
+                        "name3",
+                        dsb + 2,
+                    ),
+                    (
+                        dsb + 3,
+                        "name4",
+                        dsb + 3,
+                    ),
                 ],
             )
 
@@ -503,25 +641,27 @@ class SequenceAsServerDefaultTest(
         )
 
     def test_default_textual_w_default(self, connection):
-        connection.execute(
+        connection.exec_driver_sql(
             "insert into t_seq_test (data) values ('some data')"
         )
 
-        eq_(connection.execute("select id from t_seq_test").scalar(), 1)
+        eq_(
+            connection.exec_driver_sql("select id from t_seq_test").scalar(), 1
+        )
 
     def test_default_core_w_default(self, connection):
         t_seq_test = self.tables.t_seq_test
         connection.execute(t_seq_test.insert().values(data="some data"))
 
-        eq_(connection.scalar(select([t_seq_test.c.id])), 1)
+        eq_(connection.scalar(select(t_seq_test.c.id)), 1)
 
     def test_default_textual_server_only(self, connection):
-        connection.execute(
+        connection.exec_driver_sql(
             "insert into t_seq_test_2 (data) values ('some data')"
         )
 
         eq_(
-            connection.execute("select id from t_seq_test_2").scalar(),
+            connection.exec_driver_sql("select id from t_seq_test_2").scalar(),
             1,
         )
 
@@ -529,25 +669,35 @@ class SequenceAsServerDefaultTest(
         t_seq_test = self.tables.t_seq_test_2
         connection.execute(t_seq_test.insert().values(data="some data"))
 
-        eq_(connection.scalar(select([t_seq_test.c.id])), 1)
+        eq_(connection.scalar(select(t_seq_test.c.id)), 1)
 
     def test_drop_ordering(self):
         with self.sql_execution_asserter(testing.db) as asserter:
-            self.metadata.drop_all(checkfirst=False)
+            self.tables_test_metadata.drop_all(testing.db, checkfirst=False)
+
+        asserter.assert_(
+            AllOf(
+                CompiledSQL("DROP TABLE t_seq_test_2", {}),
+                CompiledSQL("DROP TABLE t_seq_test", {}),
+            ),
+            AllOf(
+                # dropped as part of metadata level
+                CompiledSQL("DROP SEQUENCE t_seq", {}),
+                CompiledSQL("DROP SEQUENCE t_seq_2", {}),
+            ),
+        )
+
+    def test_drop_ordering_single_table(self):
+        with self.sql_execution_asserter(testing.db) as asserter:
+            for table in self.tables_test_metadata.tables.values():
+                table.drop(testing.db, checkfirst=False)
 
         asserter.assert_(
             AllOf(
                 CompiledSQL("DROP TABLE t_seq_test_2", {}),
                 EachOf(
                     CompiledSQL("DROP TABLE t_seq_test", {}),
-                    CompiledSQL(
-                        "DROP SEQUENCE t_seq",  # dropped as part of t_seq_test
-                        {},
-                    ),
+                    CompiledSQL("DROP SEQUENCE t_seq", {}),
                 ),
-            ),
-            CompiledSQL(
-                "DROP SEQUENCE t_seq_2",  # dropped as part of metadata level
-                {},
-            ),
+            )
         )

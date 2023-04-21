@@ -6,6 +6,7 @@ import sqlalchemy as sa
 from sqlalchemy import Date
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import orm
 from sqlalchemy import select
@@ -13,20 +14,23 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import TypeDecorator
 from sqlalchemy import util
-from sqlalchemy.orm import create_session
+from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import assert_warns
+from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import config
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -87,14 +91,14 @@ class NullVersionIdTest(fixtures.MappedTest):
     def _fixture(self):
         Foo, version_table = self.classes.Foo, self.tables.version_table
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Foo,
             version_table,
             version_id_col=version_table.c.version_id,
             version_id_generator=False,
         )
 
-        s1 = Session()
+        s1 = fixture_session()
         return s1
 
     def test_null_version_id_insert(self):
@@ -135,11 +139,11 @@ class NullVersionIdTest(fixtures.MappedTest):
         # you should get a FlushError on update.
 
         f1.value = "f1rev2"
-        f1.version_id = None
 
         with conditional_sane_rowcount_warnings(
             update=True, only_returning=True
         ):
+            f1.version_id = None
             assert_raises_message(
                 sa.orm.exc.FlushError,
                 "Instance does not contain a non-NULL version value",
@@ -160,6 +164,7 @@ class VersioningTest(fixtures.MappedTest):
             ),
             Column("version_id", Integer, nullable=False),
             Column("value", String(40), nullable=False),
+            test_needs_acid=True,
         )
 
     @classmethod
@@ -170,8 +175,10 @@ class VersioningTest(fixtures.MappedTest):
     def _fixture(self):
         Foo, version_table = self.classes.Foo, self.tables.version_table
 
-        mapper(Foo, version_table, version_id_col=version_table.c.version_id)
-        s1 = Session()
+        self.mapper_registry.map_imperatively(
+            Foo, version_table, version_id_col=version_table.c.version_id
+        )
+        s1 = fixture_session()
         return s1
 
     @engines.close_open_connections
@@ -188,7 +195,7 @@ class VersioningTest(fixtures.MappedTest):
             s1.commit()
 
             f1.value = "f1rev2"
-            assert_raises(sa.exc.SAWarning, s1.commit)
+            assert_warns(sa.exc.SAWarning, s1.commit)
         finally:
             testing.db.dialect.supports_sane_rowcount = save
 
@@ -207,8 +214,8 @@ class VersioningTest(fixtures.MappedTest):
         ):
             s1.commit()
 
-        s2 = create_session(autocommit=False)
-        f1_s = s2.query(Foo).get(f1.id)
+        s2 = fixture_session(autocommit=False)
+        f1_s = s2.get(Foo, f1.id)
         f1_s.value = "f1rev3"
         with conditional_sane_rowcount_warnings(
             update=True, only_returning=True
@@ -234,8 +241,8 @@ class VersioningTest(fixtures.MappedTest):
                 s1.commit()
 
         # new in 0.5 !  don't need to close the session
-        f1 = s1.query(Foo).get(f1.id)
-        f2 = s1.query(Foo).get(f2.id)
+        f1 = s1.get(Foo, f1.id)
+        f2 = s1.get(Foo, f2.id)
 
         f1_s.value = "f1rev4"
         with conditional_sane_rowcount_warnings(
@@ -367,8 +374,8 @@ class VersioningTest(fixtures.MappedTest):
         s1.add(f1s1)
         s1.commit()
 
-        s2 = create_session(autocommit=False)
-        f1s2 = s2.query(Foo).get(f1s1.id)
+        s2 = fixture_session(autocommit=False)
+        f1s2 = s2.get(Foo, f1s1.id)
         f1s2.value = "f1 new value"
         with conditional_sane_rowcount_warnings(
             update=True, only_returning=True
@@ -380,58 +387,21 @@ class VersioningTest(fixtures.MappedTest):
             sa.orm.exc.StaleDataError,
             r"Instance .* has version id '\d+' which does not "
             r"match database-loaded version id '\d+'",
-            s1.query(Foo).with_for_update(read=True).get,
+            s1.get,
+            Foo,
             f1s1.id,
+            with_for_update=dict(read=True),
         )
 
         # reload it - this expires the old version first
         s1.refresh(f1s1, with_for_update={"read": True})
 
         # now assert version OK
-        s1.query(Foo).with_for_update(read=True).get(f1s1.id)
+        s1.get(Foo, f1s1.id, with_for_update=dict(read=True))
 
         # assert brand new load is OK too
         s1.close()
-        s1.query(Foo).with_for_update(read=True).get(f1s1.id)
-
-    @engines.close_open_connections
-    def test_versioncheck_legacy(self):
-        """query.with_lockmode performs a 'version check' on an already loaded
-        instance"""
-
-        Foo = self.classes.Foo
-
-        s1 = self._fixture()
-        f1s1 = Foo(value="f1 value")
-        s1.add(f1s1)
-        s1.commit()
-
-        s2 = create_session(autocommit=False)
-        f1s2 = s2.query(Foo).get(f1s1.id)
-        f1s2.value = "f1 new value"
-        with conditional_sane_rowcount_warnings(
-            update=True, only_returning=True
-        ):
-            s2.commit()
-
-        # load, version is wrong
-        assert_raises_message(
-            sa.orm.exc.StaleDataError,
-            r"Instance .* has version id '\d+' which does not "
-            r"match database-loaded version id '\d+'",
-            s1.query(Foo).with_for_update(read=True).get,
-            f1s1.id,
-        )
-
-        # reload it - this expires the old version first
-        s1.refresh(f1s1, with_for_update=dict(read=True))
-
-        # now assert version OK
-        s1.query(Foo).with_for_update(read=True).get(f1s1.id)
-
-        # assert brand new load is OK too
-        s1.close()
-        s1.query(Foo).with_for_update(read=True).get(f1s1.id)
+        s1.get(Foo, f1s1.id, with_for_update=dict(read=True))
 
     def test_versioncheck_not_versioned(self):
         """ensure the versioncheck logic skips if there isn't a
@@ -440,12 +410,12 @@ class VersioningTest(fixtures.MappedTest):
         Foo = self.classes.Foo
         version_table = self.tables.version_table
 
-        mapper(Foo, version_table)
-        s1 = Session()
+        self.mapper_registry.map_imperatively(Foo, version_table)
+        s1 = fixture_session()
         f1s1 = Foo(value="f1 value", version_id=1)
         s1.add(f1s1)
         s1.commit()
-        s1.query(Foo).with_for_update(read=True).get(f1s1.id)
+        s1.query(Foo).with_for_update(read=True).where(Foo.id == f1s1.id).one()
 
     @engines.close_open_connections
     @testing.requires.update_nowait
@@ -460,48 +430,20 @@ class VersioningTest(fixtures.MappedTest):
         s1.add(f1s1)
         s1.commit()
 
-        s2 = create_session(autocommit=False)
-        f1s2 = s2.query(Foo).get(f1s1.id)
+        s2 = fixture_session(autocommit=False)
+        f1s2 = s2.get(Foo, f1s1.id)
         # not sure if I like this API
         s2.refresh(f1s2, with_for_update=True)
         f1s2.value = "f1 new value"
 
         assert_raises(
-            exc.DBAPIError, s1.refresh, f1s1, lockmode="update_nowait"
+            exc.DBAPIError, s1.refresh, f1s1, with_for_update={"nowait": True}
         )
         s1.rollback()
 
         with conditional_sane_rowcount_warnings(update=True):
             s2.commit()
         s1.refresh(f1s1, with_for_update={"nowait": True})
-        assert f1s1.version_id == f1s2.version_id
-
-    @engines.close_open_connections
-    @testing.requires.update_nowait
-    def test_versioncheck_for_update_legacy(self):
-        """query.with_lockmode performs a 'version check' on an already loaded
-        instance"""
-
-        Foo = self.classes.Foo
-
-        s1 = self._fixture()
-        f1s1 = Foo(value="f1 value")
-        s1.add(f1s1)
-        s1.commit()
-
-        s2 = create_session(autocommit=False)
-        f1s2 = s2.query(Foo).get(f1s1.id)
-        s2.refresh(f1s2, lockmode="update")
-        f1s2.value = "f1 new value"
-
-        assert_raises(
-            exc.DBAPIError, s1.refresh, f1s1, lockmode="update_nowait"
-        )
-        s1.rollback()
-
-        with conditional_sane_rowcount_warnings(update=True):
-            s2.commit()
-        s1.refresh(f1s1, lockmode="update_nowait")
         assert f1s1.version_id == f1s2.version_id
 
     def test_update_multi_missing_broken_multi_rowcount(self):
@@ -514,7 +456,7 @@ class VersioningTest(fixtures.MappedTest):
 
         with patch.object(
             config.db.dialect, "supports_sane_multi_rowcount", False
-        ), patch("sqlalchemy.engine.result.ResultProxy.rowcount", rowcount):
+        ), patch("sqlalchemy.engine.cursor.CursorResult.rowcount", rowcount):
 
             Foo = self.classes.Foo
             s1 = self._fixture()
@@ -565,14 +507,19 @@ class VersioningTest(fixtures.MappedTest):
 
         Foo, version_table = self.classes.Foo, self.tables.version_table
 
-        s1 = create_session(autocommit=False)
-        mapper(Foo, version_table)
+        s1 = fixture_session(autocommit=False)
+        self.mapper_registry.map_imperatively(Foo, version_table)
         f1s1 = Foo(value="foo", version_id=0)
         s1.add(f1s1)
         s1.commit()
 
-        s2 = create_session(autocommit=False)
-        f1s2 = s2.query(Foo).with_for_update(read=True).get(f1s1.id)
+        s2 = fixture_session(autocommit=False)
+        f1s2 = (
+            s2.query(Foo)
+            .with_for_update(read=True)
+            .where(Foo.id == f1s1.id)
+            .one()
+        )
         assert f1s2.id == f1s1.id
         assert f1s2.value == f1s1.value
 
@@ -697,7 +644,7 @@ class VersionOnPostUpdateTest(fixtures.MappedTest):
         Node = self.classes.Node
         node = self.tables.node
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             node,
             properties={
@@ -710,7 +657,7 @@ class VersionOnPostUpdateTest(fixtures.MappedTest):
             version_id_col=node.c.version_id,
         )
 
-        s = Session()
+        s = fixture_session()
         n1 = Node(id=1)
         n2 = Node(id=2)
 
@@ -803,7 +750,7 @@ class VersionOnPostUpdateTest(fixtures.MappedTest):
         # outwit the database transaction isolation and SQLA's
         # expiration at the same time by using different Session on
         # same transaction
-        s2 = Session(bind=s.connection(Node))
+        s2 = Session(bind=s.connection(mapper=Node))
         s2.query(Node).filter(Node.id == n2.id).update({"version_id": 3})
         s2.commit()
 
@@ -825,7 +772,7 @@ class VersionOnPostUpdateTest(fixtures.MappedTest):
         ), patch.object(
             config.db.dialect, "supports_sane_multi_rowcount", False
         ):
-            s2 = Session(bind=s.connection(Node))
+            s2 = Session(bind=s.connection(mapper=Node))
             s2.query(Node).filter(Node.id == n2.id).update({"version_id": 3})
             s2.commit()
 
@@ -846,7 +793,7 @@ class VersionOnPostUpdateTest(fixtures.MappedTest):
         # outwit the database transaction isolation and SQLA's
         # expiration at the same time by using different Session on
         # same transaction
-        s2 = Session(bind=s.connection(Node))
+        s2 = Session(bind=s.connection(mapper=Node))
         s2.query(Node).filter(Node.id == n1.id).update({"version_id": 3})
         s2.commit()
 
@@ -890,7 +837,7 @@ class NoBumpOnRelationshipTest(fixtures.MappedTest):
 
     def _run_test(self, auto_version_counter=True):
         A, B = self.classes("A", "B")
-        s = Session()
+        s = fixture_session(future=True)
         if auto_version_counter:
             a1 = A()
         else:
@@ -910,13 +857,13 @@ class NoBumpOnRelationshipTest(fixtures.MappedTest):
         A, B = self.classes("A", "B")
         a, b = self.tables("a", "b")
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             properties={"bs": relationship(B, backref="a")},
             version_id_col=a.c.version_id,
         )
-        mapper(B, b)
+        self.mapper_registry.map_imperatively(B, b)
 
         self._run_test()
 
@@ -924,14 +871,14 @@ class NoBumpOnRelationshipTest(fixtures.MappedTest):
         A, B = self.classes("A", "B")
         a, b = self.tables("a", "b")
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             properties={"bs": relationship(B, backref="a")},
             version_id_col=a.c.version_id,
             version_id_generator=lambda num: (num or 0) + 1,
         )
-        mapper(B, b)
+        self.mapper_registry.map_imperatively(B, b)
 
         self._run_test()
 
@@ -939,14 +886,14 @@ class NoBumpOnRelationshipTest(fixtures.MappedTest):
         A, B = self.classes("A", "B")
         a, b = self.tables("a", "b")
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             properties={"bs": relationship(B, backref="a")},
             version_id_col=a.c.version_id,
             version_id_generator=False,
         )
-        mapper(B, b)
+        self.mapper_registry.map_imperatively(B, b)
 
         self._run_test(False)
 
@@ -959,6 +906,7 @@ class ColumnTypeTest(fixtures.MappedTest):
     def define_tables(cls, metadata):
         class SpecialType(TypeDecorator):
             impl = Date
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 assert isinstance(value, datetime.date)
@@ -980,8 +928,10 @@ class ColumnTypeTest(fixtures.MappedTest):
     def _fixture(self):
         Foo, version_table = self.classes.Foo, self.tables.version_table
 
-        mapper(Foo, version_table, version_id_col=version_table.c.version_id)
-        s1 = Session()
+        self.mapper_registry.map_imperatively(
+            Foo, version_table, version_id_col=version_table.c.version_id
+        )
+        s1 = fixture_session()
         return s1
 
     @engines.close_open_connections
@@ -1032,7 +982,7 @@ class RowSwitchTest(fixtures.MappedTest):
     def setup_mappers(cls):
         p, c, C, P = cls.tables.p, cls.tables.c, cls.classes.C, cls.classes.P
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             P,
             p,
             version_id_col=p.c.version_id,
@@ -1042,12 +992,14 @@ class RowSwitchTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(C, c, version_id_col=c.c.version_id)
+        cls.mapper_registry.map_imperatively(
+            C, c, version_id_col=c.c.version_id
+        )
 
     def test_row_switch(self):
         P = self.classes.P
 
-        session = sessionmaker()()
+        session = fixture_session()
         session.add(P(id="P1", data="P version 1"))
         session.commit()
         session.close()
@@ -1065,7 +1017,7 @@ class RowSwitchTest(fixtures.MappedTest):
 
         assert P.c.property.strategy.use_get
 
-        session = sessionmaker()()
+        session = fixture_session()
         session.add(P(id="P1", data="P version 1"))
         session.commit()
         session.close()
@@ -1115,7 +1067,7 @@ class AlternateGeneratorTest(fixtures.MappedTest):
     def setup_mappers(cls):
         p, c, C, P = cls.tables.p, cls.tables.c, cls.classes.C, cls.classes.P
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             P,
             p,
             version_id_col=p.c.version_id,
@@ -1126,7 +1078,7 @@ class AlternateGeneratorTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             C,
             c,
             version_id_col=c.c.version_id,
@@ -1136,7 +1088,7 @@ class AlternateGeneratorTest(fixtures.MappedTest):
     def test_row_switch(self):
         P = self.classes.P
 
-        session = sessionmaker()()
+        session = fixture_session()
         session.add(P(id="P1", data="P version 1"))
         session.commit()
         session.close()
@@ -1154,7 +1106,7 @@ class AlternateGeneratorTest(fixtures.MappedTest):
 
         assert P.c.property.strategy.use_get
 
-        session = sessionmaker()()
+        session = fixture_session()
         session.add(P(id="P1", data="P version 1"))
         session.commit()
         session.close()
@@ -1174,19 +1126,17 @@ class AlternateGeneratorTest(fixtures.MappedTest):
     def test_child_row_switch_two(self):
         P = self.classes.P
 
-        Session = sessionmaker()
-
         # TODO: not sure this test is
         # testing exactly what its looking for
 
-        sess1 = Session()
+        sess1 = fixture_session()
         sess1.add(P(id="P1", data="P version 1"))
         sess1.commit()
         sess1.close()
 
         p1 = sess1.query(P).first()
 
-        sess2 = Session()
+        sess2 = fixture_session()
         p2 = sess2.query(P).first()
 
         sess1.delete(p1)
@@ -1245,10 +1195,12 @@ class PlainInheritanceTest(fixtures.MappedTest):
             self.classes.Sub,
         )
 
-        mapper(Base, base, version_id_col=base.c.version_id)
-        mapper(Sub, sub, inherits=Base)
+        self.mapper_registry.map_imperatively(
+            Base, base, version_id_col=base.c.version_id
+        )
+        self.mapper_registry.map_imperatively(Sub, sub, inherits=Base)
 
-        s = Session()
+        s = fixture_session()
         s1 = Sub(data="b", sub_data="s")
         s.add(s1)
         s.commit()
@@ -1305,16 +1257,18 @@ class InheritanceTwoVersionIdsTest(fixtures.MappedTest):
             self.classes.Sub,
         )
 
-        mapper(Base, base, version_id_col=base.c.version_id)
-        mapper(Sub, sub, inherits=Base)
+        self.mapper_registry.map_imperatively(
+            Base, base, version_id_col=base.c.version_id
+        )
+        self.mapper_registry.map_imperatively(Sub, sub, inherits=Base)
 
-        session = Session()
+        session = fixture_session()
         b1 = Base(data="b1")
         session.add(b1)
         session.commit()
         eq_(b1.version_id, 1)
         # base is populated
-        eq_(select([base.c.version_id]).scalar(), 1)
+        eq_(session.connection().scalar(select(base.c.version_id)), 1)
 
     def test_sub_both(self):
         Base, sub, base, Sub = (
@@ -1324,19 +1278,21 @@ class InheritanceTwoVersionIdsTest(fixtures.MappedTest):
             self.classes.Sub,
         )
 
-        mapper(Base, base, version_id_col=base.c.version_id)
-        mapper(Sub, sub, inherits=Base)
+        self.mapper_registry.map_imperatively(
+            Base, base, version_id_col=base.c.version_id
+        )
+        self.mapper_registry.map_imperatively(Sub, sub, inherits=Base)
 
-        session = Session()
+        session = fixture_session()
         s1 = Sub(data="s1", sub_data="s1")
         session.add(s1)
         session.commit()
 
         # table is populated
-        eq_(select([sub.c.version_id]).scalar(), 1)
+        eq_(session.connection().scalar(select(sub.c.version_id)), 1)
 
         # base is populated
-        eq_(select([base.c.version_id]).scalar(), 1)
+        eq_(session.connection().scalar(select(base.c.version_id)), 1)
 
     def test_sub_only(self):
         Base, sub, base, Sub = (
@@ -1346,19 +1302,21 @@ class InheritanceTwoVersionIdsTest(fixtures.MappedTest):
             self.classes.Sub,
         )
 
-        mapper(Base, base)
-        mapper(Sub, sub, inherits=Base, version_id_col=sub.c.version_id)
+        self.mapper_registry.map_imperatively(Base, base)
+        self.mapper_registry.map_imperatively(
+            Sub, sub, inherits=Base, version_id_col=sub.c.version_id
+        )
 
-        session = Session()
+        session = fixture_session()
         s1 = Sub(data="s1", sub_data="s1")
         session.add(s1)
         session.commit()
 
         # table is populated
-        eq_(select([sub.c.version_id]).scalar(), 1)
+        eq_(session.connection().scalar(select(sub.c.version_id)), 1)
 
         # base is not
-        eq_(select([base.c.version_id]).scalar(), None)
+        eq_(session.connection().scalar(select(base.c.version_id)), None)
 
     def test_mismatch_version_col_warning(self):
         Base, sub, base, Sub = (
@@ -1368,16 +1326,18 @@ class InheritanceTwoVersionIdsTest(fixtures.MappedTest):
             self.classes.Sub,
         )
 
-        mapper(Base, base, version_id_col=base.c.version_id)
+        self.mapper_registry.map_imperatively(
+            Base, base, version_id_col=base.c.version_id
+        )
 
-        assert_raises_message(
+        assert_warns_message(
             exc.SAWarning,
             "Inheriting version_id_col 'version_id' does not "
             "match inherited version_id_col 'version_id' and will not "
             "automatically populate the inherited versioning column. "
             "version_id_col should only be specified on "
             "the base-most mapper that includes versioning.",
-            mapper,
+            self.mapper_registry.map_imperatively,
             Sub,
             sub,
             inherits=Base,
@@ -1439,7 +1399,7 @@ class ServerVersioningTest(fixtures.MappedTest):
     def _fixture(self, expire_on_commit=True, eager_defaults=False):
         Foo, version_table = self.classes.Foo, self.tables.version_table
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Foo,
             version_table,
             version_id_col=version_table.c.version_id,
@@ -1447,7 +1407,7 @@ class ServerVersioningTest(fixtures.MappedTest):
             eager_defaults=eager_defaults,
         )
 
-        s1 = Session(expire_on_commit=expire_on_commit)
+        s1 = fixture_session(expire_on_commit=expire_on_commit)
         return s1
 
     def test_insert_col(self):
@@ -1479,8 +1439,8 @@ class ServerVersioningTest(fixtures.MappedTest):
                 CompiledSQL(
                     "SELECT version_table.version_id "
                     "AS version_table_version_id "
-                    "FROM version_table WHERE version_table.id = :param_1",
-                    lambda ctx: [{"param_1": 1}],
+                    "FROM version_table WHERE version_table.id = :pk_1",
+                    lambda ctx: [{"pk_1": 1}],
                 )
             )
         self.assert_sql_execution(testing.db, sess.flush, *statements)
@@ -1524,8 +1484,8 @@ class ServerVersioningTest(fixtures.MappedTest):
                 CompiledSQL(
                     "SELECT version_table.version_id "
                     "AS version_table_version_id "
-                    "FROM version_table WHERE version_table.id = :param_1",
-                    lambda ctx: [{"param_1": 1}],
+                    "FROM version_table WHERE version_table.id = :pk_1",
+                    lambda ctx: [{"pk_1": 1}],
                 )
             )
         with conditional_sane_rowcount_warnings(
@@ -1633,20 +1593,20 @@ class ServerVersioningTest(fixtures.MappedTest):
                     CompiledSQL(
                         "SELECT version_table.version_id "
                         "AS version_table_version_id "
-                        "FROM version_table WHERE version_table.id = :param_1",
-                        lambda ctx: [{"param_1": 1}],
+                        "FROM version_table WHERE version_table.id = :pk_1",
+                        lambda ctx: [{"pk_1": 1}],
                     ),
                     CompiledSQL(
                         "SELECT version_table.version_id "
                         "AS version_table_version_id "
-                        "FROM version_table WHERE version_table.id = :param_1",
-                        lambda ctx: [{"param_1": 2}],
+                        "FROM version_table WHERE version_table.id = :pk_1",
+                        lambda ctx: [{"pk_1": 2}],
                     ),
                     CompiledSQL(
                         "SELECT version_table.version_id "
                         "AS version_table_version_id "
-                        "FROM version_table WHERE version_table.id = :param_1",
-                        lambda ctx: [{"param_1": 3}],
+                        "FROM version_table WHERE version_table.id = :pk_1",
+                        lambda ctx: [{"pk_1": 3}],
                     ),
                 ]
             )
@@ -1688,7 +1648,7 @@ class ServerVersioningTest(fixtures.MappedTest):
 
         f1.value
 
-        s2 = Session()
+        s2 = fixture_session()
         f2 = s2.query(self.classes.Foo).first()
         f2.value = "f2"
         s2.commit()
@@ -1715,7 +1675,7 @@ class ServerVersioningTest(fixtures.MappedTest):
         # a SELECT for it within the flush.
         f1.value
 
-        s2 = Session(expire_on_commit=False)
+        s2 = fixture_session(expire_on_commit=False)
         f2 = s2.query(self.classes.Foo).first()
         f2.value = "f2"
         s2.commit()
@@ -1753,7 +1713,7 @@ class ManualVersionTest(fixtures.MappedTest):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.A,
             cls.tables.a,
             version_id_col=cls.tables.a.c.vid,
@@ -1761,7 +1721,7 @@ class ManualVersionTest(fixtures.MappedTest):
         )
 
     def test_insert(self):
-        sess = Session()
+        sess = fixture_session()
         a1 = self.classes.A()
 
         a1.vid = 1
@@ -1771,7 +1731,7 @@ class ManualVersionTest(fixtures.MappedTest):
         eq_(a1.vid, 1)
 
     def test_update(self):
-        sess = Session()
+        sess = fixture_session()
         a1 = self.classes.A()
 
         a1.vid = 1
@@ -1791,7 +1751,7 @@ class ManualVersionTest(fixtures.MappedTest):
 
     @testing.requires.sane_rowcount_w_returning
     def test_update_concurrent_check(self):
-        sess = Session()
+        sess = fixture_session()
         a1 = self.classes.A()
 
         a1.vid = 1
@@ -1805,7 +1765,7 @@ class ManualVersionTest(fixtures.MappedTest):
         assert_raises(orm_exc.StaleDataError, sess.commit)
 
     def test_update_version_conditional(self):
-        sess = Session()
+        sess = fixture_session()
         a1 = self.classes.A()
 
         a1.vid = 1
@@ -1867,17 +1827,19 @@ class ManualInheritanceVersionTest(fixtures.MappedTest):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.A,
             cls.tables.a,
             version_id_col=cls.tables.a.c.vid,
             version_id_generator=False,
         )
 
-        mapper(cls.classes.B, cls.tables.b, inherits=cls.classes.A)
+        cls.mapper_registry.map_imperatively(
+            cls.classes.B, cls.tables.b, inherits=cls.classes.A
+        )
 
     def test_no_increment(self):
-        sess = Session()
+        sess = fixture_session()
         b1 = self.classes.B()
 
         b1.vid = 1
@@ -1936,8 +1898,10 @@ class VersioningMappedSelectTest(fixtures.MappedTest):
             .alias("current_table")
         )
 
-        mapper(Foo, current, version_id_col=version_table.c.version_id)
-        s1 = Session()
+        self.mapper_registry.map_imperatively(
+            Foo, current, version_id_col=version_table.c.version_id
+        )
+        s1 = fixture_session()
         return s1
 
     def _explicit_version_fixture(self):
@@ -1949,13 +1913,13 @@ class VersioningMappedSelectTest(fixtures.MappedTest):
             .alias("current_table")
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Foo,
             current,
             version_id_col=version_table.c.version_id,
             version_id_generator=False,
         )
-        s1 = Session()
+        s1 = fixture_session()
         return s1
 
     def test_implicit(self):
@@ -2003,3 +1967,94 @@ class VersioningMappedSelectTest(fixtures.MappedTest):
             s1.query(Foo.id, Foo.value, Foo.version_id).order_by(Foo.id).all(),
             [(f1.id, "f1rev2", 2), (f2.id, "f2rev2", 2)],
         )
+
+    def test_implicit_no_readonly(self):
+        # test issue 4194
+        Foo = self.classes.Foo
+
+        s1 = self._implicit_version_fixture()
+        f1 = Foo(value="f1")
+        s1.add(f1)
+        s1.flush()
+
+        is_false(bool(inspect(Foo)._readonly_props))
+
+        def go():
+            eq_(f1.version_id, 1)
+
+        self.assert_sql_count(testing.db, go, 0)
+
+    def test_explicit_assign_from_expired(self):
+        # test issue 4195
+        Foo = self.classes.Foo
+
+        s1 = self._explicit_version_fixture()
+
+        configure_mappers()
+        is_true(Foo.version_id.impl.active_history)
+
+        f1 = Foo(value="f1", version_id=1)
+        s1.add(f1)
+
+        s1.flush()
+
+        s1.expire_all()
+
+        with conditional_sane_rowcount_warnings(
+            update=True, only_returning=True
+        ):
+            f1.value = "f2"
+            f1.version_id = 2
+            s1.flush()
+
+
+class QuotedBindVersioningTest(fixtures.MappedTest):
+    """test for #8056"""
+
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "version_table",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            # will need parameter quoting for Oracle and PostgreSQL
+            # dont use 'key' to make sure no the awkward name is definitely
+            # in the params
+            Column("_version%id", Integer, nullable=False),
+            Column("value", String(40), nullable=False),
+        )
+
+    @classmethod
+    def setup_classes(cls):
+        class Foo(cls.Basic):
+            pass
+
+    @classmethod
+    def setup_mappers(cls):
+        Foo = cls.classes.Foo
+        vt = cls.tables.version_table
+        cls.mapper_registry.map_imperatively(
+            Foo,
+            vt,
+            version_id_col=vt.c["_version%id"],
+            properties={"version": vt.c["_version%id"]},
+        )
+
+    def test_round_trip(self, fixture_session):
+        Foo = self.classes.Foo
+
+        f1 = Foo(value="v1")
+        fixture_session.add(f1)
+        fixture_session.commit()
+
+        f1.value = "v2"
+        with conditional_sane_rowcount_warnings(
+            update=True, only_returning=True
+        ):
+            fixture_session.commit()
+
+        eq_(f1.version, 2)

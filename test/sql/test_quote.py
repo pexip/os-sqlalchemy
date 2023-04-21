@@ -16,6 +16,7 @@ from sqlalchemy import testing
 from sqlalchemy import util
 from sqlalchemy.engine import default
 from sqlalchemy.sql import compiler
+from sqlalchemy.sql import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.sql.elements import _anonymous_label
 from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.testing import AssertsCompiledSQL
@@ -25,19 +26,12 @@ from sqlalchemy.testing import is_
 from sqlalchemy.testing.util import picklers
 
 
-class QuoteExecTest(fixtures.TestBase):
+class QuoteExecTest(fixtures.TablesTest):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
-        # TODO: figure out which databases/which identifiers allow special
-        # characters to be used, such as: spaces, quote characters,
-        # punctuation characters, set up tests for those as well.
-
-        global table1, table2
-        metadata = MetaData(testing.db)
-
-        table1 = Table(
+    def define_tables(cls, metadata):
+        Table(
             "WorstCase1",
             metadata,
             Column("lowercase", Integer, primary_key=True),
@@ -45,7 +39,7 @@ class QuoteExecTest(fixtures.TestBase):
             Column("MixedCase", Integer),
             Column("ASC", Integer, key="a123"),
         )
-        table2 = Table(
+        Table(
             "WorstCase2",
             metadata,
             Column("desc", Integer, primary_key=True, key="d123"),
@@ -53,21 +47,9 @@ class QuoteExecTest(fixtures.TestBase):
             Column("MixedCase", Integer),
         )
 
-        table1.create()
-        table2.create()
-
-    def teardown(self):
-        table1.delete().execute()
-        table2.delete().execute()
-
-    @classmethod
-    def teardown_class(cls):
-        table1.drop()
-        table2.drop()
-
     def test_reflect(self):
-        meta2 = MetaData(testing.db)
-        t2 = Table("WorstCase1", meta2, autoload=True, quote=True)
+        meta2 = MetaData()
+        t2 = Table("WorstCase1", meta2, autoload_with=testing.db, quote=True)
         assert "lowercase" in t2.c
 
         # indicates the DB returns unquoted names as
@@ -88,19 +70,20 @@ class QuoteExecTest(fixtures.TestBase):
         assert "MixedCase" in t2.c
 
     @testing.provide_metadata
-    def test_has_table_case_sensitive(self):
+    def test_has_table_case_sensitive(self, connection):
         preparer = testing.db.dialect.identifier_preparer
-        if testing.db.dialect.requires_name_normalize:
-            testing.db.execute("CREATE TABLE TAB1 (id INTEGER)")
+        conn = connection
+        if conn.dialect.requires_name_normalize:
+            conn.exec_driver_sql("CREATE TABLE TAB1 (id INTEGER)")
         else:
-            testing.db.execute("CREATE TABLE tab1 (id INTEGER)")
-        testing.db.execute(
+            conn.exec_driver_sql("CREATE TABLE tab1 (id INTEGER)")
+        conn.exec_driver_sql(
             "CREATE TABLE %s (id INTEGER)" % preparer.quote_identifier("tab2")
         )
-        testing.db.execute(
+        conn.exec_driver_sql(
             "CREATE TABLE %s (id INTEGER)" % preparer.quote_identifier("TAB3")
         )
-        testing.db.execute(
+        conn.exec_driver_sql(
             "CREATE TABLE %s (id INTEGER)" % preparer.quote_identifier("TAB4")
         )
 
@@ -123,29 +106,37 @@ class QuoteExecTest(fixtures.TestBase):
             quote=True,
         )
 
-        insp = inspect(testing.db)
-        assert testing.db.has_table(t1.name)
+        insp = inspect(connection)
+        assert insp.has_table(t1.name)
         eq_([c["name"] for c in insp.get_columns(t1.name)], ["id"])
 
-        assert testing.db.has_table(t2.name)
+        assert insp.has_table(t2.name)
         eq_([c["name"] for c in insp.get_columns(t2.name)], ["id"])
 
-        assert testing.db.has_table(t3.name)
+        assert insp.has_table(t3.name)
         eq_([c["name"] for c in insp.get_columns(t3.name)], ["id"])
 
-        assert testing.db.has_table(t4.name)
+        assert insp.has_table(t4.name)
         eq_([c["name"] for c in insp.get_columns(t4.name)], ["id"])
 
-    def test_basic(self):
-        table1.insert().execute(
-            {"lowercase": 1, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
-            {"lowercase": 2, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
-            {"lowercase": 4, "UPPERCASE": 3, "MixedCase": 2, "a123": 1},
+    def test_basic(self, connection):
+        table1, table2 = self.tables("WorstCase1", "WorstCase2")
+
+        connection.execute(
+            table1.insert(),
+            [
+                {"lowercase": 1, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
+                {"lowercase": 2, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
+                {"lowercase": 4, "UPPERCASE": 3, "MixedCase": 2, "a123": 1},
+            ],
         )
-        table2.insert().execute(
-            {"d123": 1, "u123": 2, "MixedCase": 3},
-            {"d123": 2, "u123": 2, "MixedCase": 3},
-            {"d123": 4, "u123": 3, "MixedCase": 2},
+        connection.execute(
+            table2.insert(),
+            [
+                {"d123": 1, "u123": 2, "MixedCase": 3},
+                {"d123": 2, "u123": 2, "MixedCase": 3},
+                {"d123": 4, "u123": 3, "MixedCase": 2},
+            ],
         )
 
         columns = [
@@ -154,23 +145,30 @@ class QuoteExecTest(fixtures.TestBase):
             table1.c.MixedCase,
             table1.c.a123,
         ]
-        result = select(columns).execute().fetchall()
+        result = connection.execute(select(*columns)).all()
         assert result == [(1, 2, 3, 4), (2, 2, 3, 4), (4, 3, 2, 1)]
 
         columns = [table2.c.d123, table2.c.u123, table2.c.MixedCase]
-        result = select(columns).execute().fetchall()
+        result = connection.execute(select(*columns)).all()
         assert result == [(1, 2, 3), (2, 2, 3), (4, 3, 2)]
 
-    def test_use_labels(self):
-        table1.insert().execute(
-            {"lowercase": 1, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
-            {"lowercase": 2, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
-            {"lowercase": 4, "UPPERCASE": 3, "MixedCase": 2, "a123": 1},
+    def test_use_labels(self, connection):
+        table1, table2 = self.tables("WorstCase1", "WorstCase2")
+        connection.execute(
+            table1.insert(),
+            [
+                {"lowercase": 1, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
+                {"lowercase": 2, "UPPERCASE": 2, "MixedCase": 3, "a123": 4},
+                {"lowercase": 4, "UPPERCASE": 3, "MixedCase": 2, "a123": 1},
+            ],
         )
-        table2.insert().execute(
-            {"d123": 1, "u123": 2, "MixedCase": 3},
-            {"d123": 2, "u123": 2, "MixedCase": 3},
-            {"d123": 4, "u123": 3, "MixedCase": 2},
+        connection.execute(
+            table2.insert(),
+            [
+                {"d123": 1, "u123": 2, "MixedCase": 3},
+                {"d123": 2, "u123": 2, "MixedCase": 3},
+                {"d123": 4, "u123": 3, "MixedCase": 2},
+            ],
         )
 
         columns = [
@@ -179,41 +177,20 @@ class QuoteExecTest(fixtures.TestBase):
             table1.c.MixedCase,
             table1.c.a123,
         ]
-        result = select(columns, use_labels=True).execute().fetchall()
+        result = connection.execute(
+            select(*columns).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+        ).fetchall()
         assert result == [(1, 2, 3, 4), (2, 2, 3, 4), (4, 3, 2, 1)]
 
         columns = [table2.c.d123, table2.c.u123, table2.c.MixedCase]
-        result = select(columns, use_labels=True).execute().fetchall()
+        result = connection.execute(
+            select(*columns).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+        ).all()
         assert result == [(1, 2, 3), (2, 2, 3), (4, 3, 2)]
 
 
 class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
-
-    @classmethod
-    def setup_class(cls):
-        # TODO: figure out which databases/which identifiers allow special
-        # characters to be used, such as: spaces, quote characters,
-        # punctuation characters, set up tests for those as well.
-
-        global table1, table2
-        metadata = MetaData(testing.db)
-
-        table1 = Table(
-            "WorstCase1",
-            metadata,
-            Column("lowercase", Integer, primary_key=True),
-            Column("UPPERCASE", Integer),
-            Column("MixedCase", Integer),
-            Column("ASC", Integer, key="a123"),
-        )
-        table2 = Table(
-            "WorstCase2",
-            metadata,
-            Column("desc", Integer, primary_key=True, key="d123"),
-            Column("Union", Integer, key="u123"),
-            Column("MixedCase", Integer),
-        )
 
     @testing.crashes("oracle", "FIXME: unknown, verify not fails_on")
     @testing.requires.subqueries
@@ -237,8 +214,25 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         where the "UPPERCASE" column of "LaLa" doesn't exist.
         """
 
+        metadata = MetaData()
+        table1 = Table(
+            "WorstCase1",
+            metadata,
+            Column("lowercase", Integer, primary_key=True),
+            Column("UPPERCASE", Integer),
+            Column("MixedCase", Integer),
+            Column("ASC", Integer, key="a123"),
+        )
+        Table(
+            "WorstCase2",
+            metadata,
+            Column("desc", Integer, primary_key=True, key="d123"),
+            Column("Union", Integer, key="u123"),
+            Column("MixedCase", Integer),
+        )
+
         self.assert_compile(
-            table1.select(distinct=True).alias("LaLa").select(),
+            table1.select().distinct().alias("LaLa").select(),
             "SELECT "
             '"LaLa".lowercase, '
             '"LaLa"."UPPERCASE", '
@@ -401,7 +395,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         # Note that the names are quoted b/c they are reserved words
-        x = select([table.c.col1, table.c["from"], table.c.order])
+        x = select(table.c.col1, table.c["from"], table.c.order)
         self.assert_compile(
             x,
             "SELECT "
@@ -425,7 +419,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         # Note that the names are now unquoted
-        x = select([table.c.col1, table.c["from"], table.c.order])
+        x = select(table.c.col1, table.c["from"], table.c.order)
         self.assert_compile(
             x,
             "SELECT "
@@ -440,7 +434,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         metadata = MetaData()
         t1 = Table("t1", metadata, Column("col1", Integer), schema="foo")
         a = t1.select().alias("anon")
-        b = select([1], a.c.col1 == 2, from_obj=a)
+        b = select(1).where(a.c.col1 == 2).select_from(a)
         self.assert_compile(
             b,
             "SELECT 1 "
@@ -465,7 +459,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
             quote_schema=True,
         )
         a = t1.select().alias("anon")
-        b = select([1], a.c.col1 == 2, from_obj=a)
+        b = select(1).where(a.c.col1 == 2).select_from(a)
         self.assert_compile(
             b,
             "SELECT 1 "
@@ -483,7 +477,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         metadata = MetaData()
         t1 = Table("T1", metadata, Column("Col1", Integer), schema="Foo")
         a = t1.select().alias("Anon")
-        b = select([1], a.c.Col1 == 2, from_obj=a)
+        b = select(1).where(a.c.Col1 == 2).select_from(a)
         self.assert_compile(
             b,
             "SELECT 1 "
@@ -510,7 +504,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
             quote_schema=False,
         )
         a = t1.select().alias("Anon")
-        b = select([1], a.c.Col1 == 2, from_obj=a)
+        b = select(1).where(a.c.Col1 == 2).select_from(a)
         self.assert_compile(
             b,
             "SELECT 1 "
@@ -529,7 +523,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         t1 = Table("t1", m, Column("col1", Integer))
         cl = t1.c.col1.label("ShouldQuote")
         self.assert_compile(
-            select([cl]).order_by(cl),
+            select(cl).order_by(cl),
             'SELECT t1.col1 AS "ShouldQuote" FROM t1 ORDER BY "ShouldQuote"',
         )
 
@@ -567,7 +561,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             t2.join(t1).select(),
             "SELECT "
-            "t2.col1, t2.t1col1, t1.col1 "
+            "t2.col1, t2.t1col1, t1.col1 AS col1_1 "
             "FROM "
             "t2 "
             "JOIN "
@@ -589,7 +583,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             t2.join(t1).select(),
             "SELECT "
-            '"t2"."col1", "t2"."t1col1", "t1"."col1" '
+            '"t2"."col1", "t2"."t1col1", "t1"."col1" AS col1_1 '
             "FROM "
             '"t2" '
             "JOIN "
@@ -608,7 +602,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             t2.join(t1).select(),
             "SELECT "
-            '"T2"."Col1", "T2"."T1Col1", "T1"."Col1" '
+            '"T2"."Col1", "T2"."T1Col1", "T1"."Col1" AS "Col1_1" '
             "FROM "
             '"T2" '
             "JOIN "
@@ -630,7 +624,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             t2.join(t1).select(),
             "SELECT "
-            "T2.Col1, T2.T1Col1, T1.Col1 "
+            'T2.Col1, T2.T1Col1, T1.Col1 AS "Col1_1" '
             "FROM "
             "T2 "
             "JOIN "
@@ -641,9 +635,9 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         # Lower case names, should not quote
         metadata = MetaData()
         table = Table("t1", metadata, Column("col1", Integer))
-        x = select([table.c.col1.label("label1")]).alias("alias1")
+        x = select(table.c.col1.label("label1")).alias("alias1")
         self.assert_compile(
-            select([x.c.label1]),
+            select(x.c.label1),
             "SELECT "
             "alias1.label1 "
             "FROM ("
@@ -656,9 +650,9 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         # Not lower case names, should quote
         metadata = MetaData()
         table = Table("T1", metadata, Column("Col1", Integer))
-        x = select([table.c.Col1.label("Label1")]).alias("Alias1")
+        x = select(table.c.Col1.label("Label1")).alias("Alias1")
         self.assert_compile(
-            select([x.c.Label1]),
+            select(x.c.Label1),
             "SELECT "
             '"Alias1"."Label1" '
             "FROM ("
@@ -675,7 +669,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
 
         # Note that 'col1' is already quoted (literal_column)
         columns = [sql.literal_column("'col1'").label("label1")]
-        x = select(columns, from_obj=[table]).alias("alias1")
+        x = select(*columns).select_from(table).alias("alias1")
         x = x.select()
         self.assert_compile(
             x,
@@ -694,7 +688,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
 
         # Note that 'Col1' is already quoted (literal_column)
         columns = [sql.literal_column("'Col1'").label("Label1")]
-        x = select(columns, from_obj=[table]).alias("Alias1")
+        x = select(*columns).select_from(table).alias("Alias1")
         x = x.select()
         self.assert_compile(
             x,
@@ -707,90 +701,42 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
             ') AS "Alias1"',
         )
 
-    def test_literal_column_label_embedded_select_samename(self):
-        col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES")
-
-        # embedded SELECT use case, going away in 1.4 however use a
-        # SelectStatementGrouping here when that merges
-        self.assert_compile(
-            select([col]).select(),
-            'SELECT "NEEDS QUOTES" FROM (SELECT NEEDS QUOTES AS '
-            '"NEEDS QUOTES")',
-        )
-
     def test_literal_column_label_alias_samename(self):
         col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES")
 
         self.assert_compile(
-            select([col]).alias().select(),
+            select(col).alias().select(),
             'SELECT anon_1."NEEDS QUOTES" FROM (SELECT NEEDS QUOTES AS '
             '"NEEDS QUOTES") AS anon_1',
-        )
-
-    def test_literal_column_label_embedded_select_diffname(self):
-        col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES_")
-
-        # embedded SELECT use case, going away in 1.4 however use a
-        # SelectStatementGrouping here when that merges
-        self.assert_compile(
-            select([col]).select(),
-            'SELECT "NEEDS QUOTES_" FROM (SELECT NEEDS QUOTES AS '
-            '"NEEDS QUOTES_")',
         )
 
     def test_literal_column_label_alias_diffname(self):
         col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES_")
 
         self.assert_compile(
-            select([col]).alias().select(),
+            select(col).alias().select(),
             'SELECT anon_1."NEEDS QUOTES_" FROM (SELECT NEEDS QUOTES AS '
             '"NEEDS QUOTES_") AS anon_1',
         )
 
-    def test_literal_column_label_embedded_select_samename_explcit_quote(self):
-        col = sql.literal_column("NEEDS QUOTES").label(
-            quoted_name("NEEDS QUOTES", True)
-        )
-
-        # embedded SELECT use case, going away in 1.4 however use a
-        # SelectStatementGrouping here when that merges
-        self.assert_compile(
-            select([col]).select(),
-            'SELECT "NEEDS QUOTES" FROM '
-            '(SELECT NEEDS QUOTES AS "NEEDS QUOTES")',
-        )
-
-    def test_literal_column_label_alias_samename_explcit_quote(self):
+    def test_literal_column_label_alias_samename_explicit_quote(self):
         col = sql.literal_column("NEEDS QUOTES").label(
             quoted_name("NEEDS QUOTES", True)
         )
 
         self.assert_compile(
-            select([col]).alias().select(),
+            select(col).alias().select(),
             'SELECT anon_1."NEEDS QUOTES" FROM '
             '(SELECT NEEDS QUOTES AS "NEEDS QUOTES") AS anon_1',
         )
 
-    def test_literal_column_label_embedded_select_diffname_explcit_quote(self):
-        col = sql.literal_column("NEEDS QUOTES").label(
-            quoted_name("NEEDS QUOTES_", True)
-        )
-
-        # embedded SELECT use case, going away in 1.4 however use a
-        # SelectStatementGrouping here when that merges
-        self.assert_compile(
-            select([col]).select(),
-            'SELECT "NEEDS QUOTES_" FROM '
-            '(SELECT NEEDS QUOTES AS "NEEDS QUOTES_")',
-        )
-
-    def test_literal_column_label_alias_diffname_explcit_quote(self):
+    def test_literal_column_label_alias_diffname_explicit_quote(self):
         col = sql.literal_column("NEEDS QUOTES").label(
             quoted_name("NEEDS QUOTES_", True)
         )
 
         self.assert_compile(
-            select([col]).alias().select(),
+            select(col).alias().select(),
             'SELECT anon_1."NEEDS QUOTES_" FROM '
             '(SELECT NEEDS QUOTES AS "NEEDS QUOTES_") AS anon_1',
         )
@@ -804,7 +750,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         col = sql.literal_column('"NEEDS QUOTES"')
 
         self.assert_compile(
-            select([col]).alias().select(),
+            select(col).alias().select(),
             'SELECT anon_1."NEEDS QUOTES" FROM '
             '(SELECT "NEEDS QUOTES") AS anon_1',
         )
@@ -815,7 +761,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         t1 = Table("T1", metadata, Column("Col1", Integer), schema="Foo")
 
         self.assert_compile(
-            t1.select().apply_labels(),
+            t1.select().set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT "
             '"Foo"."T1"."Col1" AS "Foo_T1_Col1" '
             "FROM "
@@ -837,7 +783,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         # TODO: is this what we really want here ?
         # what if table/schema *are* quoted?
         self.assert_compile(
-            t1.select().apply_labels(),
+            t1.select().set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT " "Foo.T1.Col1 AS Foo_T1_Col1 " "FROM " "Foo.T1",
         )
 
@@ -863,13 +809,13 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         t = Table("t", m, Column("x", Integer, quote=True))
 
         self.assert_compile(
-            select([t.alias()]).apply_labels(),
+            select(t.alias()).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             'SELECT t_1."x" AS "t_1_x" FROM t AS t_1',
         )
 
         t2 = Table("t2", m, Column("x", Integer), quote=True)
         self.assert_compile(
-            select([t2.c.x]).apply_labels(),
+            select(t2.c.x).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             'SELECT "t2".x AS "t2_x" FROM "t2"',
         )
 
@@ -927,6 +873,34 @@ class PreparerTest(fixtures.TestBase):
         a_eq(unformat("foo.`bar`"), ["foo", "bar"])
         a_eq(unformat("`foo`.bar"), ["foo", "bar"])
         a_eq(unformat("`foo`.`b``a``r`.`baz`"), ["foo", "b`a`r", "baz"])
+
+    def test_alembic_quote(self):
+        t1 = Table(
+            "TableOne", MetaData(), Column("MyCol", Integer, index=True)
+        )
+        t2 = Table(
+            "some_table", MetaData(), Column("some_col", Integer, index=True)
+        )
+        t3 = Table(
+            "some_table", MetaData(), Column("some_col", Integer, index=True)
+        )
+        ix3 = Index("my_index", t3.c.some_col)
+        ix4 = Index("MyIndex", t3.c.some_col)
+        ix5 = Index(None, t3.c.some_col)
+
+        for idx, expected in [
+            (list(t1.indexes)[0], "ix_TableOne_MyCol"),
+            (list(t2.indexes)[0], "ix_some_table_some_col"),
+            (ix3, "my_index"),
+            (ix4, "MyIndex"),
+            (ix5, "ix_some_table_some_col"),
+        ]:
+            eq_(
+                testing.db.dialect.identifier_preparer.format_constraint(
+                    idx, _alembic_quote=False
+                ),
+                expected,
+            )
 
 
 class QuotedIdentTest(fixtures.TestBase):

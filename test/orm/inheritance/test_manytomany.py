@@ -5,11 +5,10 @@ from sqlalchemy import Sequence
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.orm import class_mapper
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 
 
 class InheritTest(fixtures.MappedTest):
@@ -88,10 +87,10 @@ class InheritTest(fixtures.MappedTest):
         class Group(Principal):
             pass
 
-        mapper(Principal, principals)
-        mapper(User, users, inherits=Principal)
+        self.mapper_registry.map_imperatively(Principal, principals)
+        self.mapper_registry.map_imperatively(User, users, inherits=Principal)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Group,
             groups,
             inherits=Principal,
@@ -114,7 +113,7 @@ class InheritTest(fixtures.MappedTest):
                 login_id="lg1",
             )
         )
-        sess = create_session()
+        sess = fixture_session()
         sess.add(g)
         sess.flush()
         # TODO: put an assertion
@@ -159,31 +158,31 @@ class InheritTest2(fixtures.MappedTest):
         class Bar(Foo):
             pass
 
-        mapper(Foo, foo)
-        mapper(Bar, bar, inherits=Foo)
+        self.mapper_registry.map_imperatively(Foo, foo)
+        self.mapper_registry.map_imperatively(Bar, bar, inherits=Foo)
         print(foo.join(bar).primary_key)
         print(class_mapper(Bar).primary_key)
         b = Bar("somedata")
-        sess = create_session()
+        sess = fixture_session()
         sess.add(b)
         sess.flush()
         sess.expunge_all()
 
         # test that "bar.bid" does not need to be referenced in a get
         # (ticket 185)
-        assert sess.query(Bar).get(b.id).id == b.id
+        assert sess.get(Bar, b.id).id == b.id
 
     def test_basic(self):
         class Foo(object):
             def __init__(self, data=None):
                 self.data = data
 
-        mapper(Foo, foo)
+        self.mapper_registry.map_imperatively(Foo, foo)
 
         class Bar(Foo):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Bar,
             bar,
             inherits=Foo,
@@ -192,7 +191,7 @@ class InheritTest2(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         b = Bar("barfoo")
         sess.add(b)
         sess.flush()
@@ -289,13 +288,13 @@ class InheritTest3(fixtures.MappedTest):
             def __repr__(self):
                 return "Foo id %d, data %s" % (self.id, self.data)
 
-        mapper(Foo, foo)
+        self.mapper_registry.map_imperatively(Foo, foo)
 
         class Bar(Foo):
             def __repr__(self):
                 return "Bar id %d, data %s" % (self.id, self.data)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Bar,
             bar,
             inherits=Foo,
@@ -304,7 +303,7 @@ class InheritTest3(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         b = Bar("bar #1")
         sess.add(b)
         b.foos.append(Foo("foo #1"))
@@ -325,13 +324,13 @@ class InheritTest3(fixtures.MappedTest):
             def __repr__(self):
                 return "Foo id %d, data %s" % (self.id, self.data)
 
-        mapper(Foo, foo)
+        self.mapper_registry.map_imperatively(Foo, foo)
 
         class Bar(Foo):
             def __repr__(self):
                 return "Bar id %d, data %s" % (self.id, self.data)
 
-        mapper(Bar, bar, inherits=Foo)
+        self.mapper_registry.map_imperatively(Bar, bar, inherits=Foo)
 
         class Blub(Bar):
             def __repr__(self):
@@ -342,7 +341,7 @@ class InheritTest3(fixtures.MappedTest):
                     repr([f for f in self.foos]),
                 )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Blub,
             blub,
             inherits=Bar,
@@ -352,7 +351,7 @@ class InheritTest3(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         f1 = Foo("foo #1")
         b1 = Bar("bar #1")
         b2 = Bar("bar #2")

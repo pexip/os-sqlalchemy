@@ -1,7 +1,3 @@
-from distutils.command.build_ext import build_ext
-from distutils.errors import CCompilerError
-from distutils.errors import DistutilsExecError
-from distutils.errors import DistutilsPlatformError
 import os
 import platform
 import re
@@ -9,37 +5,54 @@ import sys
 
 from setuptools import Distribution as _Distribution
 from setuptools import Extension
-from setuptools import find_packages
 from setuptools import setup
+from setuptools.command.build_ext import build_ext
 from setuptools.command.test import test as TestCommand
 
+# attempt to use pep-632 imports for setuptools symbols; however,
+# since these symbols were only added to setuptools as of 59.0.1,
+# fall back to the distutils symbols otherwise
+try:
+    from setuptools.errors import CCompilerError
+    from setuptools.errors import DistutilsExecError
+    from setuptools.errors import DistutilsPlatformError
+except ImportError:
+    from distutils.errors import CCompilerError
+    from distutils.errors import DistutilsExecError
+    from distutils.errors import DistutilsPlatformError
 
 cmdclass = {}
-if sys.version_info < (2, 7):
-    raise Exception("SQLAlchemy requires Python 2.7 or higher.")
 
 cpython = platform.python_implementation() == "CPython"
+
+ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
+if sys.platform == "win32":
+    # Work around issue https://github.com/pypa/setuptools/issues/1902
+    ext_errors += (IOError, TypeError)
+    extra_compile_args = []
+elif sys.platform in ("linux", "linux2"):
+    # warn for undefined symbols in .c files
+    extra_compile_args = ["-Wundef", "-Werror=implicit-function-declaration"]
+else:
+    extra_compile_args = []
 
 ext_modules = [
     Extension(
         "sqlalchemy.cprocessors",
         sources=["lib/sqlalchemy/cextension/processors.c"],
+        extra_compile_args=extra_compile_args,
     ),
     Extension(
         "sqlalchemy.cresultproxy",
         sources=["lib/sqlalchemy/cextension/resultproxy.c"],
+        extra_compile_args=extra_compile_args,
     ),
     Extension(
-        "sqlalchemy.cutils", sources=["lib/sqlalchemy/cextension/utils.c"]
+        "sqlalchemy.cimmutabledict",
+        sources=["lib/sqlalchemy/cextension/immutabledict.c"],
+        extra_compile_args=extra_compile_args,
     ),
 ]
-
-ext_errors = (CCompilerError, DistutilsExecError, DistutilsPlatformError)
-if sys.platform == "win32":
-    # 2.6's distutils.msvc9compiler can raise an IOError when failing to
-    # find the compiler
-    # for TypeError, see https://github.com/pypa/setuptools/issues/1902
-    ext_errors += (IOError, TypeError)
 
 
 class BuildFailed(Exception):
@@ -82,37 +95,22 @@ class Distribution(_Distribution):
         return True
 
 
-class PyTest(TestCommand):
-    # from http://pytest.org/latest/goodpractices.html\
-    # #integrating-with-setuptools-python-setup-py-test-pytest-runner
-    # TODO: prefer pytest-runner package at some point, however it was
-    # not working at the time of this comment.
-    user_options = [("pytest-args=", "a", "Arguments to pass to py.test")]
-
-    default_options = ["-n", "4", "-q", "--nomemory"]
-
-    def initialize_options(self):
-        TestCommand.initialize_options(self)
-        self.pytest_args = ""
-
-    def finalize_options(self):
-        TestCommand.finalize_options(self)
-        self.test_args = []
-        self.test_suite = True
+class UseTox(TestCommand):
+    RED = 31
+    RESET_SEQ = "\033[0m"
+    BOLD_SEQ = "\033[1m"
+    COLOR_SEQ = "\033[1;%dm"
 
     def run_tests(self):
-        import shlex
-
-        # import here, cause outside the eggs aren't loaded
-        import pytest
-
-        errno = pytest.main(
-            self.default_options + shlex.split(self.pytest_args)
+        sys.stderr.write(
+            "%s%spython setup.py test is deprecated by pypa.  Please invoke "
+            "'tox' with no arguments for a basic test run.\n%s"
+            % (self.COLOR_SEQ % self.RED, self.BOLD_SEQ, self.RESET_SEQ)
         )
-        sys.exit(errno)
+        sys.exit(1)
 
 
-cmdclass["test"] = PyTest
+cmdclass["test"] = UseTox
 
 
 def status_msgs(*msgs):
@@ -131,73 +129,21 @@ with open(
         .group(1)
     )
 
-with open(os.path.join(os.path.dirname(__file__), "README.rst")) as r_file:
-    readme = r_file.read()
-
 
 def run_setup(with_cext):
     kwargs = {}
     if with_cext:
         kwargs["ext_modules"] = ext_modules
     else:
+        if os.environ.get("REQUIRE_SQLALCHEMY_CEXT"):
+            raise AssertionError(
+                "Can't build on this platform with "
+                "REQUIRE_SQLALCHEMY_CEXT set."
+            )
+
         kwargs["ext_modules"] = []
 
-    setup(
-        name="SQLAlchemy",
-        version=VERSION,
-        description="Database Abstraction Library",
-        author="Mike Bayer",
-        author_email="mike_mp@zzzcomputing.com",
-        url="http://www.sqlalchemy.org",
-        project_urls={
-            "Documentation": "https://docs.sqlalchemy.org",
-            "Issue Tracker": "https://github.com/sqlalchemy/sqlalchemy/",
-        },
-        packages=find_packages("lib"),
-        package_dir={"": "lib"},
-        license="MIT",
-        cmdclass=cmdclass,
-        tests_require=[
-            "pytest>=2.5.2,!=3.9.1,!=3.9.2",
-            "mock",
-            "pytest-xdist",
-        ],
-        long_description=readme,
-        python_requires=">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*",
-        classifiers=[
-            "Development Status :: 5 - Production/Stable",
-            "Intended Audience :: Developers",
-            "License :: OSI Approved :: MIT License",
-            "Programming Language :: Python",
-            "Programming Language :: Python :: 2",
-            "Programming Language :: Python :: 2.7",
-            "Programming Language :: Python :: 3",
-            "Programming Language :: Python :: 3.4",
-            "Programming Language :: Python :: 3.5",
-            "Programming Language :: Python :: 3.6",
-            "Programming Language :: Python :: 3.7",
-            "Programming Language :: Python :: 3.8",
-            "Programming Language :: Python :: 3.9",
-            "Programming Language :: Python :: Implementation :: CPython",
-            "Programming Language :: Python :: Implementation :: PyPy",
-            "Topic :: Database :: Front-Ends",
-            "Operating System :: OS Independent",
-        ],
-        distclass=Distribution,
-        extras_require={
-            "mysql": ["mysqlclient"],
-            "pymysql": ["pymysql"],
-            "postgresql": ["psycopg2"],
-            "postgresql_psycopg2binary": ["psycopg2-binary"],
-            "postgresql_pg8000": ["pg8000"],
-            "postgresql_psycopg2cffi": ["psycopg2cffi"],
-            "oracle": ["cx_oracle"],
-            "mssql_pyodbc": ["pyodbc"],
-            "mssql_pymssql": ["pymssql"],
-            "mssql": ["pyodbc"],
-        },
-        **kwargs
-    )
+    setup(version=VERSION, cmdclass=cmdclass, distclass=Distribution, **kwargs)
 
 
 if not cpython:
@@ -219,6 +165,15 @@ else:
     try:
         run_setup(True)
     except BuildFailed as exc:
+
+        if os.environ.get("REQUIRE_SQLALCHEMY_CEXT"):
+            status_msgs(
+                "NOTE: C extension build is required because "
+                "REQUIRE_SQLALCHEMY_CEXT is set, and the build has failed; "
+                "will not degrade to non-C extensions"
+            )
+            raise
+
         status_msgs(
             exc.cause,
             "WARNING: The C extension could not be compiled, "

@@ -75,7 +75,7 @@ Base.metadata.create_all(engine)
 sess = Session(engine)
 
 
-def runit(status, factor=1, query_runs=5):
+def runit_persist(status, factor=1, query_runs=5):
     num_bosses = 100 * factor
     num_grunts = num_bosses * 100
 
@@ -111,6 +111,9 @@ def runit(status, factor=1, query_runs=5):
     sess.commit()
     status("Associated grunts w/ bosses and committed")
 
+
+def runit_query_runs(status, factor=1, query_runs=5):
+
     # do some heavier reading
     for i in range(query_runs):
         status("Heavy query run #%d" % (i + 1))
@@ -144,7 +147,13 @@ def run_with_profile(runsnake=False, dump=False):
     def status(msg):
         print(msg)
 
-    cProfile.runctx("runit(status)", globals(), locals(), filename)
+    cProfile.runctx(
+        # "runit_persist(status)",
+        "runit_persist(status); runit_query_runs(status)",
+        globals(),
+        locals(),
+        filename,
+    )
     stats = pstats.Stats(filename)
 
     counts_by_methname = dict(
@@ -168,14 +177,16 @@ def run_with_profile(runsnake=False, dump=False):
     )
 
     if dump:
-        stats.sort_stats("time", "calls")
+        #        stats.sort_stats("nfl")
+        stats.sort_stats("cumtime", "calls")
         stats.print_stats()
+    #        stats.print_callers()
 
     if runsnake:
         os.system("runsnake %s" % filename)
 
 
-def run_with_time():
+def run_with_time(factor):
     import time
 
     now = time.time()
@@ -183,7 +194,12 @@ def run_with_time():
     def status(msg):
         print("%d - %s" % (time.time() - now, msg))
 
-    runit(status, 10)
+    runit_persist(status, factor)
+
+    print("Total time: %d" % (time.time() - now))
+
+    runit_query_runs(status, factor)
+
     print("Total time: %d" % (time.time() - now))
 
 
@@ -206,7 +222,13 @@ if __name__ == "__main__":
         action="store_true",
         help="invoke runsnakerun (implies --profile)",
     )
-
+    parser.add_argument(
+        "--factor",
+        type=int,
+        default=10,
+        help="scale factor, a multiple of how many records to work with.  "
+        "defaults to 10",
+    )
     args = parser.parse_args()
 
     args.profile = args.profile or args.dump or args.runsnake
@@ -214,4 +236,4 @@ if __name__ == "__main__":
     if args.profile:
         run_with_profile(runsnake=args.runsnake, dump=args.dump)
     else:
-        run_with_time()
+        run_with_time(args.factor)

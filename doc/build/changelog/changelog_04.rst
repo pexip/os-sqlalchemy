@@ -60,7 +60,7 @@
       convert_unicode logic disabled in the sqlite dialect,
       to adjust for pysqlite 2.5.0's new requirement that
       only Python unicode objects are accepted;
-      http://itsystementwicklung.de/pipermail/list-pysqlite/2008-March/000018.html
+      https://itsystementwicklung.de/pipermail/list-pysqlite/2008-March/000018.html
 
     .. change::
         :tags: oracle
@@ -540,9 +540,7 @@
       to work for subclasses, if they are present, for
       example::
 
-        sess.query(Company).options(
-         eagerload_all(
-        ))
+        sess.query(Company).options(eagerload_all())
 
       to load Company objects, their employees, and the
       'machines' collection of employees who happen to be
@@ -2751,7 +2749,7 @@
         :tickets: 
 
       (see 0.4.0beta1 for the start of major changes against 0.3,
-      as well as http://www.sqlalchemy.org/trac/wiki/WhatsNewIn04 )
+      as well as https://www.sqlalchemy.org/trac/wiki/WhatsNewIn04 )
 
     .. change::
         :tags: 
@@ -3742,7 +3740,7 @@
         :tickets: 
 
       New scoped_session() function replaces SessionContext and assignmapper.
-      Builds onto "sessionmaker()" concept to produce a class whos Session()
+      Builds onto "sessionmaker()" concept to produce a class whose Session()
       construction returns the thread-local session.  Or, call all Session
       methods as class methods, i.e. Session.save(foo); Session.commit().
       just like the old "objectstore" days.

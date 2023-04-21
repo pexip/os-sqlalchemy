@@ -2,10 +2,9 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -53,21 +52,23 @@ class ABCTest(fixtures.MappedTest):
         else:
             abc = bc = None
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             with_polymorphic=("*", abc),
             polymorphic_on=a.c.type,
             polymorphic_identity="a",
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             B,
             b,
             with_polymorphic=("*", bc),
             inherits=A,
             polymorphic_identity="b",
         )
-        mapper(C, c, inherits=B, polymorphic_identity="c")
+        self.mapper_registry.map_imperatively(
+            C, c, inherits=B, polymorphic_identity="c"
+        )
 
         a1 = A(adata="a1")
         b1 = B(bdata="b1", adata="b1")
@@ -77,7 +78,7 @@ class ABCTest(fixtures.MappedTest):
         c2 = C(cdata="c2", bdata="c2", adata="c2")
         c3 = C(cdata="c2", bdata="c2", adata="c2")
 
-        sess = create_session()
+        sess = fixture_session()
         for x in (a1, b1, b2, b3, c1, c2, c3):
             sess.add(x)
         sess.flush()

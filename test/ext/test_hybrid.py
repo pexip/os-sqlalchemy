@@ -1,22 +1,30 @@
 from decimal import Decimal
 
+from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import LABEL_STYLE_TABLENAME_PLUS_COL
+from sqlalchemy import literal_column
 from sqlalchemy import Numeric
+from sqlalchemy import select
 from sqlalchemy import String
+from sqlalchemy import testing
 from sqlalchemy.ext import hybrid
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import aliased
-from sqlalchemy.orm import persistence
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import synonym
+from sqlalchemy.sql import update
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
 
@@ -70,14 +78,14 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A.value), "SELECT a.value AS a_value FROM a"
         )
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A).value),
             "SELECT a_1.value AS a_1_value FROM a AS a_1",
@@ -85,7 +93,7 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_filter(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
             "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
@@ -95,6 +103,64 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_docstring(self):
         A = self._fixture()
         eq_(A.value.__doc__, "This is a docstring")
+
+    def test_no_name_one(self):
+        """test :ticket:`6215`"""
+
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+            @hybrid.hybrid_property
+            def same_name(self):
+                return self.id
+
+            def name1(self):
+                return self.id
+
+            different_name = hybrid.hybrid_property(name1)
+
+            no_name = hybrid.hybrid_property(lambda self: self.name)
+
+        stmt = select(A.same_name, A.different_name, A.no_name)
+        compiled = stmt.compile()
+
+        eq_(
+            [ent._label_name for ent in compiled.compile_state._entities],
+            ["same_name", "id", "name"],
+        )
+
+    def test_no_name_two(self):
+        """test :ticket:`6215`"""
+        Base = declarative_base()
+
+        class SomeMixin(object):
+            @hybrid.hybrid_property
+            def same_name(self):
+                return self.id
+
+            def name1(self):
+                return self.id
+
+            different_name = hybrid.hybrid_property(name1)
+
+            no_name = hybrid.hybrid_property(lambda self: self.name)
+
+        class A(SomeMixin, Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+        stmt = select(A.same_name, A.different_name, A.no_name)
+        compiled = stmt.compile()
+
+        eq_(
+            [ent._label_name for ent in compiled.compile_state._entities],
+            ["same_name", "id", "name"],
+        )
 
 
 class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -125,6 +191,24 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
             @hybrid.hybrid_property
             def bar_value(cls):
                 return func.bar(cls._value)
+
+        return A
+
+    def _wrong_expr_fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            _value = Column("value", String)
+
+            @hybrid.hybrid_property
+            def value(self):
+                return self._value is not None
+
+            @value.expression
+            def value(cls):
+                return cls._value is not None
 
         return A
 
@@ -161,6 +245,150 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
         return A, B
 
+    @testing.fixture
+    def _related_polymorphic_attr_fixture(self):
+        """test for #7425"""
+
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+
+            bs = relationship("B", back_populates="a", lazy="joined")
+
+        class B(Base):
+            __tablename__ = "poly"
+            __mapper_args__ = {
+                "polymorphic_on": "type",
+                # if with_polymorphic is removed, issue does not occur
+                "with_polymorphic": "*",
+            }
+            name = Column(String, primary_key=True)
+            type = Column(String)
+            a_id = Column(ForeignKey(A.id))
+
+            a = relationship(A, back_populates="bs")
+
+            @hybrid.hybrid_property
+            def is_foo(self):
+                return self.name == "foo"
+
+        return A, B
+
+    def test_cloning_in_polymorphic_any(
+        self, _related_polymorphic_attr_fixture
+    ):
+        A, B = _related_polymorphic_attr_fixture
+
+        session = fixture_session()
+
+        # in the polymorphic case, A.bs.any() does a traverse() / clone()
+        # on the expression.  so the proxedattribute coming from the hybrid
+        # has to support this.
+
+        self.assert_compile(
+            session.query(A).filter(A.bs.any(B.name == "foo")),
+            "SELECT a.id AS a_id, poly_1.name AS poly_1_name, poly_1.type "
+            "AS poly_1_type, poly_1.a_id AS poly_1_a_id FROM a "
+            "LEFT OUTER JOIN poly AS poly_1 ON a.id = poly_1.a_id "
+            "WHERE EXISTS (SELECT 1 FROM poly WHERE a.id = poly.a_id "
+            "AND poly.name = :name_1)",
+        )
+
+        # SQL should be identical
+        self.assert_compile(
+            session.query(A).filter(A.bs.any(B.is_foo)),
+            "SELECT a.id AS a_id, poly_1.name AS poly_1_name, poly_1.type "
+            "AS poly_1_type, poly_1.a_id AS poly_1_a_id FROM a "
+            "LEFT OUTER JOIN poly AS poly_1 ON a.id = poly_1.a_id "
+            "WHERE EXISTS (SELECT 1 FROM poly WHERE a.id = poly.a_id "
+            "AND poly.name = :name_1)",
+        )
+
+    @testing.fixture
+    def _unnamed_expr_fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            firstname = Column(String)
+            lastname = Column(String)
+
+            @hybrid.hybrid_property
+            def name(self):
+                return self.firstname + " " + self.lastname
+
+        return A
+
+    def test_labeling_for_unnamed(self, _unnamed_expr_fixture):
+        A = _unnamed_expr_fixture
+
+        stmt = select(A.id, A.name)
+        self.assert_compile(
+            stmt,
+            "SELECT a.id, a.firstname || :firstname_1 || a.lastname AS name "
+            "FROM a",
+        )
+
+        eq_(stmt.subquery().c.keys(), ["id", "name"])
+
+        self.assert_compile(
+            select(stmt.subquery()),
+            "SELECT anon_1.id, anon_1.name "
+            "FROM (SELECT a.id AS id, a.firstname || :firstname_1 || "
+            "a.lastname AS name FROM a) AS anon_1",
+        )
+
+    def test_labeling_for_unnamed_tablename_plus_col(
+        self, _unnamed_expr_fixture
+    ):
+        A = _unnamed_expr_fixture
+
+        stmt = select(A.id, A.name).set_label_style(
+            LABEL_STYLE_TABLENAME_PLUS_COL
+        )
+        # looks like legacy query
+        self.assert_compile(
+            stmt,
+            "SELECT a.id AS a_id, a.firstname || :firstname_1 || "
+            "a.lastname AS name FROM a",
+        )
+
+        eq_(stmt.subquery().c.keys(), ["a_id", "name"])
+
+        self.assert_compile(
+            select(stmt.subquery()),
+            "SELECT anon_1.a_id, anon_1.name FROM (SELECT a.id AS a_id, "
+            "a.firstname || :firstname_1 || a.lastname AS name FROM a) "
+            "AS anon_1",
+        )
+
+    def test_labeling_for_unnamed_legacy(self, _unnamed_expr_fixture):
+        A = _unnamed_expr_fixture
+
+        sess = fixture_session()
+
+        stmt = sess.query(A.id, A.name)
+
+        self.assert_compile(
+            stmt,
+            "SELECT a.id AS a_id, a.firstname || "
+            ":firstname_1 || a.lastname AS name FROM a",
+        )
+
+        # for the subquery, we lose the "ORM-ness" from the subquery
+        # so we have to carry it over using _proxy_key
+        eq_(stmt.subquery().c.keys(), ["id", "name"])
+
+        self.assert_compile(
+            sess.query(stmt.subquery()),
+            "SELECT anon_1.id AS anon_1_id, anon_1.name AS anon_1_name "
+            "FROM (SELECT a.id AS id, a.firstname || :firstname_1 || "
+            "a.lastname AS name FROM a) AS anon_1",
+        )
+
     def test_info(self):
         A = self._fixture()
         inspect(A).all_orm_descriptors.value.info["some key"] = "some value"
@@ -181,9 +409,22 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
             A.value.__clause_element__(), "foo(a.value) + bar(a.value)"
         )
 
+    def test_expression_isnt_clause_element(self):
+        A = self._wrong_expr_fixture()
+
+        from sqlalchemy.sql import coercions, roles
+
+        with testing.expect_raises_message(
+            exc.InvalidRequestError,
+            'When interpreting attribute "A.value" as a SQL expression, '
+            r"expected __clause_element__\(\) to return a "
+            "ClauseElement object, got: True",
+        ):
+            coercions.expect(roles.ExpressionElementRole, A.value)
+
     def test_any(self):
         A, B = self._relationship_fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(B).filter(B.as_.any(value=5)),
             "SELECT b.id AS b_id FROM b WHERE EXISTS "
@@ -200,7 +441,7 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter_by(value="foo"),
             "SELECT a.value AS a_value, a.id AS a_id "
@@ -209,7 +450,7 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
             "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
@@ -396,6 +637,90 @@ class PropertyMirrorTest(fixtures.TestBase, AssertsCompiledSQL):
 
         return A
 
+    @testing.fixture
+    def _function_fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            value = Column(Integer)
+
+            @hybrid.hybrid_property
+            def foo_value(self):
+                return func.foo(self.value)
+
+        return A
+
+    @testing.fixture
+    def _name_mismatch_fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            addresses = relationship("B")
+
+            @hybrid.hybrid_property
+            def some_email(self):
+                if self.addresses:
+                    return self.addresses[0].email_address
+                else:
+                    return None
+
+            @some_email.expression
+            def some_email(cls):
+                return B.email_address
+
+        class B(Base):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+            aid = Column(ForeignKey("a.id"))
+            email_address = Column(String)
+
+        return A, B
+
+    def test_dont_assume_attr_key_is_present(self, _name_mismatch_fixture):
+        A, B = _name_mismatch_fixture
+        self.assert_compile(
+            select(A, A.some_email).join(A.addresses),
+            "SELECT a.id, b.email_address FROM a JOIN b ON a.id = b.aid",
+        )
+
+    def test_dont_assume_attr_key_is_present_ac(self, _name_mismatch_fixture):
+        A, B = _name_mismatch_fixture
+
+        ac = aliased(A)
+        self.assert_compile(
+            select(ac, ac.some_email).join(ac.addresses),
+            "SELECT a_1.id, b.email_address "
+            "FROM a AS a_1 JOIN b ON a_1.id = b.aid",
+        )
+
+    def test_c_collection_func_element(self, _function_fixture):
+        A = _function_fixture
+
+        stmt = select(A.id, A.foo_value)
+        eq_(stmt.subquery().c.keys(), ["id", "foo_value"])
+
+    def test_filter_by_mismatched_col(self, _name_mismatch_fixture):
+        A, B = _name_mismatch_fixture
+        self.assert_compile(
+            select(A).filter_by(some_email="foo").join(A.addresses),
+            "SELECT a.id FROM a JOIN b ON a.id = b.aid "
+            "WHERE b.email_address = :email_address_1",
+        )
+
+    def test_aliased_mismatched_col(self, _name_mismatch_fixture):
+        A, B = _name_mismatch_fixture
+        sess = fixture_session()
+
+        # so what should this do ?   it's just a weird hybrid case
+        self.assert_compile(
+            sess.query(aliased(A).some_email),
+            "SELECT b.email_address AS b_email_address FROM b",
+        )
+
     def test_property(self):
         A = self._fixture()
 
@@ -430,6 +755,80 @@ class PropertyMirrorTest(fixtures.TestBase, AssertsCompiledSQL):
 
         insp = inspect(A)
         is_(insp.all_orm_descriptors["value"].info, A.value.info)
+
+
+class SynonymOfPropertyTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = "default"
+
+    def _fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            _value = Column("value", String)
+
+            @hybrid.hybrid_property
+            def value(self):
+                return self._value
+
+            value_syn = synonym("value")
+
+            @hybrid.hybrid_property
+            def string_value(self):
+                return "foo"
+
+            string_value_syn = synonym("string_value")
+
+            @hybrid.hybrid_property
+            def string_expr_value(self):
+                return "foo"
+
+            @string_expr_value.expression
+            def string_expr_value(cls):
+                return literal_column("'foo'")
+
+            string_expr_value_syn = synonym("string_expr_value")
+
+        return A
+
+    def test_hasattr(self):
+        A = self._fixture()
+
+        is_false(hasattr(A.value_syn, "nonexistent"))
+
+        is_false(hasattr(A.string_value_syn, "nonexistent"))
+
+        is_false(hasattr(A.string_expr_value_syn, "nonexistent"))
+
+    def test_instance_access(self):
+        A = self._fixture()
+
+        a1 = A(_value="hi")
+
+        eq_(a1.value_syn, "hi")
+
+        eq_(a1.string_value_syn, "foo")
+
+        eq_(a1.string_expr_value_syn, "foo")
+
+    def test_expression_property(self):
+        A = self._fixture()
+
+        self.assert_compile(
+            select(A.id, A.value_syn).where(A.value_syn == "value"),
+            "SELECT a.id, a.value FROM a WHERE a.value = :value_1",
+        )
+
+    def test_expression_expr(self):
+        A = self._fixture()
+
+        self.assert_compile(
+            select(A.id, A.string_expr_value_syn).where(
+                A.string_expr_value_syn == "value"
+            ),
+            "SELECT a.id, 'foo' FROM a WHERE 'foo' = :'foo'_1",
+        )
 
 
 class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -489,7 +888,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter(A.value(5) == "foo"),
             "SELECT a.value AS a_value, a.id AS a_id "
@@ -498,7 +897,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         a1 = aliased(A)
         self.assert_compile(
             sess.query(a1).filter(a1.value(5) == "foo"),
@@ -508,7 +907,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_col(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(A.value(5)),
             "SELECT foo(a.value, :foo_1) + :foo_2 AS anon_1 FROM a",
@@ -516,7 +915,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_aliased_query_col(self):
         A = self._fixture()
-        sess = Session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A).value(5)),
             "SELECT foo(a_1.value, :foo_1) + :foo_2 AS anon_1 FROM a AS a_1",
@@ -588,15 +987,10 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_update_plain(self):
         Person = self.classes.Person
 
-        s = Session()
-        q = s.query(Person)
-
-        bulk_ud = persistence.BulkUpdate.factory(
-            q, False, {Person.fname: "Dr."}, {}
-        )
+        statement = update(Person).values({Person.fname: "Dr."})
 
         self.assert_compile(
-            bulk_ud,
+            statement,
             "UPDATE person SET first_name=:first_name",
             params={"first_name": "Dr."},
         )
@@ -604,109 +998,214 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
     def test_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
-        q = s.query(Person)
-
-        bulk_ud = persistence.BulkUpdate.factory(
-            q, False, {Person.name: "Dr. No"}, {}
-        )
+        statement = update(Person).values({Person.name: "Dr. No"})
 
         self.assert_compile(
-            bulk_ud,
+            statement,
             "UPDATE person SET first_name=:first_name, last_name=:last_name",
             params={"first_name": "Dr.", "last_name": "No"},
+        )
+
+    # these tests all run two UPDATES to assert that caching is not
+    # interfering.  this is #7209
+
+    def test_evaluate_non_hybrid_attr(self):
+        # this is a control case
+        Person = self.classes.Person
+
+        s = fixture_session()
+        jill = s.get(Person, 3)
+
+        s.query(Person).update(
+            {Person.first_name: "moonbeam"}, synchronize_session="evaluate"
+        )
+        eq_(jill.first_name, "moonbeam")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.first_name: "sunshine"}, synchronize_session="evaluate"
+        )
+        eq_(jill.first_name, "sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "sunshine",
         )
 
     def test_evaluate_hybrid_attr_indirect(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.fname2: "moonbeam"}, synchronize_session="evaluate"
         )
         eq_(jill.fname2, "moonbeam")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.fname2: "sunshine"}, synchronize_session="evaluate"
+        )
+        eq_(jill.fname2, "sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "sunshine",
+        )
 
     def test_evaluate_hybrid_attr_plain(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.fname: "moonbeam"}, synchronize_session="evaluate"
         )
         eq_(jill.fname, "moonbeam")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.fname: "sunshine"}, synchronize_session="evaluate"
+        )
+        eq_(jill.fname, "sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "sunshine",
+        )
 
     def test_fetch_hybrid_attr_indirect(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.fname2: "moonbeam"}, synchronize_session="fetch"
         )
         eq_(jill.fname2, "moonbeam")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.fname2: "sunshine"}, synchronize_session="fetch"
+        )
+        eq_(jill.fname2, "sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "sunshine",
+        )
 
     def test_fetch_hybrid_attr_plain(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.fname: "moonbeam"}, synchronize_session="fetch"
         )
         eq_(jill.fname, "moonbeam")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.fname: "sunshine"}, synchronize_session="fetch"
+        )
+        eq_(jill.fname, "sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "sunshine",
+        )
 
     def test_evaluate_hybrid_attr_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.name: "moonbeam sunshine"}, synchronize_session="evaluate"
         )
         eq_(jill.name, "moonbeam sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.name: "first last"}, synchronize_session="evaluate"
+        )
+        eq_(jill.name, "first last")
+        eq_(s.scalar(select(Person.first_name).where(Person.id == 3)), "first")
 
     def test_fetch_hybrid_attr_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.name: "moonbeam sunshine"}, synchronize_session="fetch"
         )
         eq_(jill.name, "moonbeam sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.name: "first last"}, synchronize_session="fetch"
+        )
+        eq_(jill.name, "first last")
+        eq_(s.scalar(select(Person.first_name).where(Person.id == 3)), "first")
 
     def test_evaluate_hybrid_attr_indirect_w_update_expr(self):
         Person = self.classes.Person
 
-        s = Session()
-        jill = s.query(Person).get(3)
+        s = fixture_session()
+        jill = s.get(Person, 3)
 
         s.query(Person).update(
             {Person.uname: "moonbeam sunshine"}, synchronize_session="evaluate"
         )
         eq_(jill.uname, "moonbeam sunshine")
+        eq_(
+            s.scalar(select(Person.first_name).where(Person.id == 3)),
+            "moonbeam",
+        )
+
+        s.query(Person).update(
+            {Person.uname: "first last"}, synchronize_session="evaluate"
+        )
+        eq_(jill.uname, "first last")
+        eq_(s.scalar(select(Person.first_name).where(Person.id == 3)), "first")
 
 
 class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
     """tests against hybrids that return a non-ClauseElement.
 
     use cases derived from the example at
-    http://techspot.zzzeek.org/2011/10/21/hybrids-and-value-agnostic-types/
+    https://techspot.zzzeek.org/2011/10/21/hybrids-and-value-agnostic-types/
 
     """
 
     __dialect__ = "default"
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         from sqlalchemy import literal
 
         symbols = ("usd", "gbp", "cad", "eur", "aud")
@@ -823,7 +1322,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_one(self):
         BankAccount, Amount = self.BankAccount, self.Amount
-        session = Session()
+        session = fixture_session()
 
         query = session.query(BankAccount).filter(
             BankAccount.balance == Amount(10000, "cad")
@@ -839,7 +1338,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_two(self):
         BankAccount, Amount = self.BankAccount, self.Amount
-        session = Session()
+        session = fixture_session()
 
         # alternatively we can do the calc on the DB side.
         query = (
@@ -868,7 +1367,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_three(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         query = session.query(BankAccount).filter(
             BankAccount.balance.as_currency("cad")
@@ -889,7 +1388,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_four(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         # 4c. query all amounts, converting to "CAD" on the DB side
         query = session.query(BankAccount.balance.as_currency("cad").amount)
@@ -902,7 +1401,7 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_query_five(self):
         BankAccount = self.BankAccount
-        session = Session()
+        session = fixture_session()
 
         # 4d. average balance in EUR
         query = session.query(func.avg(BankAccount.balance.as_currency("eur")))

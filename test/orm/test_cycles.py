@@ -14,18 +14,16 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import backref
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
 from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -67,24 +65,27 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_single(self):
         C1, t1 = self.classes.C1, self.tables.t1
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             C1,
             t1,
             properties={
-                "c1s": relationship(C1, cascade="all"),
+                "c1s": relationship(
+                    C1, cascade="all", back_populates="parent"
+                ),
                 "parent": relationship(
                     C1,
                     primaryjoin=t1.c.parent_c1 == t1.c.c1,
                     remote_side=t1.c.c1,
                     lazy="select",
                     uselist=False,
+                    back_populates="c1s",
                 ),
             },
         )
         a = C1("head c1")
         a.c1s.append(C1("another c1"))
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add(a)
         sess.flush()
         sess.delete(a)
@@ -101,7 +102,7 @@ class SelfReferentialTest(fixtures.MappedTest):
 
         C1, t1 = self.classes.C1, self.tables.t1
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             C1,
             t1,
             properties={
@@ -115,11 +116,11 @@ class SelfReferentialTest(fixtures.MappedTest):
 
         c1 = C1()
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add(c1)
         sess.flush()
         sess.expunge_all()
-        c1 = sess.query(C1).get(c1.c1)
+        c1 = sess.get(C1, c1.c1)
         c2 = C1()
         c2.parent = c1
         sess.add(c2)
@@ -134,13 +135,14 @@ class SelfReferentialTest(fixtures.MappedTest):
             self.tables.t1,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             C1,
             t1,
             properties={
                 "c1s": relationship(C1, cascade="all"),
                 "c2s": relationship(
-                    mapper(C2, t2), cascade="all, delete-orphan"
+                    self.mapper_registry.map_imperatively(C2, t2),
+                    cascade="all, delete-orphan",
                 ),
             },
         )
@@ -152,7 +154,7 @@ class SelfReferentialTest(fixtures.MappedTest):
         a.c1s[0].c1s.append(C1("subchild2"))
         a.c1s[1].c2s.append(C2("child2 data1"))
         a.c1s[1].c2s.append(C2("child2 data2"))
-        sess = create_session()
+        sess = fixture_session()
         sess.add(a)
         sess.flush()
 
@@ -162,9 +164,11 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_setnull_ondelete(self):
         C1, t1 = self.classes.C1, self.tables.t1
 
-        mapper(C1, t1, properties={"children": relationship(C1)})
+        self.mapper_registry.map_imperatively(
+            C1, t1, properties={"children": relationship(C1)}
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         c1 = C1()
         c2 = C1()
         c1.children.append(c2)
@@ -211,7 +215,7 @@ class SelfReferentialNoPKTest(fixtures.MappedTest):
     def setup_mappers(cls):
         item, TT = cls.tables.item, cls.classes.TT
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             TT,
             item,
             properties={
@@ -230,7 +234,7 @@ class SelfReferentialNoPKTest(fixtures.MappedTest):
         t1.children.append(TT())
         t1.children.append(TT())
 
-        s = create_session()
+        s = fixture_session()
         s.add(t1)
         s.flush()
         s.expunge_all()
@@ -240,7 +244,7 @@ class SelfReferentialNoPKTest(fixtures.MappedTest):
     def test_lazy_clause(self):
         TT = self.classes.TT
 
-        s = create_session()
+        s = fixture_session()
         t1 = TT()
         t2 = TT()
         t1.children.append(t2)
@@ -305,9 +309,9 @@ class InheritTestOne(fixtures.MappedTest):
             cls.classes.Child2,
         )
 
-        mapper(Parent, parent)
-        mapper(Child1, child1, inherits=Parent)
-        mapper(
+        cls.mapper_registry.map_imperatively(Parent, parent)
+        cls.mapper_registry.map_imperatively(Child1, child1, inherits=Parent)
+        cls.mapper_registry.map_imperatively(
             Child2,
             child2,
             inherits=Parent,
@@ -323,7 +327,7 @@ class InheritTestOne(fixtures.MappedTest):
 
         Child1, Child2 = self.classes.Child1, self.classes.Child2
 
-        session = create_session()
+        session = fixture_session()
 
         c1 = Child1()
         c1.child1_data = "qwerty"
@@ -399,15 +403,17 @@ class InheritTestTwo(fixtures.MappedTest):
             self.classes.B,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a,
             properties={"cs": relationship(C, primaryjoin=a.c.cid == c.c.id)},
         )
 
-        mapper(B, b, inherits=A, inherit_condition=b.c.id == a.c.id)
+        self.mapper_registry.map_imperatively(
+            B, b, inherits=A, inherit_condition=b.c.id == a.c.id
+        )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             C,
             c,
             properties={
@@ -415,7 +421,7 @@ class InheritTestTwo(fixtures.MappedTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         bobj = B()
         sess.add(bobj)
         cobj = C()
@@ -479,21 +485,21 @@ class BiDirectionalManyToOneTest(fixtures.MappedTest):
             cls.classes.T1,
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             T1,
             t1,
             properties={
                 "t2": relationship(T2, primaryjoin=t1.c.t2id == t2.c.id)
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             T2,
             t2,
             properties={
                 "t1": relationship(T1, primaryjoin=t2.c.t1id == t1.c.id)
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             T3, t3, properties={"t1": relationship(T1), "t2": relationship(T2)}
         )
 
@@ -502,7 +508,7 @@ class BiDirectionalManyToOneTest(fixtures.MappedTest):
 
         o1 = T1()
         o1.t2 = T2()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(o1)
         sess.flush()
 
@@ -524,7 +530,7 @@ class BiDirectionalManyToOneTest(fixtures.MappedTest):
 
         o1 = T1()
         o1.t2 = T2()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(o1)
         sess.flush()
 
@@ -589,7 +595,7 @@ class BiDirectionalOneToManyTest(fixtures.MappedTest):
             self.tables.t1,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             C2,
             t2,
             properties={
@@ -598,7 +604,7 @@ class BiDirectionalOneToManyTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             C1,
             t1,
             properties={
@@ -617,7 +623,7 @@ class BiDirectionalOneToManyTest(fixtures.MappedTest):
         a.c2s.append(b)
         d.c1s.append(c)
         b.c1s.append(c)
-        sess = create_session()
+        sess = fixture_session()
         sess.add_all((a, b, c, d, e, f))
         sess.flush()
 
@@ -683,7 +689,7 @@ class BiDirectionalOneToManyTest2(fixtures.MappedTest):
             cls.classes.C1,
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             C2,
             t2,
             properties={
@@ -692,14 +698,16 @@ class BiDirectionalOneToManyTest2(fixtures.MappedTest):
                 )
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             C1,
             t1,
             properties={
                 "c2s": relationship(
                     C2, primaryjoin=t1.c.c1 == t2.c.c2, uselist=True
                 ),
-                "data": relationship(mapper(C1Data, t1_data)),
+                "data": relationship(
+                    cls.mapper_registry.map_imperatively(C1Data, t1_data)
+                ),
             },
         )
 
@@ -722,7 +730,7 @@ class BiDirectionalOneToManyTest2(fixtures.MappedTest):
         a.data.append(C1Data(data="c1data1"))
         a.data.append(C1Data(data="c1data2"))
         c.data.append(C1Data(data="c1data3"))
-        sess = create_session()
+        sess = fixture_session()
         sess.add_all((a, b, c, d, e, f))
         sess.flush()
 
@@ -731,6 +739,18 @@ class BiDirectionalOneToManyTest2(fixtures.MappedTest):
         sess.flush()
 
 
+@testing.combinations(
+    (
+        "legacy_style",
+        True,
+    ),
+    (
+        "new_style",
+        False,
+    ),
+    argnames="name, _legacy_inactive_history_style",
+    id_="sa",
+)
 class OneToManyManyToOneTest(fixtures.MappedTest):
     """
 
@@ -793,8 +813,8 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(Ball, ball)
-        mapper(
+        self.mapper_registry.map_imperatively(Ball, ball)
+        self.mapper_registry.map_imperatively(
             Person,
             person,
             properties=dict(
@@ -802,11 +822,17 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     Ball,
                     primaryjoin=ball.c.person_id == person.c.id,
                     remote_side=ball.c.person_id,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
                 favorite=relationship(
                     Ball,
                     primaryjoin=person.c.favorite_ball_id == ball.c.id,
                     remote_side=ball.c.id,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
             ),
         )
@@ -814,7 +840,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
         b = Ball()
         p = Person()
         p.balls.append(b)
-        sess = create_session()
+        sess = fixture_session()
         sess.add(p)
         sess.flush()
 
@@ -826,8 +852,8 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(Ball, ball)
-        mapper(
+        self.mapper_registry.map_imperatively(Ball, ball)
+        self.mapper_registry.map_imperatively(
             Person,
             person,
             properties=dict(
@@ -835,13 +861,16 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     Ball,
                     primaryjoin=person.c.favorite_ball_id == ball.c.id,
                     post_update=True,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 )
             ),
         )
         b = Ball(data="some data")
         p = Person(data="some data")
         p.favorite = b
-        sess = create_session()
+        sess = fixture_session()
         sess.add(b)
         sess.add(p)
         sess.flush()
@@ -871,8 +900,8 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(Ball, ball)
-        mapper(
+        self.mapper_registry.map_imperatively(Ball, ball)
+        self.mapper_registry.map_imperatively(
             Person,
             person,
             properties=dict(
@@ -882,12 +911,17 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     remote_side=ball.c.person_id,
                     post_update=False,
                     cascade="all, delete-orphan",
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
                 favorite=relationship(
                     Ball,
                     primaryjoin=person.c.favorite_ball_id == ball.c.id,
-                    remote_side=person.c.favorite_ball_id,
                     post_update=True,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
             ),
         )
@@ -899,7 +933,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
         p.balls.append(Ball(data="some data"))
         p.balls.append(Ball(data="some data"))
         p.favorite = b
-        sess = create_session()
+        sess = fixture_session()
         sess.add(b)
         sess.add(p)
 
@@ -907,21 +941,37 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             testing.db,
             sess.flush,
             RegexSQL("^INSERT INTO person", {"data": "some data"}),
-            RegexSQL(
-                "^INSERT INTO ball",
-                lambda c: {"person_id": p.id, "data": "some data"},
-            ),
-            RegexSQL(
-                "^INSERT INTO ball",
-                lambda c: {"person_id": p.id, "data": "some data"},
-            ),
-            RegexSQL(
-                "^INSERT INTO ball",
-                lambda c: {"person_id": p.id, "data": "some data"},
-            ),
-            RegexSQL(
-                "^INSERT INTO ball",
-                lambda c: {"person_id": p.id, "data": "some data"},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    RegexSQL(
+                        "^INSERT INTO ball",
+                        lambda c: [
+                            {"person_id": p.id, "data": "some data"},
+                            {"person_id": p.id, "data": "some data"},
+                            {"person_id": p.id, "data": "some data"},
+                            {"person_id": p.id, "data": "some data"},
+                        ],
+                    )
+                ],
+                [
+                    RegexSQL(
+                        "^INSERT INTO ball",
+                        lambda c: {"person_id": p.id, "data": "some data"},
+                    ),
+                    RegexSQL(
+                        "^INSERT INTO ball",
+                        lambda c: {"person_id": p.id, "data": "some data"},
+                    ),
+                    RegexSQL(
+                        "^INSERT INTO ball",
+                        lambda c: {"person_id": p.id, "data": "some data"},
+                    ),
+                    RegexSQL(
+                        "^INSERT INTO ball",
+                        lambda c: {"person_id": p.id, "data": "some data"},
+                    ),
+                ],
             ),
             CompiledSQL(
                 "UPDATE person SET favorite_ball_id=:favorite_ball_id "
@@ -961,8 +1011,8 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(Ball, ball)
-        mapper(
+        self.mapper_registry.map_imperatively(Ball, ball)
+        self.mapper_registry.map_imperatively(
             Person,
             person,
             properties=dict(
@@ -971,17 +1021,28 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     primaryjoin=ball.c.person_id == person.c.id,
                     remote_side=ball.c.person_id,
                     post_update=True,
-                    backref=backref("person", post_update=True),
+                    backref=backref(
+                        "person",
+                        post_update=True,
+                        _legacy_inactive_history_style=(
+                            self._legacy_inactive_history_style
+                        ),
+                    ),
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
                 favorite=relationship(
                     Ball,
                     primaryjoin=person.c.favorite_ball_id == ball.c.id,
-                    remote_side=person.c.favorite_ball_id,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
             ),
         )
 
-        sess = sessionmaker()()
+        sess = fixture_session()
         p1 = Person(data="p1")
         p2 = Person(data="p2")
         p3 = Person(data="p3")
@@ -1014,8 +1075,8 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(Ball, ball)
-        mapper(
+        self.mapper_registry.map_imperatively(Ball, ball)
+        self.mapper_registry.map_imperatively(
             Person,
             person,
             properties=dict(
@@ -1026,11 +1087,16 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     cascade="all, delete-orphan",
                     post_update=True,
                     backref="person",
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
                 favorite=relationship(
                     Ball,
                     primaryjoin=person.c.favorite_ball_id == ball.c.id,
-                    remote_side=person.c.favorite_ball_id,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 ),
             ),
         )
@@ -1045,31 +1111,48 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
         b4 = Ball(data="some data")
         p.balls.append(b4)
         p.favorite = b
-        sess = create_session()
+        sess = fixture_session()
         sess.add_all((b, p, b2, b3, b4))
 
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            CompiledSQL(
-                "INSERT INTO ball (person_id, data) "
-                "VALUES (:person_id, :data)",
-                {"person_id": None, "data": "some data"},
-            ),
-            CompiledSQL(
-                "INSERT INTO ball (person_id, data) "
-                "VALUES (:person_id, :data)",
-                {"person_id": None, "data": "some data"},
-            ),
-            CompiledSQL(
-                "INSERT INTO ball (person_id, data) "
-                "VALUES (:person_id, :data)",
-                {"person_id": None, "data": "some data"},
-            ),
-            CompiledSQL(
-                "INSERT INTO ball (person_id, data) "
-                "VALUES (:person_id, :data)",
-                {"person_id": None, "data": "some data"},
+            Conditional(
+                testing.db.dialect.insert_executemany_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO ball (person_id, data) "
+                        "VALUES (:person_id, :data)",
+                        [
+                            {"person_id": None, "data": "some data"},
+                            {"person_id": None, "data": "some data"},
+                            {"person_id": None, "data": "some data"},
+                            {"person_id": None, "data": "some data"},
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO ball (person_id, data) "
+                        "VALUES (:person_id, :data)",
+                        {"person_id": None, "data": "some data"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO ball (person_id, data) "
+                        "VALUES (:person_id, :data)",
+                        {"person_id": None, "data": "some data"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO ball (person_id, data) "
+                        "VALUES (:person_id, :data)",
+                        {"person_id": None, "data": "some data"},
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO ball (person_id, data) "
+                        "VALUES (:person_id, :data)",
+                        {"person_id": None, "data": "some data"},
+                    ),
+                ],
             ),
             CompiledSQL(
                 "INSERT INTO person (favorite_ball_id, data) "
@@ -1126,7 +1209,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
             self.classes.Person,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Ball,
             ball,
             properties={
@@ -1134,13 +1217,17 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                     Person,
                     post_update=True,
                     primaryjoin=person.c.id == ball.c.person_id,
+                    _legacy_inactive_history_style=(
+                        self._legacy_inactive_history_style
+                    ),
                 )
             },
         )
-        mapper(Person, person)
+        self.mapper_registry.map_imperatively(Person, person)
 
-        sess = create_session(autocommit=False, expire_on_commit=True)
-        sess.add(Ball(person=Person()))
+        sess = fixture_session(autocommit=False, expire_on_commit=True)
+        p1 = Person()
+        sess.add(Ball(person=p1))
         sess.commit()
         b1 = sess.query(Ball).first()
 
@@ -1204,7 +1291,7 @@ class SelfReferentialPostUpdateTest(fixtures.MappedTest):
 
         node, Node = self.tables.node, self.classes.Node
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Node,
             node,
             properties={
@@ -1230,7 +1317,7 @@ class SelfReferentialPostUpdateTest(fixtures.MappedTest):
             },
         )
 
-        session = create_session()
+        session = fixture_session(autoflush=False)
 
         def append_child(parent, child):
             if parent.children:
@@ -1374,7 +1461,7 @@ class SelfReferentialPostUpdateTest2(fixtures.MappedTest):
 
         A, a_table = self.classes.A, self.tables.a_table
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             A,
             a_table,
             properties={
@@ -1384,7 +1471,7 @@ class SelfReferentialPostUpdateTest2(fixtures.MappedTest):
             },
         )
 
-        session = create_session()
+        session = fixture_session()
 
         f1 = A(fui="f1")
         session.add(f1)
@@ -1398,8 +1485,8 @@ class SelfReferentialPostUpdateTest2(fixtures.MappedTest):
         session.flush()
         session.expunge_all()
 
-        f1 = session.query(A).get(f1.id)
-        f2 = session.query(A).get(f2.id)
+        f1 = session.get(A, f1.id)
+        f2 = session.get(A, f2.id)
         assert f2.foo is f1
 
 
@@ -1452,7 +1539,7 @@ class SelfReferentialPostUpdateTest3(fixtures.MappedTest):
             self.tables.child,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Parent,
             parent,
             properties={
@@ -1466,13 +1553,13 @@ class SelfReferentialPostUpdateTest3(fixtures.MappedTest):
                 ),
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Child,
             child,
             properties={"parent": relationship(Child, remote_side=child.c.id)},
         )
 
-        session = create_session()
+        session = fixture_session()
         p1 = Parent("p1")
         c1 = Child("c1")
         c2 = Child("c2")
@@ -1597,7 +1684,7 @@ class PostUpdateBatchingTest(fixtures.MappedTest):
             self.classes.Child3,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Parent,
             parent,
             properties={
@@ -1627,11 +1714,11 @@ class PostUpdateBatchingTest(fixtures.MappedTest):
                 ),
             },
         )
-        mapper(Child1, child1)
-        mapper(Child2, child2)
-        mapper(Child3, child3)
+        self.mapper_registry.map_imperatively(Child1, child1)
+        self.mapper_registry.map_imperatively(Child2, child2)
+        self.mapper_registry.map_imperatively(Child3, child3)
 
-        sess = create_session()
+        sess = fixture_session()
 
         p1 = Parent("p1")
         c11, c12, c13 = Child1("c1"), Child1("c2"), Child1("c3")
@@ -1708,15 +1795,14 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
             id = Column(Integer, primary_key=True)
             a_id = Column(ForeignKey("a.id", name="a_fk"))
 
-    def setup(self):
-        super(PostUpdateOnUpdateTest, self).setup()
+    def setup_test(self):
         PostUpdateOnUpdateTest.counter = count()
         PostUpdateOnUpdateTest.db_counter = count()
 
     def test_update_defaults(self):
         A, B = self.classes("A", "B")
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
         b1 = B()
 
@@ -1735,7 +1821,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
         event.listen(A, "refresh_flush", canary.refresh_flush)
         event.listen(A, "expire", canary.expire)
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
         b1 = B()
 
@@ -1763,7 +1849,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
         event.listen(A, "refresh_flush", canary.refresh_flush)
         event.listen(A, "expire", canary.expire)
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
 
         s.add(a1)
@@ -1794,7 +1880,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
         event.listen(A, "refresh_flush", canary.refresh_flush)
         event.listen(A, "expire", canary.expire)
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
         b1 = B()
 
@@ -1848,7 +1934,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
         event.listen(A, "refresh_flush", canary.refresh_flush)
         event.listen(A, "expire", canary.expire)
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
 
         s.add(a1)
@@ -1899,7 +1985,7 @@ class PostUpdateOnUpdateTest(fixtures.DeclarativeMappedTest):
     def test_update_defaults_can_set_value(self):
         A, B = self.classes("A", "B")
 
-        s = Session()
+        s = fixture_session()
         a1 = A()
         b1 = B()
 

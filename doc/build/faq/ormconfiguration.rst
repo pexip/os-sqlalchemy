@@ -42,13 +42,13 @@ and is also key to the most common (and not-so-common) patterns of ORM usage.
 
 In almost all cases, a table does have a so-called :term:`candidate key`, which is a column or series
 of columns that uniquely identify a row.  If a table truly doesn't have this, and has actual
-fully duplicate rows, the table is not corresponding to `first normal form <http://en.wikipedia.org/wiki/First_normal_form>`_ and cannot be mapped.   Otherwise, whatever columns comprise the best candidate key can be
+fully duplicate rows, the table is not corresponding to `first normal form <https://en.wikipedia.org/wiki/First_normal_form>`_ and cannot be mapped.   Otherwise, whatever columns comprise the best candidate key can be
 applied directly to the mapper::
 
     class SomeClass(Base):
         __table__ = some_table_with_no_pk
         __mapper_args__ = {
-            'primary_key':[some_table_with_no_pk.c.uid, some_table_with_no_pk.c.bar]
+            "primary_key": [some_table_with_no_pk.c.uid, some_table_with_no_pk.c.bar]
         }
 
 Better yet is when using fully declared table metadata, use the ``primary_key=True``
@@ -142,16 +142,18 @@ Given the example as follows::
 
     Base = declarative_base()
 
+
     class A(Base):
-        __tablename__ = 'a'
+        __tablename__ = "a"
 
         id = Column(Integer, primary_key=True)
+
 
     class B(A):
-        __tablename__ = 'b'
+        __tablename__ = "b"
 
         id = Column(Integer, primary_key=True)
-        a_id = Column(Integer, ForeignKey('a.id'))
+        a_id = Column(Integer, ForeignKey("a.id"))
 
 As of SQLAlchemy version 0.9.5, the above condition is detected, and will
 warn that the ``id`` column of ``A`` and ``B`` is being combined under
@@ -161,33 +163,33 @@ that a ``B`` object's primary key will always mirror that of its ``A``.
 A mapping which resolves this is as follows::
 
     class A(Base):
-        __tablename__ = 'a'
+        __tablename__ = "a"
 
         id = Column(Integer, primary_key=True)
 
-    class B(A):
-        __tablename__ = 'b'
 
-        b_id = Column('id', Integer, primary_key=True)
-        a_id = Column(Integer, ForeignKey('a.id'))
+    class B(A):
+        __tablename__ = "b"
+
+        b_id = Column("id", Integer, primary_key=True)
+        a_id = Column(Integer, ForeignKey("a.id"))
 
 Suppose we did want ``A.id`` and ``B.id`` to be mirrors of each other, despite
 the fact that ``B.a_id`` is where ``A.id`` is related.  We could combine
 them together using :func:`.column_property`::
 
     class A(Base):
-        __tablename__ = 'a'
+        __tablename__ = "a"
 
         id = Column(Integer, primary_key=True)
 
+
     class B(A):
-        __tablename__ = 'b'
+        __tablename__ = "b"
 
         # probably not what you want, but this is a demonstration
         id = column_property(Column(Integer, primary_key=True), A.id)
-        a_id = Column(Integer, ForeignKey('a.id'))
-
-
+        a_id = Column(Integer, ForeignKey("a.id"))
 
 I'm using Declarative and setting primaryjoin/secondaryjoin using an ``and_()`` or ``or_()``, and I am getting an error message about foreign keys.
 ------------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -197,21 +199,27 @@ Are you doing this?::
     class MyClass(Base):
         # ....
 
-        foo = relationship("Dest", primaryjoin=and_("MyClass.id==Dest.foo_id", "MyClass.foo==Dest.bar"))
+        foo = relationship(
+            "Dest", primaryjoin=and_("MyClass.id==Dest.foo_id", "MyClass.foo==Dest.bar")
+        )
 
 That's an ``and_()`` of two string expressions, which SQLAlchemy cannot apply any mapping towards.  Declarative allows :func:`_orm.relationship` arguments to be specified as strings, which are converted into expression objects using ``eval()``.   But this doesn't occur inside of an ``and_()`` expression - it's a special operation declarative applies only to the *entirety* of what's passed to primaryjoin or other arguments as a string::
 
     class MyClass(Base):
         # ....
 
-        foo = relationship("Dest", primaryjoin="and_(MyClass.id==Dest.foo_id, MyClass.foo==Dest.bar)")
+        foo = relationship(
+            "Dest", primaryjoin="and_(MyClass.id==Dest.foo_id, MyClass.foo==Dest.bar)"
+        )
 
 Or if the objects you need are already available, skip the strings::
 
     class MyClass(Base):
         # ....
 
-        foo = relationship(Dest, primaryjoin=and_(MyClass.id==Dest.foo_id, MyClass.foo==Dest.bar))
+        foo = relationship(
+            Dest, primaryjoin=and_(MyClass.id == Dest.foo_id, MyClass.foo == Dest.bar)
+        )
 
 The same idea applies to all the other arguments, such as ``foreign_keys``::
 
@@ -234,25 +242,22 @@ The same idea applies to all the other arguments, such as ``foreign_keys``::
 
 .. _faq_subqueryload_limit_sort:
 
-Why is ``ORDER BY`` required with ``LIMIT`` (especially with ``subqueryload()``)?
----------------------------------------------------------------------------------
+Why is ``ORDER BY`` recommended with ``LIMIT`` (especially with ``subqueryload()``)?
+------------------------------------------------------------------------------------
 
-A relational database can return rows in any
-arbitrary order, when an explicit ordering is not set.
-While this ordering very often corresponds to the natural
-order of rows within a table, this is not the case for all databases and
-all queries.   The consequence of this is that any query that limits rows
-using ``LIMIT`` or ``OFFSET`` should **always** specify an ``ORDER BY``.
-Otherwise, it is not deterministic which rows will actually be returned.
+When ORDER BY is not used for a SELECT statement that returns rows, the
+relational database is free to returned matched rows in any arbitrary
+order.  While this ordering very often corresponds to the natural
+order of rows within a table, this is not the case for all databases and all
+queries. The consequence of this is that any query that limits rows using
+``LIMIT`` or ``OFFSET``, or which merely selects the first row of the result,
+discarding the rest, will not be deterministic in terms of what result row is
+returned, assuming there's more than one row that matches the query's criteria.
 
-When we use a SQLAlchemy method like :meth:`_query.Query.first`, we are in fact
-applying a ``LIMIT`` of one to the query, so without an explicit ordering
-it is not deterministic what row we actually get back.
 While we may not notice this for simple queries on databases that usually
-returns rows in their natural
-order, it becomes much more of an issue if we also use :func:`_orm.subqueryload`
-to load related collections, and we may not be loading the collections
-as intended.
+returns rows in their natural order, it becomes more of an issue if we
+also use :func:`_orm.subqueryload` to load related collections, and we may not
+be loading the collections as intended.
 
 SQLAlchemy implements :func:`_orm.subqueryload` by issuing a separate query,
 the results of which are matched up to the results from the first query.
