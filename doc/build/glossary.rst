@@ -9,6 +9,107 @@ Glossary
 .. glossary::
     :sorted:
 
+    1.x style
+    2.0 style
+    1.x-style
+    2.0-style
+        These terms are new in SQLAlchemy 1.4 and refer to the SQLAlchemy 1.4->
+        2.0 transition plan, described at :ref:`migration_20_toplevel`.  The
+        term "1.x style" refers to an API used in the way it's been documented
+        throughout the 1.x series of SQLAlchemy and earlier (e.g. 1.3, 1.2, etc)
+        and the term "2.0 style" refers to the way an API will look in version
+        2.0.   Version 1.4 implements nearly all of 2.0's API in so-called
+        "transition mode".
+
+        .. seealso::
+
+            :ref:`migration_20_toplevel`
+
+        **Enabling 2.0 style usage**
+
+        When using code from a documentation example that indicates
+        :term:`2.0-style`, the :class:`_engine.Engine` as well as the
+        :class:`_orm.Session` in use should make use of "future" mode,
+        via the :paramref:`_sa.create_engine.future` and
+        :paramref:`_orm.Session.future` flags::
+
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+
+
+            engine = create_engine("mysql://user:pass@host/dbname", future=True)
+            Session = sessionmaker(bind=engine, future=True)
+
+        **ORM Queries in 2.0 style**
+
+        Besides the above changes to :class:`_engine.Engine` and
+        :class:`_orm.Session`, probably the most major API change implied by
+        1.x->2.0 is the migration from using the :class:`_orm.Query` object for
+        ORM SELECT statements and instead using the :func:`_sql.select`
+        construct in conjunction with the :meth:`_orm.Session.execute` method.
+        The general change looks like the following.  Given a
+        :class:`_orm.Session` and a :class:`_orm.Query` against that
+        :class:`_orm.Session`::
+
+            list_of_users = session.query(User).join(User.addresses).all()
+
+        The new style constructs the query separately from the
+        :class:`_orm.Session` using the :func:`_sql.select` construct; when
+        populated with ORM entities like the ``User`` class from the :ref:`ORM
+        Tutorial <ormtutorial_toplevel>`, the resulting :class:`_sql.Select`
+        construct receives additional "plugin" state that allows it to work
+        like the :class:`_orm.Query`::
+
+
+            from sqlalchemy import select
+
+            # a Core select statement with ORM entities is
+            # now ORM-enabled at the compiler level
+            stmt = select(User).join(User.addresses)
+
+            session = Session(engine)
+
+            result = session.execute(stmt)
+
+            # Session returns a Result that has ORM entities
+            list_of_users = result.scalars().all()
+
+    reflection
+    reflected
+        In SQLAlchemy, this term refers to the feature of querying a database's
+        schema catalogs in order to load information about existing tables,
+        columns, constraints, and other constructs.   SQLAlchemy includes
+        features that can both provide raw data for this information, as well
+        as that it can construct Core/ORM usable :class:`.Table` objects
+        from database schema catalogs automatically.
+
+        .. seealso::
+
+            :ref:`metadata_reflection_toplevel` - complete background on
+            database reflection.
+
+
+    imperative
+    declarative
+
+        In the SQLAlchemy ORM, these terms refer to two different styles of
+        mapping Python classes to database tables.
+
+        .. seealso::
+
+            :ref:`orm_declarative_mapping`
+
+            :ref:`orm_imperative_mapping`
+
+    facade
+
+        An object that serves as a front-facing interface masking more complex
+        underlying or structural code.
+
+        .. seealso::
+
+            `Facade pattern (via Wikipedia) <https://en.wikipedia.org/wiki/Facade_pattern>`_
+
     relational
     relational algebra
 
@@ -18,6 +119,61 @@ Glossary
         .. seealso::
 
             `Relational Algebra (via Wikipedia) <https://en.wikipedia.org/wiki/Relational_algebra>`_
+
+    cartesian product
+
+        Given two sets A and B, the cartesian product is the set of all ordered pairs (a, b)
+        where a is in A and b is in B.
+
+        In terms of SQL databases, a cartesian product occurs when we select from two
+        or more tables (or other subqueries) without establishing any kind of criteria
+        between the rows of one table to another (directly or indirectly).  If we
+        SELECT from table A and table B at the same time, we get every row of A matched
+        to the first row of B, then every row of A matched to the second row of B, and
+        so on until every row from A has been paired with every row of B.
+
+        Cartesian products cause enormous result sets to be generated and can easily
+        crash a client application if not prevented.
+
+        .. seealso::
+
+            `Cartesian Product (via Wikipedia) <https://en.wikipedia.org/wiki/Cartesian_product>`_
+
+    cyclomatic complexity
+        A measure of code complexity based on the number of possible paths
+        through a program's source code.
+
+        .. seealso::
+
+            `Cyclomatic Complexity <https://en.wikipedia.org/wiki/Cyclomatic_complexity>`_
+
+    bound parameter
+    bound parameters
+    bind parameter
+    bind parameters
+
+        Bound parameters are the primary means in which data is passed to the
+        :term:`DBAPI` database driver.    While the operation to be invoked is
+        based on the SQL statement string, the data values themselves are
+        passed separately, where the driver contains logic that will safely
+        process these strings and pass them to the backend database server,
+        which may either involve formatting the parameters into the SQL string
+        itself, or passing them to the database using separate protocols.
+
+        The specific system by which the database driver does this should not
+        matter to the caller; the point is that on the outside, data should
+        **always** be passed separately and not as part of the SQL string
+        itself.  This is integral both to having adequate security against
+        SQL injections as well as allowing the driver to have the best
+        performance.
+
+        .. seealso::
+
+            `Prepared Statement <https://en.wikipedia.org/wiki/Prepared_statement>`_ - at Wikipedia
+
+            `bind parameters <https://use-the-index-luke.com/sql/where-clause/bind-parameters>`_ - at Use The Index, Luke!
+
+            :ref:`tutorial_sending_parameters` - in the :ref:`unified_tutorial`
 
     selectable
         A term used in SQLAlchemy to describe a SQL construct that represents
@@ -34,7 +190,7 @@ Glossary
         dictionary is associated with a copy of the object, which contains key/value
         pairs significant to various internal systems, mostly within the ORM::
 
-            some_column = Column('some_column', Integer)
+            some_column = Column("some_column", Integer)
             some_column_annotated = some_column._annotate({"entity": User})
 
         The annotation system differs from the public dictionary :attr:`_schema.Column.info`
@@ -48,6 +204,26 @@ Glossary
         of a relationship where the column in some cases needs to be expressed
         in terms of one particular table alias or another, based on its position
         within the join expression.
+
+    plugin
+    plugin-enabled
+    plugin-specific
+        "plugin-enabled" or "plugin-specific" generally indicates a function or method in
+        SQLAlchemy Core which will behave differently when used in an ORM
+        context.
+
+        SQLAlchemy allows Core constructs such as :class:`_sql.Select` objects
+        to participate in a "plugin" system, which can inject additional
+        behaviors and features into the object that are not present by default.
+
+        Specifically, the primary "plugin" is the "orm" plugin, which is
+        at the base of the system that the SQLAlchemy ORM makes use of
+        Core constructs in order to compose and execute SQL queries that
+        return ORM results.
+
+        .. seealso::
+
+            :ref:`migration_20_unify_select`
 
     crud
     CRUD
@@ -76,15 +252,19 @@ Glossary
 
     descriptor
     descriptors
-        In Python, a descriptor is an object attribute with “binding behavior”, one whose attribute access has been overridden by methods in the `descriptor protocol <http://docs.python.org/howto/descriptor.html>`_.
-        Those methods are __get__(), __set__(), and __delete__(). If any of those methods are defined
-        for an object, it is said to be a descriptor.
+
+        In Python, a descriptor is an object attribute with “binding behavior”,
+        one whose attribute access has been overridden by methods in the
+        `descriptor protocol <https://docs.python.org/howto/descriptor.html>`_.
+        Those methods are ``__get__()``, ``__set__()``, and ``__delete__()``.
+        If any of those methods are defined for an object, it is said to be a
+        descriptor.
 
         In SQLAlchemy, descriptors are used heavily in order to provide attribute behavior
         on mapped classes.   When a class is mapped as such::
 
             class MyClass(Base):
-                __tablename__ = 'foo'
+                __tablename__ = "foo"
 
                 id = Column(Integer, primary_key=True)
                 data = Column(String)
@@ -123,25 +303,43 @@ Glossary
 
             :ref:`metadata_toplevel`
 
-            `DDL (via Wikipedia) <http://en.wikipedia.org/wiki/Data_definition_language>`_
+            `DDL (via Wikipedia) <https://en.wikipedia.org/wiki/Data_definition_language>`_
 
             :term:`DML`
 
+            :term:`DQL`
 
     DML
        An acronym for **Data Manipulation Language**.  DML is the subset of
        SQL that relational databases use to *modify* the data in tables. DML
        typically refers to the three widely familiar statements of INSERT,
-       UPDATE and  DELETE, otherwise known as :term:`CRUD` (acronym for "CReate,
-       Update, Delete").
+       UPDATE and  DELETE, otherwise known as :term:`CRUD` (acronym for "Create,
+       Read, Update, Delete").
 
         .. seealso::
 
-            `DML (via Wikipedia) <http://en.wikipedia.org/wiki/Data_manipulation_language>`_
+            `DML (via Wikipedia) <https://en.wikipedia.org/wiki/Data_manipulation_language>`_
+
+            :term:`DDL`
+
+            :term:`DQL`
+
+    DQL
+        An acronym for **Data Query Language**.  DQL is the subset of
+        SQL that relational databases use to *read* the data in tables.
+        DQL almost exclusively refers to the SQL SELECT construct as the
+        top level SQL statement in use.
+
+        .. seealso::
+
+            `DQL (via Wikipedia) <https://en.wikipedia.org/wiki/Data_query_language>`_
+
+            :term:`DML`
 
             :term:`DDL`
 
     metadata
+    database metadata
     table metadata
         The term "metadata" generally refers to "data that describes data";
         data that itself represents the format and/or structure of some other
@@ -237,6 +435,11 @@ Glossary
         class each of which represents a particular database column
         or relationship to a related class.
 
+    identity key
+        A key associated with ORM-mapped objects that identifies their
+        primary key identity within the database, as well as their unique
+        identity within a :class:`_orm.Session` :term:`identity map`.
+
     identity map
         A mapping between Python objects and their database identities.
         The identity map is a collection that's associated with an
@@ -252,7 +455,7 @@ Glossary
 
         .. seealso::
 
-            `Identity Map (via Martin Fowler) <http://martinfowler.com/eaaCatalog/identityMap.html>`_
+            `Identity Map (via Martin Fowler) <https://martinfowler.com/eaaCatalog/identityMap.html>`_
 
     lazy initialization
         A tactic of delaying some initialization action, such as creating objects,
@@ -280,7 +483,7 @@ Glossary
 
         .. seealso::
 
-            `Lazy Load (via Martin Fowler) <http://martinfowler.com/eaaCatalog/lazyLoad.html>`_
+            `Lazy Load (via Martin Fowler) <https://martinfowler.com/eaaCatalog/lazyLoad.html>`_
 
             :term:`N plus one problem`
 
@@ -305,14 +508,19 @@ Glossary
 
     mapping
     mapped
+    mapped class
         We say a class is "mapped" when it has been passed through the
         :func:`_orm.mapper` function.   This process associates the
         class with a database table or other :term:`selectable`
         construct, so that instances of it can be persisted
-        using a :class:`.Session` as well as loaded using a
-        :class:`.query.Query`.
+        and loaded using a :class:`.Session`.
+
+        .. seealso::
+
+            :ref:`orm_mapping_classes_toplevel`
 
     N plus one problem
+    N plus one
         The N plus one problem is a common side effect of the
         :term:`lazy load` pattern, whereby an application wishes
         to iterate through a related attribute or collection on
@@ -329,6 +537,8 @@ Glossary
         The N plus one problem is alleviated using :term:`eager loading`.
 
         .. seealso::
+
+            :ref:`tutorial_orm_loader_strategies`
 
             :doc:`orm/loading_relationships`
 
@@ -364,7 +574,7 @@ Glossary
         as an ORDER BY clause by calling upon the :meth:`_expression.Select.where`
         and :meth:`_expression.Select.order_by` methods::
 
-            stmt = select([user.c.name]).\
+            stmt = select(user.c.name).\
                         where(user.c.id > 5).\
                         where(user.c.name.like('e%').\
                         order_by(user.c.name)
@@ -416,6 +626,7 @@ Glossary
             :ref:`pooling_toplevel`
 
     DBAPI
+    pep-249
         DBAPI is shorthand for the phrase "Python Database API
         Specification".  This is a widely used specification
         within Python to define common usage patterns for all
@@ -430,11 +641,11 @@ Glossary
         refers to the :mod:`psycopg2 <.postgresql.psycopg2>`
         DBAPI/dialect combination, whereas the URL ``mysql+mysqldb://@localhost/test``
         refers to the :mod:`MySQL for Python <.mysql.mysqldb>`
-        DBAPI DBAPI/dialect combination.
+        DBAPI/dialect combination.
 
         .. seealso::
 
-            `PEP 249 - Python Database API Specification v2.0 <http://www.python.org/dev/peps/pep-0249/>`_
+            `PEP 249 - Python Database API Specification v2.0 <https://www.python.org/dev/peps/pep-0249/>`_
 
     domain model
 
@@ -444,20 +655,31 @@ Glossary
 
         .. seealso::
 
-            `Domain Model (via Wikipedia) <http://en.wikipedia.org/wiki/Domain_model>`_
+            `Domain Model (via Wikipedia) <https://en.wikipedia.org/wiki/Domain_model>`_
 
     unit of work
-        This pattern is where the system transparently keeps
-        track of changes to objects and periodically flushes all those
-        pending changes out to the database. SQLAlchemy's Session
-        implements this pattern fully in a manner similar to that of
-        Hibernate.
+        A software architecture where a persistence system such as an object
+        relational mapper maintains a list of changes made to a series of
+        objects, and periodically flushes all those pending changes out to the
+        database.
+
+        SQLAlchemy's :class:`_orm.Session` implements the unit of work pattern,
+        where objects that are added to the :class:`_orm.Session` using methods
+        like :meth:`_orm.Session.add` will then participate in unit-of-work
+        style persistence.
+
+        For a walk-through of what unit of work persistence looks like in
+        SQLAlchemy, start with the section :ref:`tutorial_orm_data_manipulation`
+        in the :ref:`unified_tutorial`.    Then for more detail, see
+        :ref:`session_basics` in the general reference documentation.
 
         .. seealso::
 
-            `Unit of Work (via Martin Fowler) <http://martinfowler.com/eaaCatalog/unitOfWork.html>`_
+            `Unit of Work (via Martin Fowler) <https://martinfowler.com/eaaCatalog/unitOfWork.html>`_
 
-            :doc:`orm/session`
+            :ref:`tutorial_orm_data_manipulation`
+
+            :ref:`session_basics`
 
     expire
     expired
@@ -538,6 +760,7 @@ Glossary
 
 
     subquery
+    scalar subquery
         Refers to a ``SELECT`` statement that is embedded within an enclosing
         ``SELECT``.
 
@@ -651,7 +874,7 @@ Glossary
 
             :term:`durability`
 
-            `ACID Model (via Wikipedia) <http://en.wikipedia.org/wiki/ACID_Model>`_
+            `ACID Model (via Wikipedia) <https://en.wikipedia.org/wiki/ACID_Model>`_
 
     atomicity
         Atomicity is one of the components of the :term:`ACID` model,
@@ -666,7 +889,7 @@ Glossary
 
             :term:`ACID`
 
-            `Atomicity (via Wikipedia) <http://en.wikipedia.org/wiki/Atomicity_(database_systems)>`_
+            `Atomicity (via Wikipedia) <https://en.wikipedia.org/wiki/Atomicity_(database_systems)>`_
 
     consistency
         Consistency is one of the components of the :term:`ACID` model,
@@ -681,7 +904,7 @@ Glossary
 
             :term:`ACID`
 
-            `Consistency (via Wikipedia) <http://en.wikipedia.org/wiki/Consistency_(database_systems)>`_
+            `Consistency (via Wikipedia) <https://en.wikipedia.org/wiki/Consistency_(database_systems)>`_
 
     isolation
     isolated
@@ -700,7 +923,7 @@ Glossary
 
             :term:`ACID`
 
-            `Isolation (via Wikipedia) <http://en.wikipedia.org/wiki/Isolation_(database_systems)>`_
+            `Isolation (via Wikipedia) <https://en.wikipedia.org/wiki/Isolation_(database_systems)>`_
 
             :term:`read uncommitted`
 
@@ -766,7 +989,7 @@ Glossary
 
             :term:`ACID`
 
-            `Durability (via Wikipedia) <http://en.wikipedia.org/wiki/Durability_(database_systems)>`_
+            `Durability (via Wikipedia) <https://en.wikipedia.org/wiki/Durability_(database_systems)>`_
 
     RETURNING
         This is a non-SQL standard clause provided in various forms by
@@ -838,16 +1061,17 @@ Glossary
         single department.  A SQLAlchemy mapping might look like::
 
             class Department(Base):
-                __tablename__ = 'department'
+                __tablename__ = "department"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
                 employees = relationship("Employee")
 
+
             class Employee(Base):
-                __tablename__ = 'employee'
+                __tablename__ = "employee"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
-                dep_id = Column(Integer, ForeignKey('department.id'))
+                dep_id = Column(Integer, ForeignKey("department.id"))
 
         .. seealso::
 
@@ -889,15 +1113,16 @@ Glossary
         single department.  A SQLAlchemy mapping might look like::
 
             class Department(Base):
-                __tablename__ = 'department'
+                __tablename__ = "department"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
 
+
             class Employee(Base):
-                __tablename__ = 'employee'
+                __tablename__ = "employee"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
-                dep_id = Column(Integer, ForeignKey('department.id'))
+                dep_id = Column(Integer, ForeignKey("department.id"))
                 department = relationship("Department")
 
         .. seealso::
@@ -922,16 +1147,17 @@ Glossary
         used in :term:`one to many` as follows::
 
             class Department(Base):
-                __tablename__ = 'department'
+                __tablename__ = "department"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
                 employees = relationship("Employee", backref="department")
 
+
             class Employee(Base):
-                __tablename__ = 'employee'
+                __tablename__ = "employee"
                 id = Column(Integer, primary_key=True)
                 name = Column(String(30))
-                dep_id = Column(Integer, ForeignKey('department.id'))
+                dep_id = Column(Integer, ForeignKey("department.id"))
 
         A backref can be applied to any relationship, including one to many,
         many to one, and :term:`many to many`.
@@ -983,26 +1209,27 @@ Glossary
         specified using plain table metadata::
 
             class Employee(Base):
-                __tablename__ = 'employee'
+                __tablename__ = "employee"
 
-                id = Column(Integer, primary_key)
+                id = Column(Integer, primary_key=True)
                 name = Column(String(30))
 
                 projects = relationship(
                     "Project",
-                    secondary=Table('employee_project', Base.metadata,
-                                Column("employee_id", Integer, ForeignKey('employee.id'),
-                                            primary_key=True),
-                                Column("project_id", Integer, ForeignKey('project.id'),
-                                            primary_key=True)
-                            ),
-                    backref="employees"
-                    )
+                    secondary=Table(
+                        "employee_project",
+                        Base.metadata,
+                        Column("employee_id", Integer, ForeignKey("employee.id"), primary_key=True),
+                        Column("project_id", Integer, ForeignKey("project.id"), primary_key=True),
+                    ),
+                    backref="employees",
+                )
+
 
             class Project(Base):
-                __tablename__ = 'project'
+                __tablename__ = "project"
 
-                id = Column(Integer, primary_key)
+                id = Column(Integer, primary_key=True)
                 name = Column(String(30))
 
         Above, the ``Employee.projects`` and back-referencing ``Project.employees``
@@ -1046,6 +1273,19 @@ Glossary
 
             :ref:`relationship_config_toplevel`
 
+    cursor
+        A control structure that enables traversal over the records in a database.
+        In the Python DBAPI, the cursor object is in fact the starting point
+        for statement execution as well as the interface used for fetching
+        results.
+
+        .. seealso::
+
+            `Cursor Objects (in pep-249) <https://www.python.org/dev/peps/pep-0249/#cursor-objects>`_
+
+            `Cursor (via Wikipedia) <https://en.wikipedia.org/wiki/Cursor_(databases)>`_
+
+
     association relationship
         A two-tiered :term:`relationship` which links two tables
         together using an association table in the middle.  The
@@ -1083,29 +1323,28 @@ Glossary
         A SQLAlchemy declarative mapping for the above might look like::
 
             class Employee(Base):
-                __tablename__ = 'employee'
+                __tablename__ = "employee"
 
-                id = Column(Integer, primary_key)
+                id = Column(Integer, primary_key=True)
                 name = Column(String(30))
 
 
             class Project(Base):
-                __tablename__ = 'project'
+                __tablename__ = "project"
 
-                id = Column(Integer, primary_key)
+                id = Column(Integer, primary_key=True)
                 name = Column(String(30))
 
 
             class EmployeeProject(Base):
-                __tablename__ = 'employee_project'
+                __tablename__ = "employee_project"
 
-                employee_id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
-                project_id = Column(Integer, ForeignKey('project.id'), primary_key=True)
+                employee_id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
+                project_id = Column(Integer, ForeignKey("project.id"), primary_key=True)
                 role_name = Column(String(30))
 
                 project = relationship("Project", backref="project_employees")
                 employee = relationship("Employee", backref="employee_projects")
-
 
         Employees can be added to a project given a role name::
 
@@ -1114,10 +1353,12 @@ Glossary
             emp1 = Employee(name="emp1")
             emp2 = Employee(name="emp2")
 
-            proj.project_employees.extend([
-                EmployeeProject(employee=emp1, role="tech lead"),
-                EmployeeProject(employee=emp2, role="account executive")
-            ])
+            proj.project_employees.extend(
+                [
+                    EmployeeProject(employee=emp1, role_name="tech lead"),
+                    EmployeeProject(employee=emp2, role_name="account executive"),
+                ]
+            )
 
         .. seealso::
 
@@ -1143,7 +1384,7 @@ Glossary
 
             :term:`primary key`
 
-            `Candidate key (via Wikipedia) <http://en.wikipedia.org/wiki/Candidate_key>`_
+            `Candidate key (via Wikipedia) <https://en.wikipedia.org/wiki/Candidate_key>`_
 
             https://www.databasestar.com/database-keys/
 
@@ -1171,7 +1412,19 @@ Glossary
 
         .. seealso::
 
-            `Primary key (via Wikipedia) <http://en.wikipedia.org/wiki/Primary_Key>`_
+            :term:`composite primary key`
+
+            `Primary key (via Wikipedia) <https://en.wikipedia.org/wiki/Primary_Key>`_
+
+    composite primary key
+
+        A :term:`primary key` that has more than one column.   A particular
+        database row is unique based on two or more columns rather than just
+        a single value.
+
+        .. seealso::
+
+            :term:`primary key`
 
     foreign key constraint
         A referential constraint between two tables.  A foreign key is a field or set of fields in a
@@ -1189,7 +1442,7 @@ Glossary
 
         .. seealso::
 
-            `Foreign Key Constraint (via Wikipedia) <http://en.wikipedia.org/wiki/Foreign_key_constraint>`_
+            `Foreign Key Constraint (via Wikipedia) <https://en.wikipedia.org/wiki/Foreign_key_constraint>`_
 
     check constraint
 
@@ -1209,7 +1462,7 @@ Glossary
 
         .. seealso::
 
-            `CHECK constraint (via Wikipedia) <http://en.wikipedia.org/wiki/Check_constraint>`_
+            `CHECK constraint (via Wikipedia) <https://en.wikipedia.org/wiki/Check_constraint>`_
 
     unique constraint
     unique key index
@@ -1226,7 +1479,7 @@ Glossary
 
         .. seealso::
 
-            `Unique key (via Wikipedia) <http://en.wikipedia.org/wiki/Unique_key#Defining_unique_keys>`_
+            `Unique key (via Wikipedia) <https://en.wikipedia.org/wiki/Unique_key#Defining_unique_keys>`_
 
     transient
         This describes one of the major object states which
@@ -1297,3 +1550,12 @@ Glossary
         .. seealso::
 
             :ref:`session_object_states`
+
+    attached
+        Indicates an ORM object that is presently associated with a specific
+        :term:`Session`.
+
+        .. seealso::
+
+            :ref:`session_object_states`
+

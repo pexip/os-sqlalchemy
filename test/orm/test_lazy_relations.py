@@ -6,30 +6,33 @@ import sqlalchemy as sa
 from sqlalchemy import and_
 from sqlalchemy import bindparam
 from sqlalchemy import Boolean
+from sqlalchemy import Date
 from sqlalchemy import ForeignKey
 from sqlalchemy import ForeignKeyConstraint
+from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import orm
 from sqlalchemy import select
 from sqlalchemy import SmallInteger
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import util
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import configure_mappers
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.interfaces import MapperOption
+from sqlalchemy.orm import with_parent
 from sqlalchemy.testing import assert_raises
+from sqlalchemy.testing import assert_warns
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_false
 from sqlalchemy.testing import is_true
-from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.types import TypeDecorator
@@ -48,16 +51,17 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), lazy="select"
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="select",
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
         eq_(
             [
@@ -79,16 +83,17 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), lazy="select"
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="select",
                 )
             },
         )
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
         u = q.filter(users.c.id == 7).first()
         sess.expunge(u)
@@ -102,18 +107,18 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses),
+                    self.mapper_registry.map_imperatively(Address, addresses),
                     lazy="select",
                     order_by=addresses.c.email_address,
                 )
             },
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         assert [
             User(id=7, addresses=[Address(id=1)]),
             User(
@@ -139,14 +144,14 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(addresses=relationship(Address, lazy="select")),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         result = (
             q.filter(users.c.id == addresses.c.user_id)
             .order_by(addresses.c.email_address)
@@ -173,9 +178,9 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -186,7 +191,7 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             ),
         )
-        sess = create_session()
+        sess = fixture_session()
         assert [
             User(id=7, addresses=[Address(id=1)]),
             User(
@@ -211,7 +216,7 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -220,10 +225,10 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             },
         )
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        sess = create_session()
-        user = sess.query(User).get(7)
+        sess = fixture_session()
+        user = sess.get(User, 7)
         assert getattr(User, "addresses").hasparent(
             attributes.instance_state(user.addresses[0]), optimistic=True
         )
@@ -256,8 +261,8 @@ class LazyTest(_fixtures.FixtureTest):
             self.tables.addresses,
         )
 
-        mapper(Item, items)
-        mapper(
+        self.mapper_registry.map_imperatively(Item, items)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -266,18 +271,19 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), lazy="select"
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="select",
                 ),
                 "orders": relationship(Order, lazy="select"),
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         if testing.against("mssql"):
@@ -310,8 +316,8 @@ class LazyTest(_fixtures.FixtureTest):
             self.tables.addresses,
         )
 
-        mapper(Item, items)
-        mapper(
+        self.mapper_registry.map_imperatively(Item, items)
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -320,30 +326,29 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(
-                    mapper(Address, addresses), lazy="select"
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="select",
                 ),
                 "orders": relationship(Order, lazy="select"),
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User)
 
         # use a union all to get a lot of rows to join against
         u2 = users.alias("u2")
         s = sa.union_all(
-            u2.select(use_labels=True),
-            u2.select(use_labels=True),
-            u2.select(use_labels=True),
+            u2.select(),
+            u2.select(),
+            u2.select(),
         ).alias("u")
-        result = (
-            q.filter(s.c.u2_id == User.id).order_by(User.id).distinct().all()
-        )
+        result = q.filter(s.c.id == User.id).order_by(User.id).distinct().all()
         eq_(self.static.user_all_result, result)
 
     def test_uselist_false_warning(self):
@@ -357,15 +362,15 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.Order,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={"order": relationship(Order, uselist=False)},
         )
-        mapper(Order, orders)
-        s = create_session()
+        self.mapper_registry.map_imperatively(Order, orders)
+        s = fixture_session()
         u1 = s.query(User).filter(User.id == 7).one()
-        assert_raises(sa.exc.SAWarning, getattr, u1, "order")
+        assert_warns(sa.exc.SAWarning, getattr, u1, "order")
 
     def test_callable_bind(self):
         Address, addresses, users, User = (
@@ -375,12 +380,12 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
                 addresses=relationship(
-                    mapper(Address, addresses),
+                    self.mapper_registry.map_imperatively(Address, addresses),
                     lazy="select",
                     primaryjoin=and_(
                         users.c.id == addresses.c.user_id,
@@ -391,7 +396,7 @@ class LazyTest(_fixtures.FixtureTest):
             ),
         )
 
-        s = Session()
+        s = fixture_session()
         ed = s.query(User).filter_by(name="ed").one()
         eq_(
             ed.addresses,
@@ -405,73 +410,6 @@ class LazyTest(_fixtures.FixtureTest):
         fred = s.query(User).filter_by(name="fred").one()
         eq_(fred.addresses, [])  # fred is missing
 
-    def test_custom_bind(self):
-        Address, addresses, users, User = (
-            self.classes.Address,
-            self.tables.addresses,
-            self.tables.users,
-            self.classes.User,
-        )
-
-        mapper(
-            User,
-            users,
-            properties=dict(
-                addresses=relationship(
-                    mapper(Address, addresses),
-                    lazy="select",
-                    primaryjoin=and_(
-                        users.c.id == addresses.c.user_id,
-                        users.c.name == bindparam("name"),
-                    ),
-                )
-            ),
-        )
-
-        canary = mock.Mock()
-
-        class MyOption(MapperOption):
-            propagate_to_loaders = True
-
-            def __init__(self, crit):
-                self.crit = crit
-
-            def process_query_conditionally(self, query):
-                """process query during a lazyload"""
-                canary()
-                query._params = query._params.union(dict(name=self.crit))
-
-        s = Session()
-        ed = s.query(User).options(MyOption("ed")).filter_by(name="ed").one()
-        eq_(
-            ed.addresses,
-            [
-                Address(id=2, user_id=8),
-                Address(id=3, user_id=8),
-                Address(id=4, user_id=8),
-            ],
-        )
-        eq_(canary.mock_calls, [mock.call()])
-
-        fred = (
-            s.query(User).options(MyOption("ed")).filter_by(name="fred").one()
-        )
-        eq_(fred.addresses, [])  # fred is missing
-        eq_(canary.mock_calls, [mock.call(), mock.call()])
-
-        # the lazy query was not cached; the option is re-applied to the
-        # Fred object due to populate_existing()
-        fred = (
-            s.query(User)
-            .populate_existing()
-            .options(MyOption("fred"))
-            .filter_by(name="fred")
-            .one()
-        )
-        eq_(fred.addresses, [Address(id=5, user_id=9)])  # fred is there
-
-        eq_(canary.mock_calls, [mock.call(), mock.call(), mock.call()])
-
     def test_one_to_many_scalar(self):
         Address, addresses, users, User = (
             self.classes.Address,
@@ -480,16 +418,18 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
                 address=relationship(
-                    mapper(Address, addresses), lazy="select", uselist=False
+                    self.mapper_registry.map_imperatively(Address, addresses),
+                    lazy="select",
+                    uselist=False,
                 )
             ),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         result = q.filter(users.c.id == 7).all()
         assert [User(id=7, address=Address(id=1))] == result
 
@@ -501,13 +441,13 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             primary_key=[addresses.c.user_id, addresses.c.email_address],
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -521,7 +461,7 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             ),
         )
-        q = create_session().query(User)
+        q = fixture_session().query(User)
         eq_(
             [
                 User(id=7, address=None),
@@ -556,9 +496,9 @@ class LazyTest(_fixtures.FixtureTest):
             self.tables.order_items,
         )
 
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -570,16 +510,16 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
         open_mapper = aliased(
-            Order, select([orders]).where(orders.c.isopen == 1).alias()
+            Order, select(orders).where(orders.c.isopen == 1).alias()
         )
         closed_mapper = aliased(
-            Order, select([orders]).where(orders.c.isopen == 0).alias()
+            Order, select(orders).where(orders.c.isopen == 0).alias()
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -615,9 +555,9 @@ class LazyTest(_fixtures.FixtureTest):
             self.tables.order_items,
         )
 
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -629,11 +569,11 @@ class LazyTest(_fixtures.FixtureTest):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
         open_mapper = aliased(Order, orders)
         closed_mapper = aliased(Order, orders)
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(
@@ -645,6 +585,7 @@ class LazyTest(_fixtures.FixtureTest):
                         users.c.id == open_mapper.user_id,
                     ),
                     lazy="select",
+                    overlaps="closed_orders",
                 ),
                 closed_orders=relationship(
                     closed_mapper,
@@ -653,6 +594,7 @@ class LazyTest(_fixtures.FixtureTest):
                         users.c.id == closed_mapper.user_id,
                     ),
                     lazy="select",
+                    overlaps="open_orders",
                 ),
             ),
         )
@@ -663,7 +605,7 @@ class LazyTest(_fixtures.FixtureTest):
         User, Address, Order, Item = self.classes(
             "User", "Address", "Order", "Item"
         )
-        q = create_session().query(User).order_by(User.id)
+        q = fixture_session().query(User).order_by(User.id)
 
         def items(*ids):
             if no_items:
@@ -709,25 +651,51 @@ class LazyTest(_fixtures.FixtureTest):
         else:
             self.assert_sql_count(testing.db, go, 15)
 
-        sess = create_session()
-        user = sess.query(User).get(7)
+        sess = fixture_session()
+        user = sess.get(User, 7)
 
         closed_mapper = User.closed_orders.entity
         open_mapper = User.open_orders.entity
         eq_(
             [Order(id=1), Order(id=5)],
-            create_session()
+            fixture_session()
             .query(closed_mapper)
-            .with_parent(user, property="closed_orders")
+            .filter(with_parent(user, User.closed_orders))
             .all(),
         )
         eq_(
             [Order(id=3)],
-            create_session()
+            fixture_session()
             .query(open_mapper)
-            .with_parent(user, property="open_orders")
+            .filter(with_parent(user, User.open_orders))
             .all(),
         )
+
+    @testing.combinations(
+        ("plain",), ("cte", testing.requires.ctes), ("subquery",), id_="s"
+    )
+    def test_map_to_cte_subq(self, type_):
+        User, Address = self.classes("User", "Address")
+        users, addresses = self.tables("users", "addresses")
+
+        if type_ == "plain":
+            target = users
+        elif type_ == "cte":
+            target = select(users).cte()
+        elif type_ == "subquery":
+            target = select(users).subquery()
+
+        self.mapper_registry.map_imperatively(
+            User,
+            target,
+            properties={"addresses": relationship(Address, backref="user")},
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
+
+        sess = fixture_session()
+
+        q = sess.query(Address).order_by(Address.id)
+        eq_(q.all(), self.static.address_user_result)
 
     def test_many_to_many(self):
         keywords, items, item_keywords, Keyword, Item = (
@@ -738,8 +706,8 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.Item,
         )
 
-        mapper(Keyword, keywords)
-        mapper(
+        self.mapper_registry.map_imperatively(Keyword, keywords)
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties=dict(
@@ -749,12 +717,12 @@ class LazyTest(_fixtures.FixtureTest):
             ),
         )
 
-        q = create_session().query(Item)
+        q = fixture_session().query(Item)
         assert self.static.item_keyword_result == q.all()
 
         eq_(
             self.static.item_keyword_result[0:2],
-            q.join("keywords").filter(keywords.c.name == "red").all(),
+            q.join(Item.keywords).filter(keywords.c.name == "red").all(),
         )
 
     def test_uses_get(self):
@@ -773,34 +741,100 @@ class LazyTest(_fixtures.FixtureTest):
             users.c.id == addresses.c.user_id,
             addresses.c.user_id == users.c.id,
         ):
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Address,
                 addresses,
                 properties=dict(
                     user=relationship(
-                        mapper(User, users), lazy="select", primaryjoin=pj
+                        self.mapper_registry.map_imperatively(User, users),
+                        lazy="select",
+                        primaryjoin=pj,
                     )
                 ),
             )
 
-            sess = create_session()
+            with fixture_session() as sess:
 
-            # load address
-            a1 = (
-                sess.query(Address)
-                .filter_by(email_address="ed@wood.com")
-                .one()
+                # load address
+                a1 = (
+                    sess.query(Address)
+                    .filter_by(email_address="ed@wood.com")
+                    .one()
+                )
+
+                # load user that is attached to the address
+                u1 = sess.get(User, 8)
+
+                def go():
+                    # lazy load of a1.user should get it from the session
+                    assert a1.user is u1
+
+                self.assert_sql_count(testing.db, go, 0)
+                sa.orm.clear_mappers()
+
+    def test_use_get_lambda_key_wont_go_stale(self):
+        """test [ticket:6055]"""
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+        um = self.mapper_registry.map_imperatively(User, users)
+        am = self.mapper_registry.map_imperatively(
+            Address, addresses, properties={"user": relationship(User)}
+        )
+
+        is_true(am.relationships.user._lazy_strategy.use_get)
+
+        with fixture_session() as sess:
+            a1 = sess.get(Address, 2)
+
+            eq_(a1.user.id, 8)
+
+        um._reset_memoizations()
+
+        with fixture_session() as sess:
+            a1 = sess.get(Address, 2)
+
+            eq_(a1.user.id, 8)
+
+    @testing.only_on("sqlite")
+    def test_annotated_fn_criteria(self, registry, connection):
+        """this test is a secondary test for the compilation of functions
+        that are annotated.
+
+        """
+
+        @registry.mapped
+        class A(object):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            _date = Column(Date, default=func.current_date())
+            b_id = Column(Integer, ForeignKey("b.id"))
+            b = relationship("B")
+
+        @registry.mapped
+        class B(object):
+            __tablename__ = "b"
+
+            id = Column(Integer, primary_key=True)
+            a_s = relationship(
+                "A",
+                primaryjoin="and_(B.id == A.b_id, "
+                "A._date >= func.current_date())",
+                viewonly=True,
             )
 
-            # load user that is attached to the address
-            u1 = sess.query(User).get(8)
+        registry.metadata.create_all(connection)
+        with Session(connection) as sess:
+            b1 = B(id=1)
+            a1 = A(b=b1)
+            sess.add_all([a1, b1])
+            sess.commit()
 
-            def go():
-                # lazy load of a1.user should get it from the session
-                assert a1.user is u1
-
-            self.assert_sql_count(testing.db, go, 0)
-            sa.orm.clear_mappers()
+            is_(sess.get(B, 1).a_s[0], a1)
 
     def test_uses_get_compatible_types(self):
         """test the use_get optimization with compatible
@@ -810,9 +844,11 @@ class LazyTest(_fixtures.FixtureTest):
 
         class IntDecorator(TypeDecorator):
             impl = Integer
+            cache_ok = True
 
         class SmallintDecorator(TypeDecorator):
             impl = SmallInteger
+            cache_ok = True
 
         class SomeDBInteger(sa.Integer):
             pass
@@ -849,30 +885,33 @@ class LazyTest(_fixtures.FixtureTest):
                 Column("email_address", String(50), nullable=False),
             )
 
-            mapper(
+            self.mapper_registry.map_imperatively(
                 Address,
                 addresses,
-                properties=dict(user=relationship(mapper(User, users))),
+                properties=dict(
+                    user=relationship(
+                        self.mapper_registry.map_imperatively(User, users)
+                    )
+                ),
             )
 
-            sess = create_session(bind=testing.db)
+            with fixture_session() as sess:
+                # load address
+                a1 = (
+                    sess.query(Address)
+                    .filter_by(email_address="ed@wood.com")
+                    .one()
+                )
 
-            # load address
-            a1 = (
-                sess.query(Address)
-                .filter_by(email_address="ed@wood.com")
-                .one()
-            )
+                # load user that is attached to the address
+                u1 = sess.get(User, 8)
 
-            # load user that is attached to the address
-            u1 = sess.query(User).get(8)
+                def go():
+                    # lazy load of a1.user should get it from the session
+                    assert a1.user is u1
 
-            def go():
-                # lazy load of a1.user should get it from the session
-                assert a1.user is u1
-
-            self.assert_sql_count(testing.db, go, 0)
-            sa.orm.clear_mappers()
+                self.assert_sql_count(testing.db, go, 0)
+                sa.orm.clear_mappers()
 
     def test_many_to_one(self):
         users, Address, addresses, User = (
@@ -882,20 +921,23 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties=dict(
-                user=relationship(mapper(User, users), lazy="select")
+                user=relationship(
+                    self.mapper_registry.map_imperatively(User, users),
+                    lazy="select",
+                )
             ),
         )
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Address)
         a = q.filter(addresses.c.id == 1).one()
 
         assert a.user is not None
 
-        u1 = sess.query(User).get(7)
+        u1 = sess.get(User, 7)
 
         assert a.user is u1
 
@@ -907,13 +949,13 @@ class LazyTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={"addresses": relationship(Address, backref="user")},
         )
-        mapper(Address, addresses)
-        sess = create_session()
+        self.mapper_registry.map_imperatively(Address, addresses)
+        sess = fixture_session(autoflush=False, future=True)
         ad = sess.query(Address).filter_by(id=1).one()
         assert ad.user.id == 7
 
@@ -962,6 +1004,7 @@ class GetterStateTest(_fixtures.FixtureTest):
     def _unhashable_fixture(self, metadata, load_on_pending=False):
         class MyHashType(sa.TypeDecorator):
             impl = sa.String(100)
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 return ";".join(
@@ -991,8 +1034,8 @@ class GetterStateTest(_fixtures.FixtureTest):
         class Article(fixtures.ComparableEntity):
             pass
 
-        mapper(Category, category)
-        mapper(
+        self.mapper_registry.map_imperatively(Category, category)
+        self.mapper_registry.map_imperatively(
             Article,
             article,
             properties={
@@ -1004,8 +1047,8 @@ class GetterStateTest(_fixtures.FixtureTest):
             },
         )
 
-        metadata.create_all()
-        sess = Session(autoflush=False)
+        metadata.create_all(testing.db)
+        sess = Session(testing.db, autoflush=False)
         data = {"im": "unhashable"}
         a1 = Article(id=1, data=data)
         c1 = Category(id=1, data=data)
@@ -1026,14 +1069,14 @@ class GetterStateTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={
                 "addresses": relationship(Address, back_populates="user")
             },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Address,
             addresses,
             properties={
@@ -1049,7 +1092,7 @@ class GetterStateTest(_fixtures.FixtureTest):
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
         a1 = Address(email_address="a1")
         sess.add(a1)
         if populate_user:
@@ -1096,9 +1139,9 @@ class GetterStateTest(_fixtures.FixtureTest):
             Address.user.impl.get(
                 attributes.instance_state(a1),
                 attributes.instance_dict(a1),
-                passive=attributes.PASSIVE_RETURN_NEVER_SET,
+                passive=attributes.PASSIVE_RETURN_NO_VALUE,
             ),
-            attributes.NEVER_SET,
+            attributes.NO_VALUE,
         )
         assert "user_id" not in a1.__dict__
         assert "user" not in a1.__dict__
@@ -1109,7 +1152,7 @@ class GetterStateTest(_fixtures.FixtureTest):
             Address.user.impl.get_history(
                 attributes.instance_state(a1),
                 attributes.instance_dict(a1),
-                passive=attributes.PASSIVE_RETURN_NEVER_SET,
+                passive=attributes.PASSIVE_RETURN_NO_VALUE,
             ),
             ((), (), ()),
         )
@@ -1174,7 +1217,7 @@ class GetterStateTest(_fixtures.FixtureTest):
             Address.user.impl.get(
                 attributes.instance_state(a1),
                 attributes.instance_dict(a1),
-                passive=attributes.PASSIVE_RETURN_NEVER_SET,
+                passive=attributes.PASSIVE_RETURN_NO_VALUE,
             ),
             User(name="ed"),
         )
@@ -1185,7 +1228,7 @@ class GetterStateTest(_fixtures.FixtureTest):
             Address.user.impl.get_history(
                 attributes.instance_state(a1),
                 attributes.instance_dict(a1),
-                passive=attributes.PASSIVE_RETURN_NEVER_SET,
+                passive=attributes.PASSIVE_RETURN_NO_VALUE,
             ),
             ((), [User(name="ed")], ()),
         )
@@ -1205,18 +1248,20 @@ class M2OGetTest(_fixtures.FixtureTest):
             self.classes.User,
         )
 
-        mapper(User, users)
+        self.mapper_registry.map_imperatively(User, users)
 
-        mapper(Address, addresses, properties={"user": relationship(User)})
+        self.mapper_registry.map_imperatively(
+            Address, addresses, properties={"user": relationship(User)}
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         ad1 = Address(email_address="somenewaddress", id=12)
         sess.add(ad1)
         sess.flush()
         sess.expunge_all()
 
-        ad2 = sess.query(Address).get(1)
-        ad3 = sess.query(Address).get(ad1.id)
+        ad2 = sess.get(Address, 1)
+        ad3 = sess.get(Address, ad1.id)
 
         def go():
             # one lazy load
@@ -1251,18 +1296,22 @@ class CorrelatedTest(fixtures.MappedTest):
 
         connection.execute(
             user_t.insert(),
-            {"id": 1, "name": "user1"},
-            {"id": 2, "name": "user2"},
-            {"id": 3, "name": "user3"},
+            [
+                {"id": 1, "name": "user1"},
+                {"id": 2, "name": "user2"},
+                {"id": 3, "name": "user3"},
+            ],
         )
 
         connection.execute(
             stuff.insert(),
-            {"id": 1, "user_id": 1, "date": datetime.date(2007, 10, 15)},
-            {"id": 2, "user_id": 1, "date": datetime.date(2007, 12, 15)},
-            {"id": 3, "user_id": 1, "date": datetime.date(2007, 11, 15)},
-            {"id": 4, "user_id": 2, "date": datetime.date(2008, 1, 15)},
-            {"id": 5, "user_id": 3, "date": datetime.date(2007, 6, 15)},
+            [
+                {"id": 1, "user_id": 1, "date": datetime.date(2007, 10, 15)},
+                {"id": 2, "user_id": 1, "date": datetime.date(2007, 12, 15)},
+                {"id": 3, "user_id": 1, "date": datetime.date(2007, 11, 15)},
+                {"id": 4, "user_id": 2, "date": datetime.date(2008, 1, 15)},
+                {"id": 5, "user_id": 3, "date": datetime.date(2007, 6, 15)},
+            ],
         )
 
     def test_correlated_lazyload(self):
@@ -1274,17 +1323,17 @@ class CorrelatedTest(fixtures.MappedTest):
         class Stuff(fixtures.ComparableEntity):
             pass
 
-        mapper(Stuff, stuff)
+        self.mapper_registry.map_imperatively(Stuff, stuff)
 
         stuff_view = (
-            sa.select([stuff.c.id])
+            sa.select(stuff.c.id)
             .where(stuff.c.user_id == user_t.c.id)
             .correlate(user_t)
             .order_by(sa.desc(stuff.c.date))
             .limit(1)
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             user_t,
             properties={
@@ -1292,13 +1341,13 @@ class CorrelatedTest(fixtures.MappedTest):
                     Stuff,
                     primaryjoin=sa.and_(
                         user_t.c.id == stuff.c.user_id,
-                        stuff.c.id == (stuff_view.as_scalar()),
+                        stuff.c.id == (stuff_view.scalar_subquery()),
                     ),
                 )
             },
         )
 
-        sess = create_session()
+        sess = fixture_session()
 
         eq_(
             sess.query(User).all(),
@@ -1351,7 +1400,7 @@ class O2MWOSideFixedTest(fixtures.MappedTest):
         Person, City = cls.classes.Person, cls.classes.City
         city, person = cls.tables.city, cls.tables.person
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Person,
             person,
             properties={
@@ -1364,23 +1413,29 @@ class O2MWOSideFixedTest(fixtures.MappedTest):
                 )
             },
         )
-        mapper(City, city)
+        cls.mapper_registry.map_imperatively(City, city)
 
     def _fixture(self, include_other):
         city, person = self.tables.city, self.tables.person
 
-        if include_other:
-            city.insert().execute({"id": 1, "deleted": False})
+        with testing.db.begin() as conn:
+            if include_other:
+                conn.execute(city.insert(), {"id": 1, "deleted": False})
 
-            person.insert().execute(
-                {"id": 1, "city_id": 1}, {"id": 2, "city_id": 1}
+                conn.execute(
+                    person.insert(),
+                    [
+                        {"id": 1, "city_id": 1},
+                        {"id": 2, "city_id": 1},
+                    ],
+                )
+
+            conn.execute(city.insert(), {"id": 2, "deleted": True})
+
+            conn.execute(
+                person.insert(),
+                [{"id": 3, "city_id": 2}, {"id": 4, "city_id": 2}],
             )
-
-        city.insert().execute({"id": 2, "deleted": True})
-
-        person.insert().execute(
-            {"id": 3, "city_id": 2}, {"id": 4, "city_id": 2}
-        )
 
     def test_lazyload_assert_expected_sql(self):
         self._fixture(True)
@@ -1396,8 +1451,8 @@ class O2MWOSideFixedTest(fixtures.MappedTest):
             go,
             CompiledSQL(
                 "SELECT person.id AS person_id, person.city_id AS "
-                "person_city_id FROM person "
-                "WHERE person.city_id = :param_1 AND :param_2 = 0",
+                "person_city_id FROM person WHERE person.city_id = :param_1 "
+                "AND :param_2 = 0",
                 {"param_1": 2, "param_2": 1},
             ),
         )
@@ -1470,12 +1525,12 @@ class RefersToSelfLazyLoadInterferenceTest(fixtures.MappedTest):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.A,
             cls.tables.a,
             properties={"b": relationship(cls.classes.B)},
         )
-        bm = mapper(
+        bm = cls.mapper_registry.map_imperatively(
             cls.classes.B,
             cls.tables.b,
             properties={
@@ -1485,17 +1540,17 @@ class RefersToSelfLazyLoadInterferenceTest(fixtures.MappedTest):
                 "zc": relationship(cls.classes.C),
             },
         )
-        mapper(cls.classes.C, cls.tables.c)
+        cls.mapper_registry.map_imperatively(cls.classes.C, cls.tables.c)
 
         bmp = bm._props
         configure_mappers()
         # Bug is order-dependent, must sort the "zc" property to the end
-        bmp.sort()
+        util.sort_dictionary(bmp, key=lambda item: item[0])
 
     def test_lazy_doesnt_interfere(self):
         A, B, C = self.classes("A", "B", "C")
 
-        session = Session()
+        session = fixture_session()
         b = B()
         session.add(b)
         session.flush()
@@ -1508,24 +1563,27 @@ class RefersToSelfLazyLoadInterferenceTest(fixtures.MappedTest):
 
         # If the bug is here, the next line throws an exception
         session.query(B).options(
-            sa.orm.joinedload("parent").joinedload("zc")
+            sa.orm.joinedload(B.parent).joinedload(B.zc)
         ).all()
 
 
 class TypeCoerceTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     """ORM-level test for [ticket:3531]"""
 
-    # mysql is having a recursion issue in the bind_expression
-    __only_on__ = ("sqlite", "postgresql")
+    __backend__ = True
 
     class StringAsInt(TypeDecorator):
         impl = String(50)
+        cache_ok = True
+
+        def get_dbapi_type(self, dbapi):
+            return dbapi.NUMBER
 
         def column_expression(self, col):
             return sa.cast(col, Integer)
 
         def bind_expression(self, col):
-            return sa.cast(col, String)
+            return sa.cast(col, String(50))
 
     @classmethod
     def define_tables(cls, metadata):
@@ -1549,7 +1607,7 @@ class TypeCoerceTest(fixtures.MappedTest, testing.AssertsExecutionResults):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.Person,
             cls.tables.person,
             properties=dict(
@@ -1566,13 +1624,13 @@ class TypeCoerceTest(fixtures.MappedTest, testing.AssertsExecutionResults):
             ),
         )
 
-        mapper(cls.classes.Pet, cls.tables.pets)
+        cls.mapper_registry.map_imperatively(cls.classes.Pet, cls.tables.pets)
 
     def test_lazyload_singlecast(self):
         Person = self.classes.Person
         Pet = self.classes.Pet
 
-        s = Session()
+        s = fixture_session()
         s.add_all([Person(id=5), Pet(id=1, person_id=5)])
         s.commit()
 
@@ -1583,9 +1641,9 @@ class TypeCoerceTest(fixtures.MappedTest, testing.AssertsExecutionResults):
 
         asserter.assert_(
             CompiledSQL(
-                "SELECT pets.id AS pets_id, pets.person_id "
-                "AS pets_person_id FROM pets "
-                "WHERE pets.person_id = CAST(:param_1 AS INTEGER)",
+                "SELECT pets.id AS pets_id, pets.person_id AS "
+                "pets_person_id FROM pets WHERE pets.person_id = "
+                "CAST(:param_1 AS INTEGER)",
                 [{"param_1": 5}],
             )
         )
@@ -1630,8 +1688,8 @@ class CompositeSimpleM2OTest(fixtures.MappedTest):
             pass
 
     def test_use_get_sameorder(self):
-        mapper(self.classes.A, self.tables.a)
-        m_b = mapper(
+        self.mapper_registry.map_imperatively(self.classes.A, self.tables.a)
+        m_b = self.mapper_registry.map_imperatively(
             self.classes.B,
             self.tables.b_sameorder,
             properties={"a": relationship(self.classes.A)},
@@ -1641,8 +1699,8 @@ class CompositeSimpleM2OTest(fixtures.MappedTest):
         is_true(m_b.relationships.a.strategy.use_get)
 
     def test_use_get_reverseorder(self):
-        mapper(self.classes.A, self.tables.a)
-        m_b = mapper(
+        self.mapper_registry.map_imperatively(self.classes.A, self.tables.a)
+        m_b = self.mapper_registry.map_imperatively(
             self.classes.B,
             self.tables.b_differentorder,
             properties={"a": relationship(self.classes.A)},
@@ -1652,8 +1710,8 @@ class CompositeSimpleM2OTest(fixtures.MappedTest):
         is_true(m_b.relationships.a.strategy.use_get)
 
     def test_dont_use_get_pj_is_different(self):
-        mapper(self.classes.A, self.tables.a)
-        m_b = mapper(
+        self.mapper_registry.map_imperatively(self.classes.A, self.tables.a)
+        m_b = self.mapper_registry.map_imperatively(
             self.classes.B,
             self.tables.b_sameorder,
             properties={

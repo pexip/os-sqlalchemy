@@ -2,7 +2,6 @@ import datetime
 import itertools
 
 import sqlalchemy as sa
-from sqlalchemy import Boolean
 from sqlalchemy import cast
 from sqlalchemy import DateTime
 from sqlalchemy import exc
@@ -20,6 +19,7 @@ from sqlalchemy.sql import literal_column
 from sqlalchemy.sql import select
 from sqlalchemy.sql import text
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
@@ -294,13 +294,6 @@ class DefaultObjectTest(fixtures.TestBase):
             Column("col3", Integer, Sequence("foo"), server_default="x"),
             Column("col4", Integer, ColumnDefault("x"), DefaultClause("y")),
             Column(
-                "col4",
-                Integer,
-                ColumnDefault("x"),
-                DefaultClause("y"),
-                DefaultClause("y", for_update=True),
-            ),
-            Column(
                 "col5",
                 Integer,
                 ColumnDefault("x"),
@@ -326,6 +319,16 @@ class DefaultObjectTest(fixtures.TestBase):
                 onupdate="z",
             ),
         )
+        tbl.append_column(
+            Column(
+                "col4",
+                Integer,
+                ColumnDefault("x"),
+                DefaultClause("y"),
+                DefaultClause("y", for_update=True),
+            ),
+            replace_existing=True,
+        )
         has_(tbl, "col1", "default")
         has_(tbl, "col2", "default", "server_default")
         has_(tbl, "col3", "default", "server_default")
@@ -347,12 +350,7 @@ class DefaultObjectTest(fixtures.TestBase):
         in the columns, where clause of a select, or in the values
         clause of insert, update, raises an informative error"""
 
-        t = Table(
-            "some_table",
-            MetaData(),
-            Column("id", Integer),
-            Column("col4", String()),
-        )
+        t = Table("some_table", MetaData(), Column("id", Integer))
         for const in (
             sa.Sequence("y"),
             sa.ColumnDefault("y"),
@@ -360,22 +358,24 @@ class DefaultObjectTest(fixtures.TestBase):
         ):
             assert_raises_message(
                 sa.exc.ArgumentError,
-                "SQL expression object expected, got object of type "
-                "<.* 'list'> instead",
-                t.select,
-                [const],
+                r"SQL expression for WHERE/HAVING role expected, "
+                r"got (?:Sequence|ColumnDefault|DefaultClause)\('y'.*\)",
+                t.select().where,
+                const,
             )
             assert_raises_message(
-                sa.exc.InvalidRequestError,
-                "cannot be used directly as a column expression.",
-                str,
-                t.insert().values(col4=const),
+                sa.exc.ArgumentError,
+                "SQL expression element expected, got %s"
+                % const.__class__.__name__,
+                t.insert().values,
+                col4=const,
             )
             assert_raises_message(
-                sa.exc.InvalidRequestError,
-                "cannot be used directly as a column expression.",
-                str,
-                t.update().values(col4=const),
+                sa.exc.ArgumentError,
+                "SQL expression element expected, got %s"
+                % const.__class__.__name__,
+                t.update().values,
+                col4=const,
             )
 
 
@@ -392,11 +392,11 @@ class DefaultRoundTripTest(fixtures.TablesTest):
 
         def myupdate_with_ctx(ctx):
             conn = ctx.connection
-            return conn.execute(sa.select([sa.text("13")])).scalar()
+            return conn.execute(sa.select(sa.text("13"))).scalar()
 
         def mydefault_using_connection(ctx):
             conn = ctx.connection
-            return conn.execute(sa.select([sa.text("12")])).scalar()
+            return conn.execute(sa.select(sa.text("12"))).scalar()
 
         use_function_defaults = testing.against("postgresql", "mssql")
         is_oracle = testing.against("oracle")
@@ -408,6 +408,7 @@ class DefaultRoundTripTest(fixtures.TablesTest):
 
         class MyType(TypeDecorator):
             impl = String(50)
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 if value is not None:
@@ -421,13 +422,11 @@ class DefaultRoundTripTest(fixtures.TablesTest):
             if is_oracle:
                 ts = conn.scalar(
                     sa.select(
-                        [
-                            func.trunc(
-                                func.current_timestamp(),
-                                sa.literal_column("'DAY'"),
-                                type_=sa.Date,
-                            )
-                        ]
+                        func.trunc(
+                            func.current_timestamp(),
+                            sa.literal_column("'DAY'"),
+                            type_=sa.Date,
+                        )
                     )
                 )
                 currenttime = cls.currenttime = func.trunc(
@@ -505,9 +504,8 @@ class DefaultRoundTripTest(fixtures.TablesTest):
             Column("col11", MyType(), default="foo"),
         )
 
-    def teardown(self):
+    def teardown_test(self):
         self.default_generator["x"] = 50
-        super(DefaultRoundTripTest, self).teardown()
 
     def test_standalone(self, connection):
         t = self.tables.default_test
@@ -528,7 +526,7 @@ class DefaultRoundTripTest(fixtures.TablesTest):
             set([t.c.col3, t.c.col5, t.c.col4, t.c.col6]),
         )
 
-        r = connection.execute(t.insert(inline=True))
+        r = connection.execute(t.insert().inline())
         assert r.lastrow_has_defaults()
         eq_(
             set(r.context.postfetch_cols),
@@ -538,12 +536,12 @@ class DefaultRoundTripTest(fixtures.TablesTest):
         connection.execute(t.insert())
 
         ctexec = connection.execute(
-            sa.select([self.currenttime.label("now")])
+            sa.select(self.currenttime.label("now"))
         ).scalar()
         result = connection.execute(t.select().order_by(t.c.col1))
         today = datetime.date.today()
         eq_(
-            result.fetchall(),
+            list(result),
             [
                 (
                     x,
@@ -723,16 +721,18 @@ class DefaultRoundTripTest(fixtures.TablesTest):
             "group 1",
             connection.execute,
             t.insert(),
-            {"col4": 7, "col7": 12, "col8": 19},
-            {"col4": 7, "col8": 19},
-            {"col4": 7, "col7": 12, "col8": 19},
+            [
+                {"col4": 7, "col7": 12, "col8": 19},
+                {"col4": 7, "col8": 19},
+                {"col4": 7, "col7": 12, "col8": 19},
+            ],
         )
 
     def test_insert_values(self, connection):
         t = self.tables.default_test
         connection.execute(t.insert().values(col3=50))
         result = connection.execute(t.select().order_by(t.c.col1))
-        eq_(50, result.first()["col3"])
+        eq_(50, result.first()._mapping["col3"])
 
     def test_updatemany(self, connection):
         t = self.tables.default_test
@@ -839,7 +839,14 @@ class DefaultRoundTripTest(fixtures.TablesTest):
         connection.execute(t.update().where(t.c.col1 == pk).values(col3=55))
         result = connection.execute(t.select().where(t.c.col1 == pk))
         row = result.first()
-        eq_(55, row["col3"])
+        eq_(55, row._mapping["col3"])
+
+
+class FutureDefaultRoundTripTest(
+    fixtures.FutureEngineMixin, DefaultRoundTripTest
+):
+
+    __backend__ = True
 
 
 class CTEDefaultTest(fixtures.TablesTest):
@@ -896,14 +903,14 @@ class CTEDefaultTest(fixtures.TablesTest):
             expected = (7, 5)
         elif a == "select":
             conn.execute(q.insert().values(x=5, y=10, z=1))
-            cte = sa.select([q.c.z]).cte("c")
+            cte = sa.select(q.c.z).cte("c")
             expected = (5, 10)
 
         if b == "select":
             conn.execute(p.insert().values(s=1))
-            stmt = select([p.c.s, cte.c.z]).where(p.c.s == cte.c.z)
+            stmt = select(p.c.s, cte.c.z).where(p.c.s == cte.c.z)
         elif b == "insert":
-            sel = select([1, cte.c.z])
+            sel = select(1, cte.c.z)
             stmt = (
                 p.insert().from_select(["s", "t"], sel).returning(p.c.s, p.c.t)
             )
@@ -919,7 +926,7 @@ class CTEDefaultTest(fixtures.TablesTest):
             )
         eq_(list(conn.execute(stmt)), [(1, 1)])
 
-        eq_(conn.execute(select([q.c.x, q.c.y])).first(), expected)
+        eq_(conn.execute(select(q.c.x, q.c.y)).first(), expected)
 
 
 class PKDefaultTest(fixtures.TablesTest):
@@ -937,7 +944,7 @@ class PKDefaultTest(fixtures.TablesTest):
                 "id",
                 Integer,
                 primary_key=True,
-                default=sa.select([func.max(t2.c.nextid)]).as_scalar(),
+                default=sa.select(func.max(t2.c.nextid)).scalar_subquery(),
             ),
             Column("data", String(30)),
         )
@@ -947,7 +954,7 @@ class PKDefaultTest(fixtures.TablesTest):
             metadata,
             Column(
                 "date_id",
-                DateTime,
+                DateTime(timezone=True),
                 default=text("current_timestamp"),
                 primary_key=True,
             ),
@@ -974,13 +981,13 @@ class PKDefaultTest(fixtures.TablesTest):
                 options={"implicit_returning": returning}
             )
         with engine.begin() as conn:
-            conn.execute(t2.insert(), nextid=1)
-            r = conn.execute(t1.insert(), data="hi")
-            eq_([1], r.inserted_primary_key)
+            conn.execute(t2.insert(), dict(nextid=1))
+            r = conn.execute(t1.insert(), dict(data="hi"))
+            eq_((1,), r.inserted_primary_key)
 
-            conn.execute(t2.insert(), nextid=2)
-            r = conn.execute(t1.insert(), data="there")
-            eq_([2], r.inserted_primary_key)
+            conn.execute(t2.insert(), dict(nextid=2))
+            r = conn.execute(t1.insert(), dict(data="there"))
+            eq_((2,), r.inserted_primary_key)
 
             r = conn.execute(date_table.insert())
             assert isinstance(r.inserted_primary_key[0], datetime.datetime)
@@ -1005,90 +1012,81 @@ class PKIncrementTest(fixtures.TablesTest):
             Column("str1", String(20)),
         )
 
-    # TODO: add coverage for increment on a secondary column in a key
-    @testing.fails_on("firebird", "Data type unknown")
-    def _test_autoincrement(self, bind):
+    def test_autoincrement(self, connection):
         aitable = self.tables.aitable
 
         ids = set()
-        rs = bind.execute(aitable.insert(), int1=1)
+        rs = connection.execute(aitable.insert(), dict(int1=1))
         last = rs.inserted_primary_key[0]
         self.assert_(last)
         self.assert_(last not in ids)
         ids.add(last)
 
-        rs = bind.execute(aitable.insert(), str1="row 2")
+        rs = connection.execute(aitable.insert(), dict(str1="row 2"))
         last = rs.inserted_primary_key[0]
         self.assert_(last)
         self.assert_(last not in ids)
         ids.add(last)
 
-        rs = bind.execute(aitable.insert(), int1=3, str1="row 3")
+        rs = connection.execute(aitable.insert(), dict(int1=3, str1="row 3"))
         last = rs.inserted_primary_key[0]
         self.assert_(last)
         self.assert_(last not in ids)
         ids.add(last)
 
-        rs = bind.execute(aitable.insert(values={"int1": func.length("four")}))
+        rs = connection.execute(
+            aitable.insert().values({"int1": func.length("four")})
+        )
         last = rs.inserted_primary_key[0]
         self.assert_(last)
         self.assert_(last not in ids)
         ids.add(last)
-
-        eq_(ids, set([1, 2, 3, 4]))
 
         eq_(
-            list(bind.execute(aitable.select().order_by(aitable.c.id))),
-            [(1, 1, None), (2, None, "row 2"), (3, 3, "row 3"), (4, 4, None)],
+            ids,
+            set(
+                range(
+                    testing.db.dialect.default_sequence_base,
+                    testing.db.dialect.default_sequence_base + 4,
+                )
+            ),
         )
 
-    def test_autoincrement_autocommit(self):
-        self._test_autoincrement(testing.db)
-
-    def test_autoincrement_transaction(self):
-        with testing.db.begin() as conn:
-            self._test_autoincrement(conn)
-
-
-class EmptyInsertTest(fixtures.TestBase):
-    __backend__ = True
-
-    @testing.fails_on("oracle", "FIXME: unknown")
-    @testing.provide_metadata
-    def test_empty_insert(self, connection):
-        t1 = Table(
-            "t1",
-            self.metadata,
-            Column("is_true", Boolean, server_default=("1")),
-        )
-        self.metadata.create_all(connection)
-        connection.execute(t1.insert())
         eq_(
-            1,
-            connection.scalar(select([func.count(text("*"))]).select_from(t1)),
+            list(connection.execute(aitable.select().order_by(aitable.c.id))),
+            [
+                (testing.db.dialect.default_sequence_base, 1, None),
+                (testing.db.dialect.default_sequence_base + 1, None, "row 2"),
+                (testing.db.dialect.default_sequence_base + 2, 3, "row 3"),
+                (testing.db.dialect.default_sequence_base + 3, 4, None),
+            ],
         )
-        eq_(True, connection.scalar(t1.select()))
 
 
 class AutoIncrementTest(fixtures.TestBase):
-    __requires__ = ("identity",)
+
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_autoincrement_single_col(self, connection):
+    @testing.requires.empty_inserts
+    def test_autoincrement_single_col(self, metadata, connection):
         single = Table(
-            "single", self.metadata, Column("id", Integer, primary_key=True)
+            "single",
+            self.metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
         )
         self.metadata.create_all(connection)
 
         r = connection.execute(single.insert())
         id_ = r.inserted_primary_key[0]
         eq_(id_, 1)
-        eq_(connection.scalar(sa.select([single.c.id])), 1)
+        eq_(connection.scalar(sa.select(single.c.id)), 1)
 
     def test_autoinc_detection_no_affinity(self):
         class MyType(TypeDecorator):
             impl = TypeEngine
+            cache_ok = True
 
         assert MyType()._type_affinity is None
         t = Table("x", MetaData(), Column("id", MyType(), primary_key=True))
@@ -1163,6 +1161,7 @@ class AutoIncrementTest(fixtures.TestBase):
         )
         return dataset_no_autoinc
 
+    @testing.skip_if(testing.requires.sequences)
     def test_col_w_optional_sequence_non_autoinc_no_firing(
         self, dataset_no_autoinc, connection
     ):
@@ -1176,7 +1175,7 @@ class AutoIncrementTest(fixtures.TestBase):
         connection.execute(dataset_no_autoinc.insert())
         eq_(
             connection.scalar(
-                select([func.count("*")]).select_from(dataset_no_autoinc)
+                select(func.count("*")).select_from(dataset_no_autoinc)
             ),
             1,
         )
@@ -1194,7 +1193,7 @@ class AutoIncrementTest(fixtures.TestBase):
         connection.execute(dataset_no_autoinc.insert())
         eq_(
             connection.scalar(
-                select([func.count("*")]).select_from(dataset_no_autoinc)
+                select(func.count("*")).select_from(dataset_no_autoinc)
             ),
             1,
         )
@@ -1212,9 +1211,11 @@ class SpecialTypePKTest(fixtures.TestBase):
     __backend__ = True
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         class MyInteger(TypeDecorator):
             impl = Integer
+
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 if value is None:
@@ -1243,20 +1244,32 @@ class SpecialTypePKTest(fixtures.TestBase):
             implicit_returning=implicit_returning,
         )
 
-        with testing.db.connect() as conn:
+        with testing.db.begin() as conn:
             t.create(conn)
             r = conn.execute(t.insert().values(data=5))
+
+            expected_result = "INT_" + str(
+                testing.db.dialect.default_sequence_base
+                if (arg and isinstance(arg[0], Sequence))
+                else 1
+            )
 
             # we don't pre-fetch 'server_default'.
             if "server_default" in kw and (
                 not testing.db.dialect.implicit_returning
                 or not implicit_returning
             ):
-                eq_(r.inserted_primary_key, [None])
+                eq_(r.inserted_primary_key, (None,))
             else:
-                eq_(r.inserted_primary_key, ["INT_1"])
+                eq_(
+                    r.inserted_primary_key,
+                    (expected_result,),
+                )
 
-            eq_(conn.execute(t.select()).first(), ("INT_1", 5))
+            eq_(
+                conn.execute(t.select()).first(),
+                (expected_result, 5),
+            )
 
     def test_plain(self):
         # among other things, tests that autoincrement
@@ -1287,7 +1300,7 @@ class SpecialTypePKTest(fixtures.TestBase):
         self._run_test(server_default="1", autoincrement=False)
 
     def test_clause(self):
-        stmt = select([cast("INT_1", type_=self.MyInteger)]).as_scalar()
+        stmt = select(cast("INT_1", type_=self.MyInteger)).scalar_subquery()
         self._run_test(default=stmt)
 
     @testing.requires.returning
@@ -1325,7 +1338,7 @@ class ServerDefaultsOnPKTest(fixtures.TestBase):
         )
         metadata.create_all(connection)
         r = connection.execute(t.insert(), dict(data="data"))
-        eq_(r.inserted_primary_key, [None])
+        eq_(r.inserted_primary_key, (None,))
         eq_(list(connection.execute(t.select())), [("key_one", "data")])
 
     @testing.requires.returning
@@ -1345,7 +1358,7 @@ class ServerDefaultsOnPKTest(fixtures.TestBase):
         )
         metadata.create_all(connection)
         r = connection.execute(t.insert(), dict(data="data"))
-        eq_(r.inserted_primary_key, ["key_one"])
+        eq_(r.inserted_primary_key, ("key_one",))
         eq_(list(connection.execute(t.select())), [("key_one", "data")])
 
     @testing.provide_metadata
@@ -1361,7 +1374,7 @@ class ServerDefaultsOnPKTest(fixtures.TestBase):
         assert t._autoincrement_column is None
         metadata.create_all(connection)
         r = connection.execute(t.insert(), dict(data="data"))
-        eq_(r.inserted_primary_key, [None])
+        eq_(r.inserted_primary_key, (None,))
         if testing.against("sqlite"):
             eq_(list(connection.execute(t.select())), [(1, "data")])
         else:
@@ -1400,7 +1413,7 @@ class ServerDefaultsOnPKTest(fixtures.TestBase):
         t2 = Table("x", m2, autoload_with=connection, implicit_returning=False)
 
         r = connection.execute(t2.insert(), dict(data="data"))
-        eq_(r.inserted_primary_key, [None])
+        eq_(r.inserted_primary_key, (None,))
         if testing.against("sqlite"):
             eq_(list(connection.execute(t2.select())), [(1, "data")])
         else:
@@ -1419,7 +1432,7 @@ class ServerDefaultsOnPKTest(fixtures.TestBase):
 
         metadata.create_all(connection)
         r = connection.execute(t.insert(), dict(data="data"))
-        eq_(r.inserted_primary_key, [5])
+        eq_(r.inserted_primary_key, (5,))
         eq_(list(connection.execute(t.select())), [(5, "data")])
 
 
@@ -1435,7 +1448,7 @@ class UnicodeDefaultsTest(fixtures.TestBase):
 
     def test_nonunicode_default(self):
         default = b("foo")
-        assert_raises_message(
+        assert_warns_message(
             sa.exc.SAWarning,
             "Unicode column 'foobar' has non-unicode "
             "default value b?'foo' specified.",
@@ -1475,7 +1488,7 @@ class InsertFromSelectTest(fixtures.TablesTest):
 
         table.create(connection)
 
-        sel = select([data.c.x, data.c.y])
+        sel = select(data.c.x, data.c.y)
 
         ins = table.insert().from_select(["x", "y"], sel)
         connection.execute(ins)
@@ -1504,7 +1517,7 @@ class InsertFromSelectTest(fixtures.TablesTest):
 
         table.create(connection)
 
-        sel = select([data.c.x, data.c.y])
+        sel = select(data.c.x, data.c.y)
 
         ins = table.insert().from_select(["x", "y"], sel)
         connection.execute(ins)

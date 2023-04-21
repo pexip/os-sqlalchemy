@@ -33,6 +33,7 @@ Within this section, the goal is to try to provide background on some of the
 most common runtime errors as well as programming time errors.
 
 
+
 Connections and Transactions
 ============================
 
@@ -188,6 +189,20 @@ sooner.
  :ref:`connections_toplevel`
 
 
+.. _error_8s2b:
+
+Can't reconnect until invalid transaction is rolled back
+----------------------------------------------------------
+
+This error condition refers to the case where a :class:`_engine.Connection` was
+invalidated, either due to a database disconnect detection or due to an
+explicit call to :meth:`_engine.Connection.invalidate`, but there is still a
+transaction present that was initiated by the :meth:`_engine.Connection.begin`
+method.  When a connection is invalidated, any :class:`_engine.Transaction`
+that was in progress is now in an invalid state, and must be explicitly rolled
+back in order to remove it from the :class:`_engine.Connection`.
+
+
 .. _error_dbapi:
 
 DBAPI Errors
@@ -317,6 +332,95 @@ the database driver (DBAPI), not SQLAlchemy itself.
 
 SQL Expression Language
 =======================
+.. _error_cprf:
+.. _caching_caveats:
+
+Object will not produce a cache key, Performance Implications
+--------------------------------------------------------------
+
+SQLAlchemy as of version 1.4 includes a
+:ref:`SQL compilation caching facility <sql_caching>` which will allow
+Core and ORM SQL constructs to cache their stringified form, along with other
+structural information used to fetch results from the statement, allowing the
+relatively expensive string compilation process to be skipped when another
+structurally equivalent construct is next used. This system
+relies upon functionality that is implemented for all SQL constructs, including
+objects such as  :class:`_schema.Column`,
+:func:`_sql.select`, and :class:`_types.TypeEngine` objects, to produce a
+**cache key** which fully represents their state to the degree that it affects
+the SQL compilation process.
+
+If the warnings in question refer to widely used objects such as
+:class:`_schema.Column` objects, and are shown to be affecting the majority of
+SQL constructs being emitted (using the estimation techniques described at
+:ref:`sql_caching_logging`) such that caching is generally not enabled for an
+application, this will negatively impact performance and can in some cases
+effectively produce a **performance degradation** compared to prior SQLAlchemy
+versions. The FAQ at :ref:`faq_new_caching` covers this in additional detail.
+
+Caching disables itself if there's any doubt
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Caching relies on being able to generate a cache key that accurately represents
+the **complete structure** of a statement in a **consistent** fashion. If a particular
+SQL construct (or type) does not have the appropriate directives in place which
+allow it to generate a proper cache key, then caching cannot be safely enabled:
+
+* The cache key must represent the **complete structure**: If the usage of two
+  separate instances of that construct may result in different SQL being
+  rendered, caching the SQL against the first instance of the element using a
+  cache key that does not capture the distinct differences between the first and
+  second elements will result in incorrect SQL being cached and rendered for the
+  second instance.
+
+* The cache key must be **consistent**: If a construct represents state that
+  changes every time, such as a literal value, producing unique SQL for every
+  instance of it, this construct is also not safe to cache, as repeated use of
+  the construct will quickly fill up the statement cache with unique SQL strings
+  that will likely not be used again, defeating the purpose of the cache.
+
+For the above two reasons, SQLAlchemy's caching system is **extremely
+conservative** about deciding to cache the SQL corresponding to an object.
+
+Assertion attributes for caching
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The warning is emitted based on the criteria below.  For further detail on
+each, see the section :ref:`faq_new_caching`.
+
+* The :class:`.Dialect` itself (i.e. the module that is specified by the
+  first part of the URL we pass to :func:`_sa.create_engine`, like
+  ``postgresql+psycopg2://``), must indicate it has been reviewed and tested
+  to support caching correctly, which is indicated by the
+  :attr:`.Dialect.supports_statement_cache` attribute being set to ``True``.
+  When using third party dialects, consult with the maintainers of the dialect
+  so that they may follow the :ref:`steps to ensure caching may be enabled
+  <engine_thirdparty_caching>` in their dialect and publish a new release.
+
+* Third party or user defined types that inherit from either
+  :class:`.TypeDecorator` or :class:`.UserDefinedType` must include the
+  :attr:`.ExternalType.cache_ok` attribute in their definition, including for
+  all derived subclasses, following the guidelines described in the docstring
+  for :attr:`.ExternalType.cache_ok`. As before, if these datatypes are
+  imported from third party libraries, consult with the maintainers of that
+  library so that they may provide the necessary changes to their library and
+  publish a new release.
+
+* Third party or user defined SQL constructs that subclass from classes such
+  as :class:`.ClauseElement`, :class:`_schema.Column`, :class:`_dml.Insert`
+  etc, including simple subclasses as well as those which are designed to
+  work with the :ref:`sqlalchemy.ext.compiler_toplevel`, should normally
+  include the :attr:`.HasCacheKey.inherit_cache` attribute set to ``True``
+  or ``False`` based on the design of the construct, following the guidelines
+  described at :ref:`compilerext_caching`.
+
+.. seealso::
+
+    :ref:`sql_caching_logging` - background on observing cache behavior
+    and efficiency
+
+    :ref:`faq_new_caching` - in the :ref:`faq_toplevel` section
+
 
 .. _error_l7de:
 
@@ -337,7 +441,7 @@ Normally, a Core SQL construct or ORM :class:`_query.Query` object can be string
 directly, such as when we use ``print()``::
 
   >>> from sqlalchemy import column
-  >>> print(column('x') == 5)
+  >>> print(column("x") == 5)
   x = :x_1
 
 When the above SQL expression is stringified, the :class:`.StrSQLCompiler`
@@ -351,11 +455,9 @@ to turn into a string, such as the PostgreSQL
 
   >>> from sqlalchemy.dialects.postgresql import insert
   >>> from sqlalchemy import table, column
-  >>> my_table = table('my_table', column('x'), column('y'))
-  >>> insert_stmt = insert(my_table).values(x='foo')
-  >>> insert_stmt = insert_stmt.on_conflict_do_nothing(
-  ...     index_elements=['y']
-  ... )
+  >>> my_table = table("my_table", column("x"), column("y"))
+  >>> insert_stmt = insert(my_table).values(x="foo")
+  >>> insert_stmt = insert_stmt.on_conflict_do_nothing(index_elements=["y"])
   >>> print(insert_stmt)
   Traceback (most recent call last):
 
@@ -397,14 +499,12 @@ This often occurs when attempting to use a :func:`.column_property` or
 declarative such as::
 
     class Bar(Base):
-        __tablename__ = 'bar'
+        __tablename__ = "bar"
 
         id = Column(Integer, primary_key=True)
         cprop = deferred(Column(Integer))
 
-        __table_args__ = (
-            CheckConstraint(cprop > 5),
-        )
+        __table_args__ = (CheckConstraint(cprop > 5),)
 
 Above, the ``cprop`` attribute is used inline before it has been mapped,
 however this ``cprop`` attribute is not a :class:`_schema.Column`,
@@ -423,57 +523,12 @@ The solution is to access the :class:`_schema.Column` directly using the
 :attr:`.ColumnProperty.expression` attribute::
 
     class Bar(Base):
-        __tablename__ = 'bar'
+        __tablename__ = "bar"
 
         id = Column(Integer, primary_key=True)
         cprop = deferred(Column(Integer))
 
-        __table_args__ = (
-            CheckConstraint(cprop.expression > 5),
-        )
-
-
-.. _error_2afi:
-
-This Compiled object is not bound to any Engine or Connection
--------------------------------------------------------------
-
-This error refers to the concept of "bound metadata", described at
-:ref:`dbengine_implicit`.   The issue occurs when one invokes the
-:meth:`.Executable.execute` method directly off of a Core expression object
-that is not associated with any :class:`_engine.Engine`::
-
- metadata = MetaData()
- table = Table('t', metadata, Column('q', Integer))
-
- stmt = select([table])
- result = stmt.execute()   # <--- raises
-
-What the logic is expecting is that the :class:`_schema.MetaData` object has
-been **bound** to a :class:`_engine.Engine`::
-
- engine = create_engine("mysql+pymysql://user:pass@host/db")
- metadata = MetaData(bind=engine)
-
-Where above, any statement that derives from a :class:`_schema.Table` which
-in turn derives from that :class:`_schema.MetaData` will implicitly make use of
-the given :class:`_engine.Engine` in order to invoke the statement.
-
-Note that the concept of bound metadata is a **legacy pattern** and in most
-cases is **highly discouraged**.   The best way to invoke the statement is
-to pass it to the :meth:`_engine.Connection.execute` method of a :class:`_engine.Connection`::
-
- with engine.connect() as conn:
-   result = conn.execute(stmt)
-
-When using the ORM, a similar facility is available via the :class:`.Session`::
-
- result = session.execute(stmt)
-
-.. seealso::
-
- :ref:`dbengine_implicit`
-
+        __table_args__ = (CheckConstraint(cprop.expression > 5),)
 
 .. _error_cd3x:
 
@@ -484,7 +539,7 @@ This error occurs when a statement makes use of :func:`.bindparam` either
 implicitly or explicitly and does not provide a value when the statement
 is executed::
 
- stmt = select([table.c.column]).where(table.c.id == bindparam('my_param'))
+ stmt = select(table.c.column).where(table.c.id == bindparam("my_param"))
 
  result = conn.execute(stmt)
 
@@ -531,18 +586,249 @@ this error is generated::
 Since "b" is required, pass it as ``None`` so that the INSERT may proceed::
 
  e.execute(
-     t.insert(), [
+     t.insert(),
+     [
          {"a": 1, "b": 2, "c": 3},
          {"a": 2, "b": None, "c": 4},
          {"a": 3, "b": 4, "c": 5},
-     ]
+     ],
  )
 
 .. seealso::
 
- :ref:`coretutorial_bind_param`
+  :ref:`tutorial_sending_parameters`
 
- :ref:`execute_multiple`
+.. _error_89ve:
+
+Expected FROM clause, got Select.  To create a FROM clause, use the .subquery() method
+--------------------------------------------------------------------------------------
+
+This refers to a change made as of SQLAlchemy 1.4 where a SELECT statement as generated
+by a function such as :func:`_expression.select`, but also including things like unions and textual
+SELECT expressions are no longer considered to be :class:`_expression.FromClause` objects and
+can't be placed directly in the FROM clause of another SELECT statement without them
+being wrapped in a :class:`.Subquery` first.   This is a major conceptual change in the
+Core and the full rationale is discussed at :ref:`change_4617`.
+
+Given an example as::
+
+    m = MetaData()
+    t = Table("t", m, Column("a", Integer), Column("b", Integer), Column("c", Integer))
+    stmt = select(t)
+
+Above, ``stmt`` represents a SELECT statement.  The error is produced when we want
+to use ``stmt`` directly as a FROM clause in another SELECT, such as if we
+attempted to select from it::
+
+    new_stmt_1 = select(stmt)
+
+Or if we wanted to use it in a FROM clause such as in a JOIN::
+
+    new_stmt_2 = select(some_table).select_from(some_table.join(stmt))
+
+In previous versions of SQLAlchemy, using a SELECT inside of another SELECT
+would produce a parenthesized, unnamed subquery.   In most cases, this form of
+SQL is not very useful as databases like MySQL and PostgreSQL require that
+subqueries in FROM clauses have named aliases, which means using the
+:meth:`_expression.SelectBase.alias` method or as of 1.4 using the
+:meth:`_expression.SelectBase.subquery` method to produce this.   On other databases, it
+is still much clearer for the subquery to have a name to resolve any ambiguity
+on future references to column  names inside the subquery.
+
+Beyond the above practical reasons, there are a lot of other SQLAlchemy-oriented
+reasons the change is being made.  The correct form of the above two statements
+therefore requires that :meth:`_expression.SelectBase.subquery` is used::
+
+    subq = stmt.subquery()
+
+    new_stmt_1 = select(subq)
+
+    new_stmt_2 = select(some_table).select_from(some_table.join(subq))
+
+.. seealso::
+
+  :ref:`change_4617`
+
+.. _error_xaj1:
+
+An alias is being generated automatically for raw clauseelement
+----------------------------------------------------------------
+
+.. versionadded:: 1.4.26
+
+This deprecation warning refers to a very old and likely not well known pattern
+that applies to the legacy :meth:`_orm.Query.join` method as well as the
+:term:`2.0 style` :meth:`_sql.Select.join` method, where a join can be stated
+in terms of a :func:`_orm.relationship` but the target is the
+:class:`_schema.Table` or other Core selectable to which the class is mapped,
+rather than an ORM entity such as a mapped class or :func:`_orm.aliased`
+construct::
+
+    a1 = Address.__table__
+
+    q = (
+        s.query(User)
+        .join(a1, User.addresses)
+        .filter(Address.email_address == "ed@foo.com")
+        .all()
+    )
+
+The above pattern also allows an arbitrary selectable, such as
+a Core :class:`_sql.Join` or :class:`_sql.Alias` object,
+however there is no automatic adaptation of this element, meaning the
+Core element would need to be referred towards directly::
+
+    a1 = Address.__table__.alias()
+
+    q = (
+        s.query(User)
+        .join(a1, User.addresses)
+        .filter(a1.c.email_address == "ed@foo.com")
+        .all()
+    )
+
+The correct way to specify a join target is always by using the mapped
+class itself or an :class:`_orm.aliased` object, in the latter case using the
+:meth:`_orm.PropComparator.of_type` modifier to set up an alias::
+
+    # normal join to relationship entity
+    q = s.query(User).join(User.addresses).filter(Address.email_address == "ed@foo.com")
+
+    # name Address target explicitly, not necessary but legal
+    q = (
+        s.query(User)
+        .join(Address, User.addresses)
+        .filter(Address.email_address == "ed@foo.com")
+    )
+
+Join to an alias::
+
+    from sqlalchemy.orm import aliased
+
+    a1 = aliased(Address)
+
+    # of_type() form; recommended
+    q = (
+        s.query(User)
+        .join(User.addresses.of_type(a1))
+        .filter(a1.email_address == "ed@foo.com")
+    )
+
+    # target, onclause form
+    q = s.query(User).join(a1, User.addresses).filter(a1.email_address == "ed@foo.com")
+
+.. _error_xaj2:
+
+An alias is being generated automatically due to overlapping tables
+-------------------------------------------------------------------
+
+.. versionadded:: 1.4.26
+
+This warning is typically generated when querying using the
+:meth:`_sql.Select.join` method or the legacy :meth:`_orm.Query.join` method
+with mappings that involve joined table inheritance. The issue is that when
+joining between two joined inheritance models that share a common base table, a
+proper SQL JOIN between the two entities cannot be formed without applying an
+alias to one side or the other; SQLAlchemy applies an alias to the right side
+of the join. For example given a joined inheritance mapping as::
+
+    class Employee(Base):
+        __tablename__ = "employee"
+        id = Column(Integer, primary_key=True)
+        manager_id = Column(ForeignKey("manager.id"))
+        name = Column(String(50))
+        type = Column(String(50))
+
+        reports_to = relationship("Manager", foreign_keys=manager_id)
+
+        __mapper_args__ = {
+            "polymorphic_identity": "employee",
+            "polymorphic_on": type,
+        }
+
+
+    class Manager(Employee):
+        __tablename__ = "manager"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
+
+        __mapper_args__ = {
+            "polymorphic_identity": "manager",
+            "inherit_condition": id == Employee.id,
+        }
+
+The above mapping includes a relationship between the ``Employee`` and
+``Manager`` classes.  Since both classes make use of the "employee" database
+table, from a SQL perspective this is a
+:ref:`self referential relationship <self_referential>`.  If we wanted to
+query from both the ``Employee`` and ``Manager`` models using a join, at the
+SQL level the "employee" table needs to be included twice in the query, which
+means it must be aliased.   When we create such a join using the SQLAlchemy
+ORM, we get SQL that looks like the following:
+
+.. sourcecode:: pycon+sql
+
+    >>> stmt = select(Employee, Manager).join(Employee.reports_to)
+    >>> print(stmt)
+    {opensql}SELECT employee.id, employee.manager_id, employee.name,
+    employee.type, manager_1.id AS id_1, employee_1.id AS id_2,
+    employee_1.manager_id AS manager_id_1, employee_1.name AS name_1,
+    employee_1.type AS type_1
+    FROM employee JOIN
+    (employee AS employee_1 JOIN manager AS manager_1 ON manager_1.id = employee_1.id)
+    ON manager_1.id = employee.manager_id
+
+Above, the SQL selects FROM the ``employee`` table, representing the
+``Employee`` entity in the query. It then joins to a right-nested join of
+``employee AS employee_1 JOIN manager AS manager_1``, where the ``employee``
+table is stated again, except as an anonymous alias ``employee_1``. This is the
+"automatic generation of an alias" that the warning message refers towards.
+
+When SQLAlchemy loads ORM rows that each contain an ``Employee`` and a
+``Manager`` object, the ORM must adapt rows from what above is the
+``employee_1`` and ``manager_1`` table aliases into those of the un-aliased
+``Manager`` class. This process is internally complex and does not accommodate
+for all API features, notably when trying to use eager loading features such as
+:func:`_orm.contains_eager` with more deeply nested queries than are shown
+here.  As the pattern is unreliable for more complex scenarios and involves
+implicit decisionmaking that is difficult to anticipate and follow,
+the warning is emitted and this pattern may be considered a legacy feature. The
+better way to write this query is to use the same patterns that apply to any
+other self-referential relationship, which is to use the :func:`_orm.aliased`
+construct explicitly.  For joined-inheritance and other join-oriented mappings,
+it is usually desirable to add the use of the :paramref:`_orm.aliased.flat`
+parameter, which will allow a JOIN of two or more tables to be aliased by
+applying an alias to the individual tables within the join, rather than
+embedding the join into a new subquery:
+
+.. sourcecode:: pycon+sql
+
+    >>> from sqlalchemy.orm import aliased
+    >>> manager_alias = aliased(Manager, flat=True)
+    >>> stmt = select(Employee, manager_alias).join(Employee.reports_to.of_type(manager_alias))
+    >>> print(stmt)
+    {opensql}SELECT employee.id, employee.manager_id, employee.name,
+    employee.type, manager_1.id AS id_1, employee_1.id AS id_2,
+    employee_1.manager_id AS manager_id_1, employee_1.name AS name_1,
+    employee_1.type AS type_1
+    FROM employee JOIN
+    (employee AS employee_1 JOIN manager AS manager_1 ON manager_1.id = employee_1.id)
+    ON manager_1.id = employee.manager_id
+
+If we then wanted to use :func:`_orm.contains_eager` to populate the
+``reports_to`` attribute, we refer to the alias::
+
+    >>> stmt = (
+    ...     select(Employee)
+    ...     .join(Employee.reports_to.of_type(manager_alias))
+    ...     .options(contains_eager(Employee.reports_to.of_type(manager_alias)))
+    ... )
+
+Without using the explicit :func:`_orm.aliased` object, in some more nested
+cases the :func:`_orm.contains_eager` option does not have enough context to
+know where to get its data from, in the case that the ORM is "auto-aliasing"
+in a very nested context.  Therefore it's best not to rely on this feature
+and instead keep the SQL construction as explicit as possible.
+
 
 Object Relational Mapping
 =========================
@@ -577,9 +863,9 @@ method.   The objects will then live on to be accessed further, very often
 within web applications where they are delivered to a server-side templating
 engine and are asked for further attributes which they cannot load.
 
-Mitigation of this error is via two general techniques:
+Mitigation of this error is via these techniques:
 
-* **Don't close the session prematurely** - Often, applications will close
+* **Try not to have detached objects; don't close the session prematurely** - Often, applications will close
   out a transaction before passing off related objects to some other system
   which then fails due to this error.   Sometimes the transaction doesn't need
   to be closed so soon; an example is the web application closes out
@@ -591,20 +877,26 @@ Mitigation of this error is via two general techniques:
   :class:`.Session` can be held open until the lifespan of the objects are done,
   this is the best approach.
 
-* **Load everything that's needed up front** - It is very often impossible to
+* **Otherwise, load everything that's needed up front** - It is very often impossible to
   keep the transaction open, especially in more complex applications that need
   to pass objects off to other systems that can't run in the same context
   even though they're in the same process.  In this case, the application
-  should try to make appropriate use of :term:`eager loading` to ensure
+  should prepare to deal with :term:`detached` objects,
+  and should try to make appropriate use of :term:`eager loading` to ensure
   that objects have what they need up front.
 
-  When using this approach, it is usually necessary that the
-  :paramref:`_orm.Session.expire_on_commit` parameter be set to ``False``, so
-  that after a :meth:`_orm.Session.commit` operation, the objects within the
-  session aren't :term:`expired`, which would incur a lazy load if their
-  attributes were subsequently accessed.  Additionally, the
-  :meth:`_orm.Session.rollback` method unconditionally expires all contents in
-  the :class:`_orm.Session` and should also be avoided in non-error scenarios.
+* **And importantly, set expire_on_commit to False** - When using detached objects, the
+  most common reason objects need to re-load data is because they were expired
+  from the last call to :meth:`_orm.Session.commit`.   This expiration should
+  not be used when dealing with detached objects; so the
+  :paramref:`_orm.Session.expire_on_commit` parameter be set to ``False``.
+  By preventing the objects from becoming expired outside of the transaction,
+  the data which was loaded will remain present and will not incur additional
+  lazy loads when that data is accessed.
+
+  Note also that :meth:`_orm.Session.rollback` method unconditionally expires
+  all contents in the :class:`_orm.Session` and should also be avoided in
+  non-error scenarios.
 
   .. seealso::
 
@@ -614,6 +906,7 @@ Mitigation of this error is via two general techniques:
     :ref:`session_committing` - background on session commit
 
     :ref:`session_expire` - background on attribute expiry
+
 
 
 .. _error_7s2a:
@@ -659,6 +952,7 @@ is set on a many-to-one or many-to-many relationship, such as::
         # this will emit the error message when the mapper
         # configuration step occurs
         a = relationship("A", back_populates="bs", cascade="all, delete-orphan")
+
 
     configure_mappers()
 
@@ -856,6 +1150,230 @@ message for details.
 
     :ref:`error_bbf0`
 
+
+.. _error_qzyx:
+
+relationship X will copy column Q to column P, which conflicts with relationship(s): 'Y'
+----------------------------------------------------------------------------------------
+
+This warning refers to the case when two or more relationships will write data
+to the same columns on flush, but the ORM does not have any means of
+coordinating these relationships together. Depending on specifics, the solution
+may be that two relationships need to be referred towards one another using
+:paramref:`_orm.relationship.back_populates`, or that one or more of the
+relationships should be configured with :paramref:`_orm.relationship.viewonly`
+to prevent conflicting writes, or sometimes that the configuration is fully
+intentional and should configure :paramref:`_orm.relationship.overlaps` to
+silence each warning.
+
+For the typical example that's missing
+:paramref:`_orm.relationship.back_populates`, given the following mapping::
+
+  class Parent(Base):
+      __tablename__ = "parent"
+      id = Column(Integer, primary_key=True)
+      children = relationship("Child")
+
+
+  class Child(Base):
+      __tablename__ = "child"
+      id = Column(Integer, primary_key=True)
+      parent_id = Column(ForeignKey("parent.id"))
+      parent = relationship("Parent")
+
+The above mapping will generate warnings::
+
+  SAWarning: relationship 'Child.parent' will copy column parent.id to column child.parent_id,
+  which conflicts with relationship(s): 'Parent.children' (copies parent.id to child.parent_id).
+
+The relationships ``Child.parent`` and ``Parent.children`` appear to be in conflict.
+The solution is to apply :paramref:`_orm.relationship.back_populates`::
+
+  class Parent(Base):
+      __tablename__ = "parent"
+      id = Column(Integer, primary_key=True)
+      children = relationship("Child", back_populates="parent")
+
+
+  class Child(Base):
+      __tablename__ = "child"
+      id = Column(Integer, primary_key=True)
+      parent_id = Column(ForeignKey("parent.id"))
+      parent = relationship("Parent", back_populates="children")
+
+For more customized relationships where an "overlap" situation may be
+intentional and cannot be resolved, the :paramref:`_orm.relationship.overlaps`
+parameter may specify the names of relationships for which the warning should
+not take effect. This typically occurs for two or more relationships to the
+same underlying table that include custom
+:paramref:`_orm.relationship.primaryjoin` conditions that limit the related
+items in each case::
+
+  class Parent(Base):
+      __tablename__ = "parent"
+      id = Column(Integer, primary_key=True)
+      c1 = relationship(
+          "Child",
+          primaryjoin="and_(Parent.id == Child.parent_id, Child.flag == 0)",
+          backref="parent",
+          overlaps="c2, parent",
+      )
+      c2 = relationship(
+          "Child",
+          primaryjoin="and_(Parent.id == Child.parent_id, Child.flag == 1)",
+          overlaps="c1, parent",
+      )
+
+
+  class Child(Base):
+      __tablename__ = "child"
+      id = Column(Integer, primary_key=True)
+      parent_id = Column(ForeignKey("parent.id"))
+
+      flag = Column(Integer)
+
+Above, the ORM will know that the overlap between ``Parent.c1``,
+``Parent.c2`` and ``Child.parent`` is intentional.
+
+.. _error_lkrp:
+
+Object cannot be converted to 'persistent' state, as this identity map is no longer valid.
+-------------------------------------------------------------------------------------------
+
+.. versionadded:: 1.4.26
+
+This message was added to accommodate for the case where a
+:class:`_result.Result` object that would yield ORM objects is iterated after
+the originating :class:`_orm.Session` has been closed, or otherwise had its
+:meth:`_orm.Session.expunge_all` method called. When a :class:`_orm.Session`
+expunges all objects at once, the internal :term:`identity map` used by that
+:class:`_orm.Session` is replaced with a new one, and the original one
+discarded. An unconsumed and unbuffered :class:`_result.Result` object will
+internally maintain a reference to that now-discarded identity map. Therefore,
+when the :class:`_result.Result` is consumed, the objects that would be yielded
+cannot be associated with that :class:`_orm.Session`. This arrangement is by
+design as it is generally not recommended to iterate an unbuffered
+:class:`_result.Result` object outside of the transactional context in which it
+was created::
+
+    # context manager creates new Session
+    with Session(engine) as session_obj:
+        result = sess.execute(select(User).where(User.id == 7))
+
+    # context manager is closed, so session_obj above is closed, identity
+    # map is replaced
+
+    # iterating the result object can't associate the object with the
+    # Session, raises this error.
+    user = result.first()
+
+The above situation typically will **not** occur when using the ``asyncio``
+ORM extension, as when :class:`.AsyncSession` returns a sync-style
+:class:`_result.Result`, the results have been pre-buffered when the statement
+was executed.  This is to allow secondary eager loaders to invoke without needing
+an additional ``await`` call.
+
+To pre-buffer results in the above situation using the regular
+:class:`_orm.Session` in the same way that the ``asyncio`` extension does it,
+the ``prebuffer_rows`` execution option may be used as follows::
+
+    # context manager creates new Session
+    with Session(engine) as session_obj:
+
+        # result internally pre-fetches all objects
+        result = sess.execute(
+            select(User).where(User.id == 7), execution_options={"prebuffer_rows": True}
+        )
+
+    # context manager is closed, so session_obj above is closed, identity
+    # map is replaced
+
+    # pre-buffered objects are returned
+    user = result.first()
+
+    # however they are detached from the session, which has been closed
+    assert inspect(user).detached
+    assert inspect(user).session is None
+
+Above, the selected ORM objects are fully generated within the ``session_obj``
+block, associated with ``session_obj`` and buffered within the
+:class:`_result.Result` object for iteration. Outside the block,
+``session_obj`` is closed and expunges these ORM objects. Iterating the
+:class:`_result.Result` object will yield those ORM objects, however as their
+originating :class:`_orm.Session` has expunged them, they will be delivered in
+the :term:`detached` state.
+
+.. note:: The above reference to a "pre-buffered" vs. "un-buffered"
+   :class:`_result.Result` object refers to the process by which the ORM
+   converts incoming raw database rows from the :term:`DBAPI` into ORM
+   objects.  It does not imply whether or not the underyling ``cursor``
+   object itself, which represents pending results from the DBAPI, is itself
+   buffered or unbuffered, as this is essentially a lower layer of buffering.
+   For background on buffering of the ``cursor`` results itself, see the
+   section :ref:`engine_stream_results`.
+
+
+AsyncIO Exceptions
+==================
+
+.. _error_xd1r:
+
+AwaitRequired
+-------------
+
+The SQLAlchemy async mode requires an async driver to be used to connect to the db.
+This error is usually raised when trying to use the async version of SQLAlchemy
+with a non compatible :term:`DBAPI`.
+
+.. seealso::
+
+    :ref:`asyncio_toplevel`
+
+.. _error_xd2s:
+
+MissingGreenlet
+---------------
+
+A call to the async :term:`DBAPI` was initiated outside the greenlet spawn
+context usually setup by the SQLAlchemy AsyncIO proxy classes. Usually this
+error happens when an IO was attempted in an unexpected place, without using
+the provided async api. When using the ORM this may be due to a lazy loading
+attempt, which is unsupported when using SQLAlchemy with AsyncIO dialects.
+
+.. seealso::
+
+    :ref:`asyncio_orm_avoid_lazyloads` - covers most ORM scenarios where
+    this problem can occur and how to mitigate.
+
+.. _error_xd3s:
+
+No Inspection Available
+-----------------------
+
+Using the :func:`_sa.inspect` function directly on an
+:class:`_asyncio.AsyncConnection` or :class:`_asyncio.AsyncEngine` object is
+not currently supported, as there is not yet an awaitable form of the
+:class:`_reflection.Inspector` object available. Instead, the object
+is used by acquiring it using the
+:func:`_sa.inspect` function in such a way that it refers to the underlying
+:attr:`_asyncio.AsyncConnection.sync_connection` attribute of the
+:class:`_asyncio.AsyncConnection` object; the :class:`_engine.Inspector` is
+then used in a "synchronous" calling style by using the
+:meth:`_asyncio.AsyncConnection.run_sync` method along with a custom function
+that performs the desired operations::
+
+    async def async_main():
+        async with engine.connect() as conn:
+            tables = await conn.run_sync(
+                lambda sync_conn: inspect(sync_conn).get_table_names()
+            )
+
+.. seealso::
+
+    :ref:`asyncio_inspector` - additional examples of using :func:`_sa.inspect`
+    with the asyncio extension.
+
+
 Core Exception Classes
 ======================
 
@@ -866,6 +1384,272 @@ ORM Exception Classes
 ======================
 
 See :ref:`orm_exceptions_toplevel` for ORM exception classes.
+
+
+
+Legacy Exceptions
+=================
+
+Exceptions in this section are not generated by current SQLAlchemy
+versions, however are provided here to suit exception message hyperlinks.
+
+.. _error_b8d9:
+
+The <some function> in SQLAlchemy 2.0 will no longer <something>
+--------------------------------------------------------------------------------------------
+
+SQLAlchemy 2.0 represents a major shift for a wide variety of key
+SQLAlchemy usage patterns in both the Core and ORM components.   The goal
+of the 2.0 release is to make a slight readjustment in some of the most
+fundamental assumptions of SQLAlchemy since its early beginnings, and
+to deliver a newly streamlined usage model that is hoped to be significantly
+more minimalist and consistent between the Core and ORM components, as well as
+more capable.
+
+Introduced at :ref:`migration_20_toplevel`, the SQLAlchemy 2.0 project includes
+a comprehensive future compatibility system that's integrated into the
+1.4 series of SQLAlchemy, such that applications will have a clear,
+unambiguous, and incremental upgrade path in order to migrate applications to
+being fully 2.0 compatible.   The :class:`.exc.RemovedIn20Warning` deprecation
+warning is at the base of this system to provide guidance on what behaviors in
+an existing codebase will need to be modified.  An overview of how to enable
+this warning is at :ref:`deprecation_20_mode`.
+
+.. seealso::
+
+    :ref:`migration_20_toplevel`  - An overview of the upgrade process from
+    the 1.x series, as well as the current goals and progress of SQLAlchemy
+    2.0.
+
+
+    :ref:`deprecation_20_mode` - specific guidelines on how to use
+    "2.0 deprecations mode" in SQLAlchemy 1.4.
+
+
+.. _error_s9r1:
+
+Object is being merged into a Session along the backref cascade
+---------------------------------------------------------------
+
+This message refers to the "backref cascade" behavior of SQLAlchemy,
+removed in version 2.0.  This refers to the action of
+an object being added into a :class:`_orm.Session` as a result of another
+object that's already present in that session being associated with it.
+As this behavior has been shown to be more confusing than helpful,
+the :paramref:`_orm.relationship.cascade_backrefs` and
+:paramref:`_orm.backref.cascade_backrefs` parameters were added, which can
+be set to ``False`` to disable it, and in SQLAlchemy 2.0 the "cascade backrefs"
+behavior has been removed entirely.
+
+For older SQLAlchemy versions, to set
+:paramref:`_orm.relationship.cascade_backrefs` to ``False`` on a backref that
+is currently configured using the :paramref:`_orm.relationship.backref` string
+parameter, the backref must be declared using the :func:`_orm.backref` function
+first so that the :paramref:`_orm.backref.cascade_backrefs` parameter may be
+passed.
+
+Alternatively, the entire "cascade backrefs" behavior can be turned off
+across the board by using the :class:`_orm.Session` in "future" mode,
+by passing ``True`` for the :paramref:`_orm.Session.future` parameter.
+
+.. seealso::
+
+    :ref:`change_5150` - background on the change for SQLAlchemy 2.0.
+
+
+.. _error_c9ae:
+
+select() construct created in "legacy" mode; keyword arguments, etc.
+--------------------------------------------------------------------
+
+The :func:`_expression.select` construct has been updated as of SQLAlchemy
+1.4 to support the newer calling style that is standard in
+SQLAlchemy 2.0.   For backwards compatibility within
+the 1.4 series, the construct accepts arguments in both the "legacy" style as well
+as the "new" style.
+
+The "new" style features that column and table expressions are passed
+positionally to the :func:`_expression.select` construct only; any other
+modifiers to the object must be passed using subsequent method chaining::
+
+    # this is the way to do it going forward
+    stmt = select(table1.c.myid).where(table1.c.myid == table2.c.otherid)
+
+For comparison, a :func:`_expression.select` in legacy forms of SQLAlchemy,
+before methods like :meth:`.Select.where` were even added, would like::
+
+    # this is how it was documented in original SQLAlchemy versions
+    # many years ago
+    stmt = select([table1.c.myid], whereclause=table1.c.myid == table2.c.otherid)
+
+Or even that the "whereclause" would be passed positionally::
+
+    # this is also how it was documented in original SQLAlchemy versions
+    # many years ago
+    stmt = select([table1.c.myid], table1.c.myid == table2.c.otherid)
+
+For some years now, the additional "whereclause" and other arguments that are
+accepted have been removed from most narrative documentation, leading to a
+calling style that is most familiar as the list of column arguments passed
+as a list, but no further arguments::
+
+    # this is how it's been documented since around version 1.0 or so
+    stmt = select([table1.c.myid]).where(table1.c.myid == table2.c.otherid)
+
+The document at :ref:`migration_20_5284` describes this change in terms
+of :ref:`2.0 Migration <migration_20_toplevel>`.
+
+.. seealso::
+
+    :ref:`migration_20_5284`
+
+    :ref:`migration_20_toplevel`
+
+.. _error_c9bf:
+
+A bind was located via legacy bound metadata, but since future=True is set on this Session, this bind is ignored.
+-------------------------------------------------------------------------------------------------------------------
+
+The concept of "bound metadata" is present up until SQLAlchemy 1.4; as
+of SQLAlchemy 2.0 it's been removed.
+
+This error refers to the :paramref:`_schema.MetaData.bind` parameter on the
+:class:`_schema.MetaData` object that in turn allows objects like the ORM
+:class:`_orm.Session` to associate a particular mapped class with an
+:class:`_orm.Engine`. In SQLAlchemy 2.0, the :class:`_orm.Session` must be
+linked to each :class:`_orm.Engine` directly. That is, instead of instantiating
+the :class:`_orm.Session` or :class:`_orm.sessionmaker` without any arguments,
+and associating the :class:`_engine.Engine` with the
+:class:`_schema.MetaData`::
+
+    engine = create_engine("sqlite://")
+    Session = sessionmaker()
+    metadata_obj = MetaData(bind=engine)
+    Base = declarative_base(metadata=metadata_obj)
+
+    class MyClass(Base):
+        # ...
+
+
+    session = Session()
+    session.add(MyClass())
+    session.commit()
+
+The :class:`_engine.Engine` must instead be associated directly with the
+:class:`_orm.sessionmaker` or :class:`_orm.Session`.  The
+:class:`_schema.MetaData` object should no longer be associated with any
+engine::
+
+
+    engine = create_engine("sqlite://")
+    Session = sessionmaker(engine)
+    Base = declarative_base()
+
+    class MyClass(Base):
+        # ...
+
+
+    session = Session()
+    session.add(MyClass())
+    session.commit()
+
+In SQLAlchemy 1.4, this :term:`2.0 style` behavior is enabled when the
+:paramref:`_orm.Session.future` flag is set on :class:`_orm.sessionmaker`
+or :class:`_orm.Session`.
+
+
+.. _error_2afi:
+
+This Compiled object is not bound to any Engine or Connection
+-------------------------------------------------------------
+
+This error refers to the concept of "bound metadata", which is a legacy
+SQLAlchemy pattern present only in 1.x versions. The issue occurs when one invokes
+the :meth:`.Executable.execute` method directly off of a Core expression object
+that is not associated with any :class:`_engine.Engine`::
+
+ metadata_obj = MetaData()
+ table = Table("t", metadata_obj, Column("q", Integer))
+
+ stmt = select(table)
+ result = stmt.execute()  # <--- raises
+
+What the logic is expecting is that the :class:`_schema.MetaData` object has
+been **bound** to a :class:`_engine.Engine`::
+
+ engine = create_engine("mysql+pymysql://user:pass@host/db")
+ metadata_obj = MetaData(bind=engine)
+
+Where above, any statement that derives from a :class:`_schema.Table` which
+in turn derives from that :class:`_schema.MetaData` will implicitly make use of
+the given :class:`_engine.Engine` in order to invoke the statement.
+
+Note that the concept of bound metadata is **not present in SQLAlchemy 2.0**.
+The correct way to invoke statements is via
+the :meth:`_engine.Connection.execute` method of a :class:`_engine.Connection`::
+
+ with engine.connect() as conn:
+     result = conn.execute(stmt)
+
+When using the ORM, a similar facility is available via the :class:`.Session`::
+
+ result = session.execute(stmt)
+
+.. seealso::
+
+    :ref:`tutorial_statement_execution`
+
+.. _error_8s2a:
+
+This connection is on an inactive transaction.  Please rollback() fully before proceeding
+------------------------------------------------------------------------------------------
+
+This error condition was added to SQLAlchemy as of version 1.4, and does not
+apply to SQLAlchemy 2.0.    The error
+refers to the state where a :class:`_engine.Connection` is placed into a
+transaction using a method like :meth:`_engine.Connection.begin`, and then a
+further "marker" transaction is created within that scope; the "marker"
+transaction is then rolled back using :meth:`.Transaction.rollback` or closed
+using :meth:`.Transaction.close`, however the outer transaction is still
+present in an "inactive" state and must be rolled back.
+
+The pattern looks like::
+
+    engine = create_engine(...)
+
+    connection = engine.connect()
+    transaction1 = connection.begin()
+
+    # this is a "sub" or "marker" transaction, a logical nesting
+    # structure based on "real" transaction transaction1
+    transaction2 = connection.begin()
+    transaction2.rollback()
+
+    # transaction1 is still present and needs explicit rollback,
+    # so this will raise
+    connection.execute(text("select 1"))
+
+Above, ``transaction2`` is a "marker" transaction, which indicates a logical
+nesting of transactions within an outer one; while the inner transaction
+can roll back the whole transaction via its rollback() method, its commit()
+method has no effect except to close the scope of the "marker" transaction
+itself.   The call to ``transaction2.rollback()`` has the effect of
+**deactivating** transaction1 which means it is essentially rolled back
+at the database level, however is still present in order to accommodate
+a consistent nesting pattern of transactions.
+
+The correct resolution is to ensure the outer transaction is also
+rolled back::
+
+    transaction1.rollback()
+
+This pattern is not commonly used in Core.  Within the ORM, a similar issue can
+occur which is the product of the ORM's "logical" transaction structure; this
+is described in the FAQ entry at :ref:`faq_session_rollback`.
+
+The "subtransaction" pattern is removed in SQLAlchemy 2.0 so that this
+particular programming pattern is no longer be available, preventing
+this error message.
 
 
 

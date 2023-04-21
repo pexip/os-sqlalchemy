@@ -2,10 +2,10 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import util
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import config
 from sqlalchemy.testing import fixtures
@@ -53,6 +53,8 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
     run_inserts = "once"
     run_setup_mappers = "once"
     run_deletes = None
+
+    label_style = LABEL_STYLE_TABLENAME_PLUS_COL
 
     @classmethod
     def define_tables(cls, metadata):
@@ -219,11 +221,9 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
         cls.c2 = c2 = Company(name="Elbonia, Inc.")
         c2.employees = [e3]
 
-        sess = create_session(connection)
-        sess.add(c1)
-        sess.add(c2)
-        sess.flush()
-        sess.expunge_all()
+        with sessionmaker(connection, expire_on_commit=False).begin() as sess:
+            sess.add(c1)
+            sess.add(c2)
 
         cls.all_employees = [e1, e2, b1, m1, e3]
         cls.c1_employees = [e1, e2, b1, m1]
@@ -316,7 +316,7 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper(
             Company,
             companies,
             properties={
@@ -324,14 +324,14 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
             },
         )
 
-        mapper(Machine, machines)
+        cls.mapper(Machine, machines)
 
         (
             person_with_polymorphic,
             manager_with_polymorphic,
         ) = cls._get_polymorphics()
 
-        mapper(
+        cls.mapper(
             Person,
             people,
             with_polymorphic=person_with_polymorphic,
@@ -344,19 +344,20 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
             },
         )
 
-        mapper(
+        cls.mapper(
             Engineer,
             engineers,
             inherits=Person,
             polymorphic_identity="engineer",
             properties={
+                "company": relationship(Company, viewonly=True),
                 "machines": relationship(
                     Machine, order_by=machines.c.machine_id
-                )
+                ),
             },
         )
 
-        mapper(
+        cls.mapper(
             Manager,
             managers,
             with_polymorphic=manager_with_polymorphic,
@@ -364,9 +365,9 @@ class _PolymorphicFixtureBase(fixtures.MappedTest, AssertsCompiledSQL):
             polymorphic_identity="manager",
         )
 
-        mapper(Boss, boss, inherits=Manager, polymorphic_identity="boss")
+        cls.mapper(Boss, boss, inherits=Manager, polymorphic_identity="boss")
 
-        mapper(Paperwork, paperwork)
+        cls.mapper(Paperwork, paperwork)
 
 
 class _Polymorphic(_PolymorphicFixtureBase):
@@ -396,7 +397,6 @@ class _PolymorphicUnions(_PolymorphicFixtureBase):
             cls.tables.managers,
             cls.tables.boss,
         )
-
         person_join = polymorphic_union(
             util.OrderedDict(
                 [
@@ -407,6 +407,7 @@ class _PolymorphicUnions(_PolymorphicFixtureBase):
             None,
             "pjoin",
         )
+
         manager_join = people.join(managers).outerjoin(boss)
         person_with_polymorphic = ([Person, Manager, Engineer], person_join)
         manager_with_polymorphic = ("*", manager_join)
@@ -427,14 +428,16 @@ class _PolymorphicAliasedJoins(_PolymorphicFixtureBase):
         person_join = (
             people.outerjoin(engineers)
             .outerjoin(managers)
-            .select(use_labels=True)
-            .alias("pjoin")
+            .select()
+            .set_label_style(cls.label_style)
+            .subquery("pjoin")
         )
         manager_join = (
             people.join(managers)
             .outerjoin(boss)
-            .select(use_labels=True)
-            .alias("mjoin")
+            .select()
+            .set_label_style(cls.label_style)
+            .subquery("mjoin")
         )
         person_with_polymorphic = ([Person, Manager, Engineer], person_join)
         manager_with_polymorphic = ("*", manager_join)
@@ -573,6 +576,10 @@ class GeometryFixtureBase(fixtures.DeclarativeMappedTest):
             if "subclasses" in value:
                 self._fixture_from_geometry(value["subclasses"], klass)
 
-        if is_base and self.metadata.tables and self.run_create_tables:
-            self.tables.update(self.metadata.tables)
-            self.metadata.create_all(config.db)
+        if (
+            is_base
+            and self.tables_test_metadata.tables
+            and self.run_create_tables
+        ):
+            self.tables.update(self.tables_test_metadata.tables)
+            self.tables_test_metadata.create_all(config.db)

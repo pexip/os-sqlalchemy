@@ -61,11 +61,18 @@ The primary forms of relationship loading are:
   An introduction to raise loading is at :ref:`prevent_lazy_with_raiseload`.
 
 * **no loading** - available via ``lazy='noload'``, or the :func:`.noload`
-  option; this loading style turns the attribute into an empty attribute that
-  will never load or have any loading effect.  "noload" is a fairly
-  uncommon loader option.
+  option; this loading style turns the attribute into an empty attribute
+  (``None`` or ``[]``) that will never load or have any loading effect. This
+  seldom-used strategy behaves somewhat like an eager loader when objects are
+  loaded in that an empty attribute or collection is placed, but for expired
+  objects relies upon the default value of the attribute being returned on
+  access; the net effect is the same except for whether or not the attribute
+  name appears in the :attr:`.InstanceState.unloaded` collection.   ``noload``
+  may be useful for implementing a "write-only" attribute but this usage is not
+  currently tested or formally supported.
 
 
+.. _relationship_lazy_option:
 
 Configuring Loader Strategies at Mapping Time
 ---------------------------------------------
@@ -81,10 +88,10 @@ For example, to configure a relationship to use joined eager loading when
 the parent object is queried::
 
     class Parent(Base):
-        __tablename__ = 'parent'
+        __tablename__ = "parent"
 
         id = Column(Integer, primary_key=True)
-        children = relationship("Child", lazy='joined')
+        children = relationship("Child", lazy="joined")
 
 Above, whenever a collection of ``Parent`` objects are loaded, each
 ``Parent`` will also have its ``children`` collection populated, using
@@ -112,28 +119,25 @@ the string name of an attribute against a parent, or for greater specificity
 can accommodate a class-bound attribute directly::
 
     # set children to load lazily
-    session.query(Parent).options(lazyload('children')).all()
-
-    # same, using class-bound attribute
     session.query(Parent).options(lazyload(Parent.children)).all()
 
     # set children to load eagerly with a join
-    session.query(Parent).options(joinedload('children')).all()
+    session.query(Parent).options(joinedload(Parent.children)).all()
 
 The loader options can also be "chained" using **method chaining**
 to specify how loading should occur further levels deep::
 
     session.query(Parent).options(
-        joinedload(Parent.children).
-        subqueryload(Child.subelements)).all()
+        joinedload(Parent.children).subqueryload(Child.subelements)
+    ).all()
 
 Chained loader options can be applied against a "lazy" loaded collection.
 This means that when a collection or association is lazily loaded upon
 access, the specified option will then take effect::
 
     session.query(Parent).options(
-        lazyload(Parent.children).
-        subqueryload(Child.subelements)).all()
+        lazyload(Parent.children).subqueryload(Child.subelements)
+    ).all()
 
 Above, the query will return ``Parent`` objects without the ``children``
 collections loaded.  When the ``children`` collection on a particular
@@ -141,22 +145,58 @@ collections loaded.  When the ``children`` collection on a particular
 objects, but additionally apply eager loading to the ``subelements``
 collection on each member of ``children``.
 
+The above examples, using :class:`_orm.Query`, are now referred to as
+:term:`1.x style` queries.   The options system is available as well for
+:term:`2.0 style` queries using the :meth:`_sql.Select.options` method::
+
+  stmt = select(Parent).options(lazyload(Parent.children).subqueryload(Child.subelements))
+
+  result = session.execute(stmt)
+
+Under the hood, :class:`_orm.Query` is ultimately using the above
+:class:`_sql.select` based mechanism.
+
+
+.. _loader_option_criteria:
+
+Adding Criteria to loader options
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The relationship attributes used to indicate loader options include the
+ability to add additional filtering criteria to the ON clause of the join
+that's created, or to the WHERE criteria involved, depending on the loader
+strategy.  This can be achieved using the :meth:`.PropComparator.and_`
+method which will pass through an option such that loaded results are limited
+to the given filter criteria::
+
+    session.query(A).options(lazyload(A.bs.and_(B.id > 5)))
+
+When using limiting criteria, if a particular collection is already loaded
+it won't be refreshed; to ensure the new criteria takes place, apply
+the :meth:`_query.Query.populate_existing` option::
+
+    session.query(A).options(lazyload(A.bs.and_(B.id > 5))).populate_existing()
+
+In order to add filtering criteria to all occurrences of an entity throughout
+a query, regardless of loader strategy or where it occurs in the loading
+process, see the :func:`_orm.with_loader_criteria` function.
+
+.. versionadded:: 1.4
+
+Specifying Sub-Options with Load.options()
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Using method chaining, the loader style of each link in the path is explicitly
 stated.  To navigate along a path without changing the existing loader style
 of a particular attribute, the :func:`.defaultload` method/function may be used::
 
-    session.query(A).options(
-        defaultload(A.atob).
-        joinedload(B.btoc)).all()
+    session.query(A).options(defaultload(A.atob).joinedload(B.btoc)).all()
 
 A similar approach can be used to specify multiple sub-options at once, using
 the :meth:`_orm.Load.options` method::
 
     session.query(A).options(
-        defaultload(A.atob).options(
-          joinedload(B.btoc),
-          joinedload(B.btod)
-        )).all()
+        defaultload(A.atob).options(joinedload(B.btoc), joinedload(B.btod))
+    ).all()
 
 .. versionadded:: 1.3.6 added :meth:`_orm.Load.options`
 
@@ -173,8 +213,8 @@ the :meth:`_orm.Load.options` method::
    memory.  For example, given the previous example::
 
       session.query(Parent).options(
-          lazyload(Parent.children).
-          subqueryload(Child.subelements)).all()
+          lazyload(Parent.children).subqueryload(Child.subelements)
+      ).all()
 
    if the ``children`` collection on a particular ``Parent`` object loaded by
    the above query is expired (such as when a :class:`.Session` object's
@@ -189,8 +229,8 @@ the :meth:`_orm.Load.options` method::
 
       # change the options on Parent objects that were already loaded
       session.query(Parent).populate_existing().options(
-          lazyload(Parent.children).
-          lazyload(Child.subelements)).all()
+          lazyload(Parent.children).lazyload(Child.subelements)
+      ).all()
 
    If the objects loaded above are fully cleared from the :class:`.Session`,
    such as due to garbage collection or that :meth:`.Session.expunge_all`
@@ -264,6 +304,7 @@ replaces the behavior of lazy loading with an informative error being
 raised::
 
     from sqlalchemy.orm import raiseload
+
     session.query(User).options(raiseload(User.addresses))
 
 Above, a ``User`` object loaded from the above query will not have
@@ -274,8 +315,7 @@ access this attribute, an ORM exception is raised.
 indicate that all relationships should use this strategy.  For example,
 to set up only one attribute as eager loading, and all the rest as raise::
 
-    session.query(Order).options(
-        joinedload(Order.items), raiseload('*'))
+    session.query(Order).options(joinedload(Order.items), raiseload("*"))
 
 The above wildcard will apply to **all** relationships not just on ``Order``
 besides ``items``, but all those on the ``Item`` objects as well.  To set up
@@ -284,17 +324,29 @@ path with :class:`_orm.Load`::
 
     from sqlalchemy.orm import Load
 
-    session.query(Order).options(
-        joinedload(Order.items), Load(Order).raiseload('*'))
+    session.query(Order).options(joinedload(Order.items), Load(Order).raiseload("*"))
 
 Conversely, to set up the raise for just the ``Item`` objects::
 
-    session.query(Order).options(
-        joinedload(Order.items).raiseload('*'))
+    session.query(Order).options(joinedload(Order.items).raiseload("*"))
+
+The :func:`.raiseload` option applies only to relationship attributes.  For
+column-oriented attributes, the :func:`.defer` option supports the
+:paramref:`.orm.defer.raiseload` option which works in the same way.
+
+.. versionchanged:: 1.4.0 The "raiseload" strategies **do not take place**
+  within the unit of work flush process, as of SQLAlchemy 1.4.0. This means
+  that if the unit of work needs to load a particular attribute in order to
+  complete its work, it will perform the load. It's not always easy to prevent
+  a particular relationship load from occurring within the UOW process
+  particularly with less common kinds of relationships. The lazy="raise" case
+  is more intended for explicit attribute access within the application space.
 
 .. seealso::
 
     :ref:`wildcard_loader_strategies`
+
+    :ref:`deferred_raiseload`
 
 .. _joined_eager_loading:
 
@@ -321,9 +373,9 @@ using the :func:`_orm.joinedload` loader option:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... options(joinedload(User.addresses)).\
-    ... filter_by(name='jack').all()
+    >>> jack = (
+    ...     session.query(User).options(joinedload(User.addresses)).filter_by(name="jack").all()
+    ... )
     {opensql}SELECT
         addresses_1.id AS addresses_1_id,
         addresses_1.email_address AS addresses_1_email_address,
@@ -348,13 +400,12 @@ at the mapping level via the :paramref:`_orm.relationship.innerjoin` flag::
     class Address(Base):
         # ...
 
-        user_id = Column(ForeignKey('users.id'), nullable=False)
+        user_id = Column(ForeignKey("users.id"), nullable=False)
         user = relationship(User, lazy="joined", innerjoin=True)
 
 At the query option level, via the :paramref:`_orm.joinedload.innerjoin` flag::
 
-    session.query(Address).options(
-        joinedload(Address.user, innerjoin=True))
+    session.query(Address).options(joinedload(Address.user, innerjoin=True))
 
 The JOIN will right-nest itself when applied in a chain that includes
 an OUTER JOIN:
@@ -362,8 +413,8 @@ an OUTER JOIN:
 .. sourcecode:: python+sql
 
     >>> session.query(User).options(
-    ...     joinedload(User.addresses).
-    ...     joinedload(Address.widgets, innerjoin=True)).all()
+    ...     joinedload(User.addresses).joinedload(Address.widgets, innerjoin=True)
+    ... ).all()
     {opensql}SELECT
         widgets_1.id AS widgets_1_id,
         widgets_1.name AS widgets_1_name,
@@ -382,6 +433,16 @@ an OUTER JOIN:
 On older versions of SQLite, the above nested right JOIN may be re-rendered
 as a nested subquery.  Older versions of SQLAlchemy would convert right-nested
 joins into subqueries in all cases.
+
+    .. warning::
+
+        Using ``with_for_update`` in the context of eager loading
+        relationships is not officially supported or recommended by
+        SQLAlchemy and may not work with certain queries on various
+        database backends.  When ``with_for_update`` is successfully used
+        with a query that involves :func:`_orm.joinedload`, SQLAlchemy will
+        attempt to emit SQL that locks all involved tables.
+
 
 Joined eager loading and result set batching
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -448,10 +509,13 @@ named in the query:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... options(joinedload(User.addresses)).\
-    ... filter(User.name=='jack').\
-    ... order_by(Address.email_address).all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .options(joinedload(User.addresses))
+    ...     .filter(User.name == "jack")
+    ...     .order_by(Address.email_address)
+    ...     .all()
+    ... )
     {opensql}SELECT
         addresses_1.id AS addresses_1_id,
         addresses_1.email_address AS addresses_1_email_address,
@@ -473,10 +537,13 @@ address is to use :meth:`_query.Query.join`:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... join(User.addresses).\
-    ... filter(User.name=='jack').\
-    ... order_by(Address.email_address).all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .join(User.addresses)
+    ...     .filter(User.name == "jack")
+    ...     .order_by(Address.email_address)
+    ...     .all()
+    ... )
     {opensql}
     SELECT
         users.id AS users_id,
@@ -497,11 +564,14 @@ are ordering on, the other is used anonymously to load the contents of the
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... join(User.addresses).\
-    ... options(joinedload(User.addresses)).\
-    ... filter(User.name=='jack').\
-    ... order_by(Address.email_address).all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .join(User.addresses)
+    ...     .options(joinedload(User.addresses))
+    ...     .filter(User.name == "jack")
+    ...     .order_by(Address.email_address)
+    ...     .all()
+    ... )
     {opensql}SELECT
         addresses_1.id AS addresses_1_id,
         addresses_1.email_address AS addresses_1_email_address,
@@ -529,12 +599,14 @@ to see why :func:`joinedload` does what it does, consider if we were
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... join(User.addresses).\
-    ... options(joinedload(User.addresses)).\
-    ... filter(User.name=='jack').\
-    ... filter(Address.email_address=='someaddress@foo.com').\
-    ... all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .join(User.addresses)
+    ...     .options(joinedload(User.addresses))
+    ...     .filter(User.name == "jack")
+    ...     .filter(Address.email_address == "someaddress@foo.com")
+    ...     .all()
+    ... )
     {opensql}SELECT
         addresses_1.id AS addresses_1_id,
         addresses_1.email_address AS addresses_1_email_address,
@@ -563,12 +635,14 @@ into :func:`.subqueryload`:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... join(User.addresses).\
-    ... options(subqueryload(User.addresses)).\
-    ... filter(User.name=='jack').\
-    ... filter(Address.email_address=='someaddress@foo.com').\
-    ... all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .join(User.addresses)
+    ...     .options(subqueryload(User.addresses))
+    ...     .filter(User.name == "jack")
+    ...     .filter(Address.email_address == "someaddress@foo.com")
+    ...     .all()
+    ... )
     {opensql}SELECT
         users.id AS users_id,
         users.name AS users_name,
@@ -617,9 +691,12 @@ the collection members to load them at once:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... options(subqueryload(User.addresses)).\
-    ... filter_by(name='jack').all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .options(subqueryload(User.addresses))
+    ...     .filter_by(name="jack")
+    ...     .all()
+    ... )
     {opensql}SELECT
         users.id AS users_id,
         users.name AS users_name,
@@ -681,18 +758,15 @@ the same ordering as used by the parent query.  Without it, there is a chance
 that the inner query could return the wrong rows::
 
     # incorrect, no ORDER BY
-    session.query(User).options(
-        subqueryload(User.addresses)).first()
+    session.query(User).options(subqueryload(User.addresses)).first()
 
     # incorrect if User.name is not unique
-    session.query(User).options(
-        subqueryload(User.addresses)
-    ).order_by(User.name).first()
+    session.query(User).options(subqueryload(User.addresses)).order_by(User.name).first()
 
     # correct
-    session.query(User).options(
-        subqueryload(User.addresses)
-    ).order_by(User.name, User.id).first()
+    session.query(User).options(subqueryload(User.addresses)).order_by(
+        User.name, User.id
+    ).first()
 
 .. seealso::
 
@@ -722,9 +796,12 @@ order to load related associations:
 
 .. sourcecode:: python+sql
 
-    >>> jack = session.query(User).\
-    ... options(selectinload('addresses')).\
-    ... filter(or_(User.name == 'jack', User.name == 'ed')).all()
+    >>> jack = (
+    ...     session.query(User)
+    ...     .options(selectinload(User.addresses))
+    ...     .filter(or_(User.name == "jack", User.name == "ed"))
+    ...     .all()
+    ... )
     {opensql}SELECT
         users.id AS users_id,
         users.name AS users_name,
@@ -758,8 +835,7 @@ value from the parent object is used:
 
 .. sourcecode:: python+sql
 
-    >>> session.query(Address).\
-    ... options(selectinload('user')).all()
+    >>> session.query(Address).options(selectinload(Address.user)).all()
     {opensql}SELECT
         addresses.id AS addresses_id,
         addresses.email_address AS addresses_email_address,
@@ -941,7 +1017,7 @@ attributes not otherwise
 specified in the :class:`_query.Query`.   This feature is available by passing
 the string ``'*'`` as the argument to any of these options::
 
-    session.query(MyClass).options(lazyload('*'))
+    session.query(MyClass).options(lazyload("*"))
 
 Above, the ``lazyload('*')`` option will supersede the ``lazy`` setting
 of all :func:`_orm.relationship` constructs in use for that query,
@@ -957,10 +1033,7 @@ query, such as :func:`.eagerload`,
 :func:`.subqueryload`, etc.  The query below will still use joined loading
 for the ``widget`` relationship::
 
-    session.query(MyClass).options(
-        lazyload('*'),
-        joinedload(MyClass.widget)
-    )
+    session.query(MyClass).options(lazyload("*"), joinedload(MyClass.widget))
 
 If multiple ``'*'`` options are passed, the last one overrides
 those previously passed.
@@ -974,8 +1047,7 @@ we can instruct all relationships on ``Address`` only to use lazy loading
 by first applying the :class:`_orm.Load` object, then specifying the ``*`` as a
 chained option::
 
-    session.query(User, Address).options(
-        Load(Address).lazyload('*'))
+    session.query(User, Address).options(Load(Address).lazyload("*"))
 
 Above, all relationships on ``Address`` will be set to a lazy load.
 
@@ -1002,18 +1074,18 @@ explicitly. Below, we specify a join between ``User`` and ``Address``
 and additionally establish this as the basis for eager loading of ``User.addresses``::
 
     class User(Base):
-        __tablename__ = 'user'
+        __tablename__ = "user"
         id = Column(Integer, primary_key=True)
         addresses = relationship("Address")
 
+
     class Address(Base):
-        __tablename__ = 'address'
+        __tablename__ = "address"
 
         # ...
 
-    q = session.query(User).join(User.addresses).\
-                options(contains_eager(User.addresses))
 
+    q = session.query(User).join(User.addresses).options(contains_eager(User.addresses))
 
 If the "eager" portion of the statement is "aliased", the path
 should be specified using :meth:`.PropComparator.of_type`, which allows
@@ -1025,9 +1097,11 @@ the specific :func:`_orm.aliased` construct to be passed:
     adalias = aliased(Address)
 
     # construct a Query object which expects the "addresses" results
-    query = session.query(User).\
-        outerjoin(User.addresses.of_type(adalias)).\
-        options(contains_eager(User.addresses.of_type(adalias)))
+    query = (
+        session.query(User)
+        .outerjoin(User.addresses.of_type(adalias))
+        .options(contains_eager(User.addresses.of_type(adalias)))
+    )
 
     # get results normally
     r = query.all()
@@ -1046,9 +1120,7 @@ The path given as the argument to :func:`.contains_eager` needs
 to be a full path from the starting entity. For example if we were loading
 ``Users->orders->Order->items->Item``, the option would be used as::
 
-    query(User).options(
-        contains_eager(User.orders).
-        contains_eager(Order.items))
+    query(User).options(contains_eager(User.orders).contains_eager(Order.items))
 
 Using contains_eager() to load a custom-filtered collection result
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1065,11 +1137,13 @@ routing it using :func:`_orm.contains_eager`, also using
 :meth:`_query.Query.populate_existing` to ensure any already-loaded collections
 are overwritten::
 
-    q = session.query(User).\
-            join(User.addresses).\
-            filter(Address.email_address.like('%@aol.com')).\
-            options(contains_eager(User.addresses)).\
-            populate_existing()
+    q = (
+        session.query(User)
+        .join(User.addresses)
+        .filter(Address.email_address.like("%@aol.com"))
+        .options(contains_eager(User.addresses))
+        .populate_existing()
+    )
 
 The above query will load only ``User`` objects which contain at
 least ``Address`` object that contains the substring ``'aol.com'`` in its
@@ -1101,7 +1175,7 @@ in fact associated with the collection.
 Creating Custom Load Rules
 --------------------------
 
-.. warning::  This is an advanced technique!   Great care and testing
+.. deepalchemy::  This is an advanced technique!   Great care and testing
    should be applied.
 
 The ORM has various edge cases where the value of an attribute is locally
@@ -1133,19 +1207,15 @@ Given the following mapping::
 
 
     class A(Base):
-        __tablename__ = 'a'
+        __tablename__ = "a"
         id = Column(Integer, primary_key=True)
-        b_id = Column(ForeignKey('b.id'))
-        b = relationship(
-            "B",
-            backref=backref("a", uselist=False),
-            lazy='joined')
+        b_id = Column(ForeignKey("b.id"))
+        b = relationship("B", backref=backref("a", uselist=False), lazy="joined")
 
 
     class B(Base):
-        __tablename__ = 'b'
+        __tablename__ = "b"
         id = Column(Integer, primary_key=True)
-
 
 If we query for an ``A`` row, and then ask it for ``a.b.a``, we will get
 an extra SELECT::
@@ -1161,10 +1231,11 @@ can create an on-load rule to populate this for us::
     from sqlalchemy import event
     from sqlalchemy.orm import attributes
 
+
     @event.listens_for(A, "load")
     def load_b(target, context):
-        if 'b' in target.__dict__:
-            attributes.set_committed_value(target.b, 'a', target)
+        if "b" in target.__dict__:
+            attributes.set_committed_value(target.b, "a", target)
 
 Now when we query for ``A``, we will get ``A.b`` from the joined eager load,
 and ``A.b.a`` from our event:
@@ -1182,11 +1253,8 @@ and ``A.b.a`` from our event:
     (1, 0)
     {stop}assert a1.b.a is a1
 
-
 Relationship Loader API
 -----------------------
-
-.. autofunction:: contains_alias
 
 .. autofunction:: contains_eager
 
@@ -1194,17 +1262,14 @@ Relationship Loader API
 
 .. autofunction:: eagerload
 
-.. autofunction:: eagerload_all
-
 .. autofunction:: immediateload
 
 .. autofunction:: joinedload
 
-.. autofunction:: joinedload_all
-
 .. autofunction:: lazyload
 
 .. autoclass:: Load
+    :members:
 
 .. autofunction:: noload
 
@@ -1212,8 +1277,4 @@ Relationship Loader API
 
 .. autofunction:: selectinload
 
-.. autofunction:: selectinload_all
-
 .. autofunction:: subqueryload
-
-.. autofunction:: subqueryload_all

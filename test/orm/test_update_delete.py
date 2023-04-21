@@ -1,28 +1,39 @@
 from sqlalchemy import Boolean
 from sqlalchemy import case
 from sqlalchemy import column
+from sqlalchemy import delete
+from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import insert
 from sqlalchemy import Integer
+from sqlalchemy import lambda_stmt
 from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import text
+from sqlalchemy import update
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import synonym
+from sqlalchemy.orm import with_loader_criteria
+from sqlalchemy.sql.dml import Delete
+from sqlalchemy.sql.dml import Update
+from sqlalchemy.sql.selectable import Select
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
-from sqlalchemy.testing import is_
-from sqlalchemy.testing import mock
+from sqlalchemy.testing import in_
+from sqlalchemy.testing import not_in
+from sqlalchemy.testing.assertions import expect_raises_message
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -78,7 +89,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
         Address = cls.classes.Address
         addresses = cls.tables.addresses
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             User,
             users,
             properties={
@@ -86,11 +97,44 @@ class UpdateDeleteTest(fixtures.MappedTest):
                 "addresses": relationship(Address),
             },
         )
-        mapper(Address, addresses)
+        cls.mapper_registry.map_imperatively(Address, addresses)
+
+    @testing.combinations("table", "mapper", "both", argnames="bind_type")
+    @testing.combinations(
+        "update", "insert", "delete", argnames="statement_type"
+    )
+    def test_get_bind_scenarios(self, connection, bind_type, statement_type):
+        """test for #7936"""
+
+        User = self.classes.User
+
+        if statement_type == "insert":
+            stmt = insert(User).values(
+                {User.id: 5, User.age: 25, User.name: "spongebob"}
+            )
+        elif statement_type == "update":
+            stmt = (
+                update(User)
+                .where(User.id == 2)
+                .values({User.name: "spongebob"})
+            )
+        elif statement_type == "delete":
+            stmt = delete(User)
+
+        binds = {}
+        if bind_type == "both":
+            binds = {User: connection, User.__table__: connection}
+        elif bind_type == "mapper":
+            binds = {User: connection}
+        elif bind_type == "table":
+            binds = {User.__table__: connection}
+
+        with Session(binds=binds) as sess:
+            sess.execute(stmt)
 
     def test_illegal_eval(self):
         User = self.classes.User
-        s = Session()
+        s = fixture_session()
         assert_raises_message(
             exc.ArgumentError,
             "Valid strategies for session synchronization "
@@ -104,7 +148,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
         User = self.classes.User
         Address = self.classes.Address
 
-        s = Session()
+        s = fixture_session()
 
         for q, mname in (
             (s.query(User).limit(2), r"limit\(\)"),
@@ -125,10 +169,6 @@ class UpdateDeleteTest(fixtures.MappedTest):
                 s.query(User).select_from(Address),
                 r"join\(\), outerjoin\(\), select_from\(\), or from_self\(\)",
             ),
-            (
-                s.query(User).from_self(),
-                r"join\(\), outerjoin\(\), select_from\(\), or from_self\(\)",
-            ),
         ):
             assert_raises_message(
                 exc.InvalidRequestError,
@@ -144,6 +184,50 @@ class UpdateDeleteTest(fixtures.MappedTest):
                 q.delete,
             )
 
+    def test_update_w_unevaluatable_value_evaluate(self):
+        """test that the "evaluate" strategy falls back to 'expire' for an
+        update SET that is not evaluable in Python."""
+
+        User = self.classes.User
+
+        s = Session(testing.db, future=True)
+
+        jill = s.query(User).filter(User.name == "jill").one()
+
+        s.execute(
+            update(User)
+            .filter(User.name == "jill")
+            .values({"name": User.name + User.name}),
+            execution_options={"synchronize_session": "evaluate"},
+        )
+
+        eq_(jill.name, "jilljill")
+
+    def test_update_w_unevaluatable_value_fetch(self):
+        """test that the "fetch" strategy falls back to 'expire' for an
+        update SET that is not evaluable in Python.
+
+        Prior to 1.4 the "fetch" strategy used expire for everything
+        but now it tries to evaluate a SET clause to avoid a round
+        trip.
+
+        """
+
+        User = self.classes.User
+
+        s = Session(testing.db, future=True)
+
+        jill = s.query(User).filter(User.name == "jill").one()
+
+        s.execute(
+            update(User)
+            .filter(User.name == "jill")
+            .values({"name": User.name + User.name}),
+            execution_options={"synchronize_session": "fetch"},
+        )
+
+        eq_(jill.name, "jilljill")
+
     def test_evaluate_clauseelement(self):
         User = self.classes.User
 
@@ -151,8 +235,8 @@ class UpdateDeleteTest(fixtures.MappedTest):
             def __clause_element__(self):
                 return User.name.__clause_element__()
 
-        s = Session()
-        jill = s.query(User).get(3)
+        s = fixture_session()
+        jill = s.get(User, 3)
         s.query(User).update(
             {Thing(): "moonbeam"}, synchronize_session="evaluate"
         )
@@ -165,11 +249,11 @@ class UpdateDeleteTest(fixtures.MappedTest):
             def __clause_element__(self):
                 return 5
 
-        s = Session()
+        s = fixture_session()
 
         assert_raises_message(
-            exc.InvalidRequestError,
-            "Invalid expression type: 5",
+            exc.ArgumentError,
+            "SET/VALUES column expression or string key expected, got .*Thing",
             s.query(User).update,
             {Thing(): "moonbeam"},
             synchronize_session="evaluate",
@@ -178,8 +262,8 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_evaluate_unmapped_col(self):
         User = self.classes.User
 
-        s = Session()
-        jill = s.query(User).get(3)
+        s = fixture_session()
+        jill = s.get(User, 3)
         s.query(User).update(
             {column("name"): "moonbeam"}, synchronize_session="evaluate"
         )
@@ -191,10 +275,12 @@ class UpdateDeleteTest(fixtures.MappedTest):
         class Foo(object):
             pass
 
-        mapper(Foo, self.tables.users, properties={"uname": synonym("name")})
+        self.mapper_registry.map_imperatively(
+            Foo, self.tables.users, properties={"uname": synonym("name")}
+        )
 
-        s = Session()
-        jill = s.query(Foo).get(3)
+        s = fixture_session()
+        jill = s.get(Foo, 3)
         s.query(Foo).update(
             {"uname": "moonbeam"}, synchronize_session="evaluate"
         )
@@ -204,10 +290,12 @@ class UpdateDeleteTest(fixtures.MappedTest):
         class Foo(object):
             pass
 
-        mapper(Foo, self.tables.users, properties={"uname": synonym("name")})
+        self.mapper_registry.map_imperatively(
+            Foo, self.tables.users, properties={"uname": synonym("name")}
+        )
 
-        s = Session()
-        jill = s.query(Foo).get(3)
+        s = fixture_session()
+        jill = s.get(Foo, 3)
         s.query(Foo).update(
             {Foo.uname: "moonbeam"}, synchronize_session="evaluate"
         )
@@ -217,14 +305,14 @@ class UpdateDeleteTest(fixtures.MappedTest):
         class Foo(object):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Foo,
             self.tables.users,
             properties={"uname": synonym("name"), "ufoo": synonym("uname")},
         )
 
-        s = Session()
-        jill = s.query(Foo).get(3)
+        s = fixture_session()
+        jill = s.get(Foo, 3)
         s.query(Foo).update(
             {Foo.ufoo: "moonbeam"}, synchronize_session="evaluate"
         )
@@ -241,7 +329,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     ):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
@@ -268,13 +356,13 @@ class UpdateDeleteTest(fixtures.MappedTest):
             if expire_jane_age:
                 asserter.assert_(
                     # it has to unexpire jane.name, because jane is not fully
-                    # expired and the critiera needs to look at this particular
+                    # expired and the criteria needs to look at this particular
                     # key
                     CompiledSQL(
                         "SELECT users.age_int AS users_age_int, "
                         "users.name AS users_name FROM users "
-                        "WHERE users.id = :param_1",
-                        [{"param_1": 4}],
+                        "WHERE users.id = :pk_1",
+                        [{"pk_1": 4}],
                     ),
                     CompiledSQL(
                         "UPDATE users "
@@ -286,12 +374,12 @@ class UpdateDeleteTest(fixtures.MappedTest):
             else:
                 asserter.assert_(
                     # it has to unexpire jane.name, because jane is not fully
-                    # expired and the critiera needs to look at this particular
+                    # expired and the criteria needs to look at this particular
                     # key
                     CompiledSQL(
                         "SELECT users.name AS users_name FROM users "
-                        "WHERE users.id = :param_1",
-                        [{"param_1": 4}],
+                        "WHERE users.id = :pk_1",
+                        [{"pk_1": 4}],
                     ),
                     CompiledSQL(
                         "UPDATE users SET "
@@ -319,15 +407,15 @@ class UpdateDeleteTest(fixtures.MappedTest):
             CompiledSQL(
                 "SELECT users.age_int AS users_age_int, "
                 "users.id AS users_id, users.name AS users_name FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 1}],
+                "WHERE users.id = :pk_1",
+                [{"pk_1": 1}],
             ),
             # refresh jill
             CompiledSQL(
                 "SELECT users.age_int AS users_age_int, "
                 "users.id AS users_id, users.name AS users_name FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 3}],
+                "WHERE users.id = :pk_1",
+                [{"pk_1": 3}],
             ),
         ]
 
@@ -337,8 +425,8 @@ class UpdateDeleteTest(fixtures.MappedTest):
                 CompiledSQL(
                     "SELECT users.age_int AS users_age_int, "
                     "users.name AS users_name FROM users "
-                    "WHERE users.id = :param_1",
-                    [{"param_1": 4}],
+                    "WHERE users.id = :pk_1",
+                    [{"pk_1": 4}],
                 )
             )
         asserter.assert_(*to_assert)
@@ -346,7 +434,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_fetch_dont_refresh_expired_objects(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
@@ -360,58 +448,56 @@ class UpdateDeleteTest(fixtures.MappedTest):
                 {"age": User.age + 10}, synchronize_session="fetch"
             )
 
-        asserter.assert_(
-            CompiledSQL(
-                "SELECT users.id AS users_id FROM users "
-                "WHERE users.name IS NOT NULL"
-            ),
-            CompiledSQL(
-                "UPDATE users SET age_int=(users.age_int + :age_int_1) "
-                "WHERE users.name IS NOT NULL",
-                [{"age_int_1": 10}],
-            ),
-        )
+        if testing.db.dialect.full_returning:
+            asserter.assert_(
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int + %(age_int_1)s) "
+                    "WHERE users.name IS NOT NULL "
+                    "RETURNING users.id",
+                    [{"age_int_1": 10}],
+                    dialect="postgresql",
+                ),
+            )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "SELECT users.id FROM users "
+                    "WHERE users.name IS NOT NULL"
+                ),
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int + :age_int_1) "
+                    "WHERE users.name IS NOT NULL",
+                    [{"age_int_1": 10}],
+                ),
+            )
 
         with self.sql_execution_asserter() as asserter:
             eq_(john.age, 35)  # needs refresh
-            eq_(jack.age, 57)  # refreshes in 1.3
+            eq_(jack.age, 57)  # no SQL needed
             eq_(jill.age, 39)  # needs refresh
-            eq_(jane.age, 47)  # refreshes in 1.3
+            eq_(jane.age, 47)  # no SQL needed
 
         asserter.assert_(
             # refresh john
             CompiledSQL(
                 "SELECT users.age_int AS users_age_int, "
                 "users.id AS users_id, users.name AS users_name FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 1}],
-            ),
-            # refresh jack.age in 1.3 only
-            CompiledSQL(
-                "SELECT users.age_int AS users_age_int FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 2}],
+                "WHERE users.id = :pk_1",
+                [{"pk_1": 1}],
             ),
             # refresh jill
             CompiledSQL(
                 "SELECT users.age_int AS users_age_int, "
                 "users.id AS users_id, users.name AS users_name FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 3}],
-            ),
-            # refresh jane, seems to be a full refresh in 1.3.
-            CompiledSQL(
-                "SELECT users.age_int AS users_age_int, "
-                "users.name AS users_name FROM users "
-                "WHERE users.id = :param_1",
-                [{"param_1": 4}],
+                "WHERE users.id = :pk_1",
+                [{"pk_1": 3}],
             ),
         )
 
     def test_delete(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(
@@ -426,14 +512,14 @@ class UpdateDeleteTest(fixtures.MappedTest):
         User = self.classes.User
         users = self.tables.users
 
-        sess = Session()
+        sess = fixture_session()
         sess.query(users).delete(synchronize_session=False)
         eq_(sess.query(User).count(), 0)
 
     def test_delete_with_bindparams(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(text("name = :name")).params(
@@ -446,7 +532,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_rollback(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(
             or_(User.name == "john", User.name == "jill")
@@ -458,7 +544,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_rollback_with_fetch(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(
             or_(User.name == "john", User.name == "jill")
@@ -470,7 +556,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_without_session_sync(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(
@@ -484,7 +570,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_with_fetch_strategy(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(
@@ -499,20 +585,20 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_invalid_evaluation(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
         assert_raises(
             exc.InvalidRequestError,
             sess.query(User)
-            .filter(User.name == select([func.max(User.name)]))
+            .filter(User.name == select(func.max(User.name)).scalar_subquery())
             .delete,
             synchronize_session="evaluate",
         )
 
         sess.query(User).filter(
-            User.name == select([func.max(User.name)])
+            User.name == select(func.max(User.name)).scalar_subquery()
         ).delete(synchronize_session="fetch")
 
         assert john not in sess
@@ -522,7 +608,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update(self):
         User, users = self.classes.User, self.tables.users
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(User.age > 29).update(
@@ -562,10 +648,197 @@ class UpdateDeleteTest(fixtures.MappedTest):
             list(zip([15, 27, 19, 27])),
         )
 
+    def test_update_future(self):
+        User, users = self.classes.User, self.tables.users
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        result = sess.execute(
+            update(User)
+            .where(User.age > 29)
+            .values({"age": User.age - 10})
+            .execution_options(synchronize_session="evaluate"),
+        )
+
+        eq_(result.rowcount, 2)
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 37, 29, 27])
+        eq_(
+            sess.execute(select(User.age).order_by(User.id)).all(),
+            list(zip([25, 37, 29, 27])),
+        )
+
+        result = sess.execute(
+            update(User)
+            .where(User.age > 29)
+            .values({User.age: User.age - 10})
+            .execution_options(synchronize_session="fetch")
+        )
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 27, 29, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([25, 27, 29, 27])),
+        )
+
+        sess.query(User).filter(User.age > 27).update(
+            {users.c.age_int: User.age - 10}, synchronize_session="evaluate"
+        )
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 27, 19, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([25, 27, 19, 27])),
+        )
+
+        sess.query(User).filter(User.age == 25).update(
+            {User.age: User.age - 10}, synchronize_session="fetch"
+        )
+        eq_([john.age, jack.age, jill.age, jane.age], [15, 27, 19, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([15, 27, 19, 27])),
+        )
+
+    @testing.variation("values_first", [True, False])
+    def test_update_future_lambda(self, values_first):
+        User, users = self.classes.User, self.tables.users
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        new_value = 10
+
+        if values_first:
+            stmt = lambda_stmt(lambda: update(User))
+            stmt += lambda s: s.values({"age": User.age - new_value})
+            stmt += lambda s: s.where(User.age > 29).execution_options(
+                synchronize_session="evaluate"
+            )
+        else:
+            stmt = lambda_stmt(
+                lambda: update(User)
+                .where(User.age > 29)
+                .values({"age": User.age - new_value})
+                .execution_options(synchronize_session="evaluate")
+            )
+        sess.execute(stmt)
+
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 37, 29, 27])
+        eq_(
+            sess.execute(select(User.age).order_by(User.id)).all(),
+            list(zip([25, 37, 29, 27])),
+        )
+
+        if values_first:
+            stmt = lambda_stmt(lambda: update(User))
+            stmt += lambda s: s.values({"age": User.age - new_value})
+            stmt += lambda s: s.where(User.age > 29).execution_options(
+                synchronize_session="evaluate"
+            )
+        else:
+            stmt = lambda_stmt(
+                lambda: update(User)
+                .where(User.age > 29)
+                .values({User.age: User.age - 10})
+                .execution_options(synchronize_session="evaluate")
+            )
+
+        sess.execute(stmt)
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 27, 29, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([25, 27, 29, 27])),
+        )
+
+        sess.query(User).filter(User.age > 27).update(
+            {users.c.age_int: User.age - 10}, synchronize_session="evaluate"
+        )
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 27, 19, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([25, 27, 19, 27])),
+        )
+
+        sess.query(User).filter(User.age == 25).update(
+            {User.age: User.age - 10}, synchronize_session="fetch"
+        )
+        eq_([john.age, jack.age, jill.age, jane.age], [15, 27, 19, 27])
+        eq_(
+            sess.query(User.age).order_by(User.id).all(),
+            list(zip([15, 27, 19, 27])),
+        )
+
+    @testing.combinations(
+        ("fetch", False),
+        ("fetch", True),
+        ("evaluate", False),
+        ("evaluate", True),
+    )
+    def test_update_with_loader_criteria(self, fetchstyle, future):
+        User = self.classes.User
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        sess.execute(
+            update(User)
+            .options(
+                with_loader_criteria(User, User.name.in_(["jill", "jane"]))
+            )
+            .where(User.age > 29)
+            .values(age=User.age - 10)
+            .execution_options(synchronize_session=fetchstyle)
+        )
+
+        eq_([john.age, jack.age, jill.age, jane.age], [25, 47, 29, 27])
+        eq_(
+            sess.execute(select(User.age).order_by(User.id)).all(),
+            list(zip([25, 47, 29, 27])),
+        )
+
+    @testing.combinations(
+        ("fetch", False),
+        ("fetch", True),
+        ("evaluate", False),
+        ("evaluate", True),
+    )
+    def test_delete_with_loader_criteria(self, fetchstyle, future):
+        User = self.classes.User
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        sess.execute(
+            delete(User)
+            .options(
+                with_loader_criteria(User, User.name.in_(["jill", "jane"]))
+            )
+            .where(User.age > 29)
+            .execution_options(synchronize_session=fetchstyle)
+        )
+
+        assert jane not in sess
+        assert jack in sess
+        eq_(
+            sess.execute(select(User.age).order_by(User.id)).all(),
+            list(zip([25, 47, 29])),
+        )
+
     def test_update_against_table_col(self):
         User, users = self.classes.User, self.tables.users
 
-        sess = Session()
+        sess = fixture_session()
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         eq_([john.age, jack.age, jill.age, jane.age], [25, 47, 29, 37])
         sess.query(User).filter(User.age > 27).update(
@@ -576,7 +849,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_against_metadata(self):
         User, users = self.classes.User, self.tables.users
 
-        sess = Session()
+        sess = fixture_session()
 
         sess.query(users).update(
             {users.c.age_int: 29}, synchronize_session=False
@@ -589,7 +862,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_with_bindparams(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
@@ -603,10 +876,247 @@ class UpdateDeleteTest(fixtures.MappedTest):
             list(zip([25, 37, 29, 27])),
         )
 
+    def test_update_fetch_returning(self):
+        User = self.classes.User
+
+        sess = fixture_session()
+
+        john, jack, jill, jane = sess.query(User).order_by(User.id).all()
+
+        with self.sql_execution_asserter() as asserter:
+            sess.query(User).filter(User.age > 29).update(
+                {"age": User.age - 10}, synchronize_session="fetch"
+            )
+
+            # these are simple values, these are now evaluated even with
+            # the "fetch" strategy, new in 1.4, so there is no expiry
+            eq_([john.age, jack.age, jill.age, jane.age], [25, 37, 29, 27])
+
+        if testing.db.dialect.full_returning:
+            asserter.assert_(
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int - %(age_int_1)s) "
+                    "WHERE users.age_int > %(age_int_2)s RETURNING users.id",
+                    [{"age_int_1": 10, "age_int_2": 29}],
+                    dialect="postgresql",
+                ),
+            )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "SELECT users.id FROM users "
+                    "WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int - :age_int_1) "
+                    "WHERE users.age_int > :age_int_2",
+                    [{"age_int_1": 10, "age_int_2": 29}],
+                ),
+            )
+
+    def test_update_fetch_returning_lambda(self):
+        User = self.classes.User
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        with self.sql_execution_asserter() as asserter:
+            stmt = lambda_stmt(
+                lambda: update(User)
+                .where(User.age > 29)
+                .values({"age": User.age - 10})
+            )
+            sess.execute(
+                stmt, execution_options={"synchronize_session": "fetch"}
+            )
+
+            # these are simple values, these are now evaluated even with
+            # the "fetch" strategy, new in 1.4, so there is no expiry
+            eq_([john.age, jack.age, jill.age, jane.age], [25, 37, 29, 27])
+
+        if testing.db.dialect.full_returning:
+            asserter.assert_(
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int - %(age_int_1)s) "
+                    "WHERE users.age_int > %(age_int_2)s RETURNING users.id",
+                    [{"age_int_1": 10, "age_int_2": 29}],
+                    dialect="postgresql",
+                ),
+            )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "SELECT users.id FROM users "
+                    "WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+                CompiledSQL(
+                    "UPDATE users SET age_int=(users.age_int - :age_int_1) "
+                    "WHERE users.age_int > :age_int_2",
+                    [{"age_int_1": 10, "age_int_2": 29}],
+                ),
+            )
+
+    @testing.requires.full_returning
+    def test_update_explicit_returning(self):
+        User = self.classes.User
+
+        sess = fixture_session()
+
+        john, jack, jill, jane = sess.query(User).order_by(User.id).all()
+
+        with self.sql_execution_asserter() as asserter:
+            stmt = (
+                update(User)
+                .filter(User.age > 29)
+                .values({"age": User.age - 10})
+                .returning(User.id)
+            )
+
+            rows = sess.execute(stmt).all()
+            eq_(set(rows), {(2,), (4,)})
+
+            # these are simple values, these are now evaluated even with
+            # the "fetch" strategy, new in 1.4, so there is no expiry
+            eq_([john.age, jack.age, jill.age, jane.age], [25, 37, 29, 27])
+
+        asserter.assert_(
+            CompiledSQL(
+                "UPDATE users SET age_int=(users.age_int - %(age_int_1)s) "
+                "WHERE users.age_int > %(age_int_2)s RETURNING users.id",
+                [{"age_int_1": 10, "age_int_2": 29}],
+                dialect="postgresql",
+            ),
+        )
+
+    @testing.requires.full_returning
+    def test_no_fetch_w_explicit_returning(self):
+        User = self.classes.User
+
+        sess = fixture_session()
+
+        stmt = (
+            update(User)
+            .filter(User.age > 29)
+            .values({"age": User.age - 10})
+            .execution_options(synchronize_session="fetch")
+            .returning(User.id)
+        )
+        with expect_raises_message(
+            exc.InvalidRequestError,
+            r"Can't use synchronize_session='fetch' "
+            r"with explicit returning\(\)",
+        ):
+            sess.execute(stmt)
+
+    def test_delete_fetch_returning(self):
+        User = self.classes.User
+
+        sess = fixture_session()
+
+        john, jack, jill, jane = sess.query(User).order_by(User.id).all()
+
+        in_(john, sess)
+        in_(jack, sess)
+
+        with self.sql_execution_asserter() as asserter:
+            sess.query(User).filter(User.age > 29).delete(
+                synchronize_session="fetch"
+            )
+
+        if testing.db.dialect.full_returning:
+            asserter.assert_(
+                CompiledSQL(
+                    "DELETE FROM users WHERE users.age_int > %(age_int_1)s "
+                    "RETURNING users.id",
+                    [{"age_int_1": 29}],
+                    dialect="postgresql",
+                ),
+            )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "SELECT users.id FROM users "
+                    "WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+                CompiledSQL(
+                    "DELETE FROM users WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+            )
+
+        in_(john, sess)
+        not_in(jack, sess)
+        in_(jill, sess)
+        not_in(jane, sess)
+
+    def test_delete_fetch_returning_lambda(self):
+        User = self.classes.User
+
+        sess = Session(testing.db, future=True)
+
+        john, jack, jill, jane = (
+            sess.execute(select(User).order_by(User.id)).scalars().all()
+        )
+
+        in_(john, sess)
+        in_(jack, sess)
+
+        with self.sql_execution_asserter() as asserter:
+            stmt = lambda_stmt(lambda: delete(User).where(User.age > 29))
+            sess.execute(
+                stmt, execution_options={"synchronize_session": "fetch"}
+            )
+
+        if testing.db.dialect.full_returning:
+            asserter.assert_(
+                CompiledSQL(
+                    "DELETE FROM users WHERE users.age_int > %(age_int_1)s "
+                    "RETURNING users.id",
+                    [{"age_int_1": 29}],
+                    dialect="postgresql",
+                ),
+            )
+        else:
+            asserter.assert_(
+                CompiledSQL(
+                    "SELECT users.id FROM users "
+                    "WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+                CompiledSQL(
+                    "DELETE FROM users WHERE users.age_int > :age_int_1",
+                    [{"age_int_1": 29}],
+                ),
+            )
+
+        in_(john, sess)
+        not_in(jack, sess)
+        in_(jill, sess)
+        not_in(jane, sess)
+
+    def test_update_with_filter_statement(self):
+        """test for [ticket:4556]"""
+
+        User = self.classes.User
+
+        sess = fixture_session()
+        assert_raises(
+            exc.ArgumentError,
+            lambda: sess.query(User.name == "filter").update(
+                {"name": "update"}
+            ),
+        )
+
     def test_update_without_load(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         sess.query(User).filter(User.id == 3).update(
             {"age": 44}, synchronize_session="fetch"
@@ -619,7 +1129,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_changes_resets_dirty(self):
         User = self.classes.User
 
-        sess = Session(autoflush=False)
+        sess = fixture_session(autoflush=False)
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
@@ -648,7 +1158,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_changes_with_autoflush(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
 
@@ -674,7 +1184,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_with_expire_strategy(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).filter(User.age > 29).update(
@@ -691,7 +1201,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_returns_rowcount(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         rowcount = (
             sess.query(User)
@@ -707,11 +1217,17 @@ class UpdateDeleteTest(fixtures.MappedTest):
         )
         eq_(rowcount, 2)
 
+        # test future
+        result = sess.execute(
+            update(User).where(User.age > 19).values({"age": User.age - 10})
+        )
+        eq_(result.rowcount, 4)
+
     @testing.fails_if(lambda: not testing.db.dialect.supports_sane_rowcount)
     def test_delete_returns_rowcount(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         rowcount = (
             sess.query(User)
@@ -723,7 +1239,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_update_all(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).update({"age": 42}, synchronize_session="evaluate")
@@ -737,7 +1253,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_delete_all(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).delete(synchronize_session="evaluate")
@@ -750,7 +1266,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_autoflush_before_evaluate_update(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         john.name = "j2"
 
@@ -762,7 +1278,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_autoflush_before_fetch_update(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         john.name = "j2"
 
@@ -774,7 +1290,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_autoflush_before_evaluate_delete(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         john.name = "j2"
 
@@ -786,7 +1302,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_autoflush_before_fetch_delete(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         john.name = "j2"
 
@@ -798,7 +1314,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_evaluate_before_update(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         sess.expire(john, ["age"])
 
@@ -814,7 +1330,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_fetch_before_update(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         sess.expire(john, ["age"])
 
@@ -827,7 +1343,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_evaluate_before_delete(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         sess.expire(john, ["age"])
 
@@ -839,7 +1355,7 @@ class UpdateDeleteTest(fixtures.MappedTest):
     def test_fetch_before_delete(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
         john = sess.query(User).filter_by(name="john").one()
         sess.expire(john, ["age"])
 
@@ -850,45 +1366,154 @@ class UpdateDeleteTest(fixtures.MappedTest):
 
     def test_update_unordered_dict(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         # Do an update using unordered dict and check that the parameters used
         # are ordered in table order
-        q = session.query(User)
-        with mock.patch.object(q, "_execute_crud") as exec_:
-            q.filter(User.id == 15).update({"name": "foob", "id": 123})
-            # Confirm that parameters are a dict instead of tuple or list
-            params_type = type(exec_.mock_calls[0][1][0].parameters)
-            is_(params_type, dict)
 
-    def test_update_preserve_parameter_order(self):
+        m1 = testing.mock.Mock()
+
+        @event.listens_for(session, "after_bulk_update")
+        def do_orm_execute(bulk_ud):
+            m1(bulk_ud.result.context.compiled.compile_state.statement)
+
+        q = session.query(User)
+        q.filter(User.id == 15).update({"name": "foob", "age": 123})
+        assert m1.mock_calls[0][1][0]._values
+
+    def test_update_preserve_parameter_order_query(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         # Do update using a tuple and check that order is preserved
-        q = session.query(User)
-        with mock.patch.object(q, "_execute_crud") as exec_:
-            q.filter(User.id == 15).update(
-                (("id", 123), ("name", "foob")),
-                update_args={"preserve_parameter_order": True},
-            )
+
+        m1 = testing.mock.Mock()
+
+        @event.listens_for(session, "after_bulk_update")
+        def do_orm_execute(bulk_ud):
+
             cols = [
-                c.key for c in exec_.mock_calls[0][1][0]._parameter_ordering
+                c.key
+                for c, v in (
+                    (
+                        bulk_ud.result.context
+                    ).compiled.compile_state.statement._ordered_values
+                )
             ]
-            eq_(["id", "name"], cols)
+            m1(cols)
+
+        q = session.query(User)
+        q.filter(User.id == 15).update(
+            (("age", 123), ("name", "foob")),
+            update_args={"preserve_parameter_order": True},
+        )
+
+        eq_(m1.mock_calls[0][1][0], ["age_int", "name"])
+
+        m1.mock_calls = []
+
+        q = session.query(User)
+        q.filter(User.id == 15).update(
+            [("name", "foob"), ("age", 123)],
+            update_args={"preserve_parameter_order": True},
+        )
+        eq_(m1.mock_calls[0][1][0], ["name", "age_int"])
+
+    def test_update_multi_values_error_future(self):
+        User = self.classes.User
+        session = Session(testing.db, future=True)
+
+        # Do update using a tuple and check that order is preserved
+
+        stmt = (
+            update(User)
+            .filter(User.id == 15)
+            .values([("id", 123), ("name", "foob")])
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "UPDATE construct does not support multiple parameter sets.",
+            session.execute,
+            stmt,
+        )
+
+    def test_update_preserve_parameter_order_future(self):
+        User = self.classes.User
+        session = Session(testing.db, future=True)
+
+        # Do update using a tuple and check that order is preserved
+
+        stmt = (
+            update(User)
+            .filter(User.id == 15)
+            .ordered_values(("age", 123), ("name", "foob"))
+        )
+        result = session.execute(stmt)
+        cols = [
+            c.key
+            for c, v in (
+                (
+                    result.context
+                ).compiled.compile_state.statement._ordered_values
+            )
+        ]
+        eq_(["age_int", "name"], cols)
 
         # Now invert the order and use a list instead, and check that order is
         # also preserved
-        q = session.query(User)
-        with mock.patch.object(q, "_execute_crud") as exec_:
-            q.filter(User.id == 15).update(
-                [("name", "foob"), ("id", 123)],
-                update_args={"preserve_parameter_order": True},
+        stmt = (
+            update(User)
+            .filter(User.id == 15)
+            .ordered_values(
+                ("name", "foob"),
+                ("age", 123),
             )
-            cols = [
-                c.key for c in exec_.mock_calls[0][1][0]._parameter_ordering
-            ]
-            eq_(["name", "id"], cols)
+        )
+        result = session.execute(stmt)
+        cols = [
+            c.key
+            for c, v in (
+                result.context
+            ).compiled.compile_state.statement._ordered_values
+        ]
+        eq_(["name", "age_int"], cols)
+
+    @testing.combinations(("update",), ("delete",), argnames="stmt_type")
+    @testing.combinations(
+        ("evaluate",), ("fetch",), (None,), argnames="sync_type"
+    )
+    def test_routing_session(self, stmt_type, sync_type, connection):
+        User = self.classes.User
+
+        if stmt_type == "update":
+            stmt = update(User).values(age=123)
+            expected = [Update]
+        elif stmt_type == "delete":
+            stmt = delete(User)
+            expected = [Delete]
+        else:
+            assert False
+
+        received = []
+
+        class RoutingSession(Session):
+            def get_bind(self, **kw):
+                received.append(type(kw["clause"]))
+                return super(RoutingSession, self).get_bind(**kw)
+
+        stmt = stmt.execution_options(synchronize_session=sync_type)
+
+        if sync_type == "fetch":
+            expected.insert(0, Select)
+
+            if not connection.dialect.full_returning:
+                expected.insert(0, Select)
+
+        with RoutingSession(bind=connection) as sess:
+            sess.execute(stmt)
+
+        eq_(received, expected)
 
 
 class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
@@ -956,8 +1581,8 @@ class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
             cls.tables.users,
         )
 
-        mapper(User, users)
-        mapper(
+        cls.mapper_registry.map_imperatively(User, users)
+        cls.mapper_registry.map_imperatively(
             Document,
             documents,
             properties={
@@ -972,7 +1597,7 @@ class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
     def test_update_with_eager_relationships(self):
         Document = self.classes.Document
 
-        sess = Session()
+        sess = fixture_session()
 
         foo, bar, baz = sess.query(Document).order_by(Document.id).all()
         sess.query(Document).filter(Document.user_id == 1).update(
@@ -989,7 +1614,7 @@ class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
     def test_update_with_explicit_joinedload(self):
         User = self.classes.User
 
-        sess = Session()
+        sess = fixture_session()
 
         john, jack, jill, jane = sess.query(User).order_by(User.id).all()
         sess.query(User).options(joinedload(User.documents)).filter(
@@ -1005,7 +1630,7 @@ class UpdateDeleteIgnoresLoadersTest(fixtures.MappedTest):
     def test_delete_with_eager_relationships(self):
         Document = self.classes.Document
 
-        sess = Session()
+        sess = fixture_session()
 
         sess.query(Document).filter(Document.user_id == 1).delete(
             synchronize_session=False
@@ -1074,8 +1699,8 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
             cls.tables.users,
         )
 
-        mapper(User, users)
-        mapper(
+        cls.mapper_registry.map_imperatively(User, users)
+        cls.mapper_registry.map_imperatively(
             Document,
             documents,
             properties={"user": relationship(User, backref="documents")},
@@ -1084,7 +1709,7 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
     @testing.requires.update_from
     def test_update_from_joined_subq_test(self):
         Document = self.classes.Document
-        s = Session()
+        s = fixture_session()
 
         subq = (
             s.query(func.max(Document.title).label("title"))
@@ -1113,7 +1738,7 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
     @testing.requires.delete_from
     def test_delete_from_joined_subq_test(self):
         Document = self.classes.Document
-        s = Session()
+        s = fixture_session()
 
         subq = (
             s.query(func.max(Document.title).label("title"))
@@ -1134,25 +1759,51 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
         User = self.classes.User
         Document = self.classes.Document
 
-        s = Session()
+        s = fixture_session()
 
         q = s.query(User).filter(User.id == Document.user_id)
+
         assert_raises_message(
             exc.InvalidRequestError,
             "Could not evaluate current criteria in Python.",
             q.update,
-            {"name": "ed"},
+            {"samename": "ed"},
+        )
+
+    @testing.requires.multi_table_update
+    def test_multi_table_criteria_ok_wo_eval(self):
+        User = self.classes.User
+        Document = self.classes.Document
+
+        s = fixture_session()
+
+        q = s.query(User).filter(User.id == Document.user_id)
+
+        q.update({Document.samename: "ed"}, synchronize_session="fetch")
+        eq_(
+            s.query(User.id, Document.samename, User.samename)
+            .filter(User.id == Document.user_id)
+            .order_by(User.id)
+            .all(),
+            [
+                (1, "ed", None),
+                (1, "ed", None),
+                (2, "ed", None),
+                (2, "ed", None),
+                (3, "ed", None),
+                (3, "ed", None),
+            ],
         )
 
     @testing.requires.update_where_target_in_subquery
     def test_update_using_in(self):
         Document = self.classes.Document
-        s = Session()
+        s = fixture_session()
 
         subq = (
             s.query(func.max(Document.title).label("title"))
             .group_by(Document.user_id)
-            .subquery()
+            .scalar_subquery()
         )
 
         s.query(Document).filter(Document.title.in_(subq)).update(
@@ -1177,17 +1828,18 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
     @testing.requires.standalone_binds
     def test_update_using_case(self):
         Document = self.classes.Document
-        s = Session()
+        s = fixture_session()
 
         subq = (
             s.query(func.max(Document.title).label("title"))
             .group_by(Document.user_id)
-            .subquery()
+            .scalar_subquery()
         )
 
         # this would work with Firebird if you do literal_column('1')
         # instead
-        case_stmt = case([(Document.title.in_(subq), True)], else_=False)
+        case_stmt = case((Document.title.in_(subq), True), else_=False)
+
         s.query(Document).update(
             {"flag": case_stmt}, synchronize_session=False
         )
@@ -1206,12 +1858,12 @@ class UpdateDeleteFromTest(fixtures.MappedTest):
             ),
         )
 
-    @testing.only_on("mysql", "Multi table update")
+    @testing.requires.multi_table_update
     def test_update_from_multitable_same_names(self):
         Document = self.classes.Document
         User = self.classes.User
 
-        s = Session()
+        s = fixture_session()
 
         s.query(Document).filter(User.id == Document.user_id).filter(
             User.id == 2
@@ -1255,14 +1907,16 @@ class ExpressionUpdateTest(fixtures.MappedTest):
     @classmethod
     def setup_mappers(cls):
         data = cls.tables.data
-        mapper(cls.classes.Data, data, properties={"cnt": data.c.counter})
+        cls.mapper_registry.map_imperatively(
+            cls.classes.Data, data, properties={"cnt": data.c.counter}
+        )
 
     @testing.provide_metadata
     def test_update_attr_names(self):
         Data = self.classes.Data
 
         d1 = Data()
-        sess = Session()
+        sess = fixture_session()
         sess.add(d1)
         sess.commit()
         eq_(d1.cnt, 0)
@@ -1280,16 +1934,23 @@ class ExpressionUpdateTest(fixtures.MappedTest):
 
     def test_update_args(self):
         Data = self.classes.Data
-        session = testing.mock.Mock(wraps=Session())
+        session = fixture_session()
         update_args = {"mysql_limit": 1}
 
+        m1 = testing.mock.Mock()
+
+        @event.listens_for(session, "after_bulk_update")
+        def do_orm_execute(bulk_ud):
+            update_stmt = (
+                bulk_ud.result.context.compiled.compile_state.statement
+            )
+            m1(update_stmt)
+
         q = session.query(Data)
-        with testing.mock.patch.object(q, "_execute_crud") as exec_:
-            q.update({Data.cnt: Data.cnt + 1}, update_args=update_args)
-        eq_(exec_.call_count, 1)
-        args, kwargs = exec_.mock_calls[0][1:3]
-        eq_(len(args), 2)
-        update_stmt = args[0]
+        q.update({Data.cnt: Data.cnt + 1}, update_args=update_args)
+
+        update_stmt = m1.mock_calls[0][1][0]
+
         eq_(update_stmt.dialect_kwargs, update_args)
 
 
@@ -1340,18 +2001,22 @@ class InheritTest(fixtures.DeclarativeMappedTest):
         )
         s.commit()
 
-    def test_illegal_metadata(self):
+    @testing.only_on("mysql", "Multi table update")
+    def test_update_from_join_no_problem(self):
         person = self.classes.Person.__table__
         engineer = self.classes.Engineer.__table__
 
-        sess = Session()
-        assert_raises_message(
-            exc.InvalidRequestError,
-            "This operation requires only one Table or entity be "
-            "specified as the target.",
-            sess.query(person.join(engineer)).update,
-            {},
+        sess = Session(testing.db, future=True)
+        sess.query(person.join(engineer)).filter(person.c.name == "e2").update(
+            {person.c.name: "updated", engineer.c.engineer_name: "e2a"},
         )
+        obj = sess.execute(
+            select(self.classes.Engineer).filter(
+                self.classes.Engineer.name == "updated"
+            )
+        ).scalar()
+        eq_(obj.name, "updated")
+        eq_(obj.engineer_name, "e2a")
 
     def test_update_subtable_only(self):
         Engineer = self.classes.Engineer
@@ -1401,3 +2066,251 @@ class InheritTest(fixtures.DeclarativeMappedTest):
             set(s.query(Person.name, Engineer.engineer_name)),
             set([("e1", "e1"), ("e22", "e55")]),
         )
+
+
+class SingleTablePolymorphicTest(fixtures.DeclarativeMappedTest):
+    __backend__ = True
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class Staff(Base):
+            __tablename__ = "staff"
+            position = Column(String(10), nullable=False)
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            name = Column(String(5))
+            stats = Column(String(5))
+            __mapper_args__ = {"polymorphic_on": position}
+
+        class Sales(Staff):
+            sales_stats = Column(String(5))
+            __mapper_args__ = {"polymorphic_identity": "sales"}
+
+        class Support(Staff):
+            support_stats = Column(String(5))
+            __mapper_args__ = {"polymorphic_identity": "support"}
+
+    @classmethod
+    def insert_data(cls, connection):
+        with sessionmaker(connection).begin() as session:
+            Sales, Support = (
+                cls.classes.Sales,
+                cls.classes.Support,
+            )
+            session.add_all(
+                [
+                    Sales(name="n1", sales_stats="1", stats="a"),
+                    Sales(name="n2", sales_stats="2", stats="b"),
+                    Support(name="n1", support_stats="3", stats="c"),
+                    Support(name="n2", support_stats="4", stats="d"),
+                ]
+            )
+
+    @testing.combinations(
+        ("fetch", False),
+        ("fetch", True),
+        ("evaluate", False),
+        ("evaluate", True),
+    )
+    def test_update(self, fetchstyle, future):
+        Staff, Sales, Support = self.classes("Staff", "Sales", "Support")
+
+        sess = fixture_session()
+
+        en1, en2 = (
+            sess.execute(select(Sales).order_by(Sales.sales_stats))
+            .scalars()
+            .all()
+        )
+        mn1, mn2 = (
+            sess.execute(select(Support).order_by(Support.support_stats))
+            .scalars()
+            .all()
+        )
+
+        if future:
+            sess.execute(
+                update(Sales)
+                .filter_by(name="n1")
+                .values(stats="p")
+                .execution_options(synchronize_session=fetchstyle)
+            )
+        else:
+            sess.query(Sales).filter_by(name="n1").update(
+                {"stats": "p"}, synchronize_session=fetchstyle
+            )
+
+        eq_(en1.stats, "p")
+        eq_(mn1.stats, "c")
+        eq_(
+            sess.execute(
+                select(Staff.position, Staff.name, Staff.stats).order_by(
+                    Staff.id
+                )
+            ).all(),
+            [
+                ("sales", "n1", "p"),
+                ("sales", "n2", "b"),
+                ("support", "n1", "c"),
+                ("support", "n2", "d"),
+            ],
+        )
+
+    @testing.combinations(
+        ("fetch", False),
+        ("fetch", True),
+        ("evaluate", False),
+        ("evaluate", True),
+    )
+    def test_delete(self, fetchstyle, future):
+        Staff, Sales, Support = self.classes("Staff", "Sales", "Support")
+
+        sess = fixture_session()
+        en1, en2 = sess.query(Sales).order_by(Sales.sales_stats).all()
+        mn1, mn2 = sess.query(Support).order_by(Support.support_stats).all()
+
+        if future:
+            sess.execute(
+                delete(Sales)
+                .filter_by(name="n1")
+                .execution_options(synchronize_session=fetchstyle)
+            )
+        else:
+            sess.query(Sales).filter_by(name="n1").delete(
+                synchronize_session=fetchstyle
+            )
+        assert en1 not in sess
+        assert en2 in sess
+        assert mn1 in sess
+        assert mn2 in sess
+
+        eq_(
+            sess.execute(
+                select(Staff.position, Staff.name, Staff.stats).order_by(
+                    Staff.id
+                )
+            ).all(),
+            [
+                ("sales", "n2", "b"),
+                ("support", "n1", "c"),
+                ("support", "n2", "d"),
+            ],
+        )
+
+
+class LoadFromReturningTest(fixtures.MappedTest):
+    __backend__ = True
+    __requires__ = ("full_returning",)
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "users",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("name", String(32)),
+            Column("age_int", Integer),
+        )
+
+    @classmethod
+    def setup_classes(cls):
+        class User(cls.Comparable):
+            pass
+
+        class Address(cls.Comparable):
+            pass
+
+    @classmethod
+    def insert_data(cls, connection):
+        users = cls.tables.users
+
+        connection.execute(
+            users.insert(),
+            [
+                dict(id=1, name="john", age_int=25),
+                dict(id=2, name="jack", age_int=47),
+                dict(id=3, name="jill", age_int=29),
+                dict(id=4, name="jane", age_int=37),
+            ],
+        )
+
+    @classmethod
+    def setup_mappers(cls):
+        User = cls.classes.User
+        users = cls.tables.users
+
+        cls.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={
+                "age": users.c.age_int,
+            },
+        )
+
+    def test_load_from_update(self, connection):
+        User = self.classes.User
+
+        stmt = (
+            update(User)
+            .where(User.name.in_(["jack", "jill"]))
+            .values(age=User.age + 5)
+            .returning(User)
+        )
+
+        stmt = select(User).from_statement(stmt)
+
+        with Session(connection) as sess:
+            rows = sess.execute(stmt).scalars().all()
+
+            eq_(
+                rows,
+                [User(name="jack", age=52), User(name="jill", age=34)],
+            )
+
+    @testing.combinations(
+        ("single",),
+        ("multiple", testing.requires.multivalues_inserts),
+        argnames="params",
+    )
+    def test_load_from_insert(self, connection, params):
+        User = self.classes.User
+
+        if params == "multiple":
+            values = [
+                {User.id: 5, User.age: 25, User.name: "spongebob"},
+                {User.id: 6, User.age: 30, User.name: "patrick"},
+                {User.id: 7, User.age: 35, User.name: "squidward"},
+            ]
+        elif params == "single":
+            values = {User.id: 5, User.age: 25, User.name: "spongebob"}
+        else:
+            assert False
+
+        stmt = insert(User).values(values).returning(User)
+
+        stmt = select(User).from_statement(stmt)
+
+        with Session(connection) as sess:
+            rows = sess.execute(stmt).scalars().all()
+
+            if params == "multiple":
+                eq_(
+                    rows,
+                    [
+                        User(name="spongebob", age=25),
+                        User(name="patrick", age=30),
+                        User(name="squidward", age=35),
+                    ],
+                )
+            elif params == "single":
+                eq_(
+                    rows,
+                    [User(name="spongebob", age=25)],
+                )
+            else:
+                assert False

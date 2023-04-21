@@ -1,0 +1,10 @@
+#!/bin/sh
+
+PYTHON3S=$(py3versions -vr)
+
+set -e
+echo "===> Running tests"
+for i in ${PYTHON3S}; do
+	echo "===> Testing with python$i"
+	python$i -m pytest --ignore=.pc
+done

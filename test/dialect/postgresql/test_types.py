@@ -12,7 +12,6 @@ from sqlalchemy import Column
 from sqlalchemy import column
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
-from sqlalchemy import event
 from sqlalchemy import exc
 from sqlalchemy import Float
 from sqlalchemy import func
@@ -28,13 +27,13 @@ from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import Text
 from sqlalchemy import text
+from sqlalchemy import type_coerce
 from sqlalchemy import TypeDecorator
 from sqlalchemy import types
 from sqlalchemy import Unicode
 from sqlalchemy import util
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import array
-from sqlalchemy.dialects.postgresql import base
 from sqlalchemy.dialects.postgresql import DATERANGE
 from sqlalchemy.dialects.postgresql import HSTORE
 from sqlalchemy.dialects.postgresql import hstore
@@ -46,11 +45,12 @@ from sqlalchemy.dialects.postgresql import NUMRANGE
 from sqlalchemy.dialects.postgresql import TSRANGE
 from sqlalchemy.dialects.postgresql import TSTZRANGE
 from sqlalchemy.exc import CompileError
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import bindparam
 from sqlalchemy.sql import operators
 from sqlalchemy.sql import sqltypes
-from sqlalchemy.testing import engines
+from sqlalchemy.sql.type_api import Variant
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertions import assert_raises
 from sqlalchemy.testing.assertions import assert_raises_message
@@ -60,11 +60,9 @@ from sqlalchemy.testing.assertions import ComparesTables
 from sqlalchemy.testing.assertions import eq_
 from sqlalchemy.testing.assertions import is_
 from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.schema import pep435_enum
 from sqlalchemy.testing.suite import test_types as suite
 from sqlalchemy.testing.util import round_decimal
-
-
-tztable = notztable = metadata = table = None
 
 
 class FloatCoercionTest(fixtures.TablesTest, AssertsExecutionResults):
@@ -102,11 +100,7 @@ class FloatCoercionTest(fixtures.TablesTest, AssertsExecutionResults):
             )
         )
 
-    @testing.fails_on(
-        "postgresql+zxjdbc",
-        "XXX: postgresql+zxjdbc currently returns a Decimal result for Float",
-    )
-    def test_float_coercion(self):
+    def test_float_coercion(self, connection):
         data_table = self.tables.data_table
 
         for type_, result in [
@@ -115,23 +109,18 @@ class FloatCoercionTest(fixtures.TablesTest, AssertsExecutionResults):
             (Float(asdecimal=True), decimal.Decimal("140.381230939")),
             (Numeric(asdecimal=False), 140.381230939),
         ]:
-            ret = testing.db.execute(
-                select([func.stddev_pop(data_table.c.data, type_=type_)])
+            ret = connection.execute(
+                select(func.stddev_pop(data_table.c.data, type_=type_))
             ).scalar()
 
             eq_(round_decimal(ret, 9), result)
 
-            ret = testing.db.execute(
-                select([cast(func.stddev_pop(data_table.c.data), type_)])
+            ret = connection.execute(
+                select(cast(func.stddev_pop(data_table.c.data), type_))
             ).scalar()
             eq_(round_decimal(ret, 9), result)
 
-    @testing.fails_on(
-        "postgresql+zxjdbc", "zxjdbc has no support for PG arrays"
-    )
-    @testing.provide_metadata
-    def test_arrays_pg(self):
-        metadata = self.metadata
+    def test_arrays_pg(self, connection, metadata):
         t1 = Table(
             "t",
             metadata,
@@ -140,17 +129,14 @@ class FloatCoercionTest(fixtures.TablesTest, AssertsExecutionResults):
             Column("z", postgresql.ARRAY(postgresql.DOUBLE_PRECISION)),
             Column("q", postgresql.ARRAY(Numeric)),
         )
-        metadata.create_all()
-        t1.insert().execute(x=[5], y=[5], z=[6], q=[decimal.Decimal("6.4")])
-        row = t1.select().execute().first()
+        metadata.create_all(connection)
+        connection.execute(
+            t1.insert(), dict(x=[5], y=[5], z=[6], q=[decimal.Decimal("6.4")])
+        )
+        row = connection.execute(t1.select()).first()
         eq_(row, ([5], [5], [6], [decimal.Decimal("6.4")]))
 
-    @testing.fails_on(
-        "postgresql+zxjdbc", "zxjdbc has no support for PG arrays"
-    )
-    @testing.provide_metadata
-    def test_arrays_base(self):
-        metadata = self.metadata
+    def test_arrays_base(self, connection, metadata):
         t1 = Table(
             "t",
             metadata,
@@ -159,9 +145,11 @@ class FloatCoercionTest(fixtures.TablesTest, AssertsExecutionResults):
             Column("z", sqltypes.ARRAY(postgresql.DOUBLE_PRECISION)),
             Column("q", sqltypes.ARRAY(Numeric)),
         )
-        metadata.create_all()
-        t1.insert().execute(x=[5], y=[5], z=[6], q=[decimal.Decimal("6.4")])
-        row = t1.select().execute().first()
+        metadata.create_all(connection)
+        connection.execute(
+            t1.insert(), dict(x=[5], y=[5], z=[6], q=[decimal.Decimal("6.4")])
+        )
+        row = connection.execute(t1.select()).first()
         eq_(row, ([5], [5], [6], [decimal.Decimal("6.4")]))
 
 
@@ -170,13 +158,23 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
 
     __only_on__ = "postgresql > 8.3"
 
-    @testing.fails_on(
-        "postgresql+zxjdbc",
-        'zxjdbc fails on ENUM: column "XXX" is of type '
-        "XXX but expression is of type character varying",
-    )
-    @testing.provide_metadata
-    def test_create_table(self):
+    def test_native_enum_warnings(self):
+        """test #6106"""
+
+        with testing.expect_warnings(
+            "the native_enum flag does not apply to the "
+            "sqlalchemy.dialects.postgresql.ENUM datatype;"
+        ):
+            e1 = postgresql.ENUM("a", "b", "c", native_enum=False)
+
+        e2 = postgresql.ENUM("a", "b", "c", native_enum=True)
+        e3 = postgresql.ENUM("a", "b", "c")
+
+        is_(e1.native_enum, True)
+        is_(e2.native_enum, True)
+        is_(e3.native_enum, True)
+
+    def test_create_table(self, metadata, connection):
         metadata = self.metadata
         t1 = Table(
             "table",
@@ -186,19 +184,18 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
                 "value", Enum("one", "two", "three", name="onetwothreetype")
             ),
         )
-        with testing.db.connect() as conn:
-            t1.create(conn)
-            t1.create(conn, checkfirst=True)  # check the create
-            conn.execute(t1.insert(), value="two")
-            conn.execute(t1.insert(), value="three")
-            conn.execute(t1.insert(), value="three")
-            eq_(
-                conn.execute(t1.select().order_by(t1.c.id)).fetchall(),
-                [(1, "two"), (2, "three"), (3, "three")],
-            )
+        t1.create(connection)
+        t1.create(connection, checkfirst=True)  # check the create
+        connection.execute(t1.insert(), dict(value="two"))
+        connection.execute(t1.insert(), dict(value="three"))
+        connection.execute(t1.insert(), dict(value="three"))
+        eq_(
+            connection.execute(t1.select().order_by(t1.c.id)).fetchall(),
+            [(1, "two"), (2, "three"), (3, "three")],
+        )
 
-    @testing.combinations(None, "foo")
-    def test_create_table_schema_translate_map(self, symbol_name):
+    @testing.combinations(None, "foo", argnames="symbol_name")
+    def test_create_table_schema_translate_map(self, connection, symbol_name):
         # note we can't use the fixture here because it will not drop
         # from the correct schema
         metadata = MetaData()
@@ -219,52 +216,103 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ),
             schema=symbol_name,
         )
-        with testing.db.connect() as conn:
-            conn = conn.execution_options(
-                schema_translate_map={symbol_name: testing.config.test_schema}
-            )
-            t1.create(conn)
-            assert "schema_enum" in [
-                e["name"]
-                for e in inspect(conn).get_enums(
-                    schema=testing.config.test_schema
-                )
-            ]
-            t1.create(conn, checkfirst=True)
+        conn = connection.execution_options(
+            schema_translate_map={symbol_name: testing.config.test_schema}
+        )
+        t1.create(conn)
+        assert "schema_enum" in [
+            e["name"]
+            for e in inspect(conn).get_enums(schema=testing.config.test_schema)
+        ]
+        t1.create(conn, checkfirst=True)
 
-            conn.execute(t1.insert(), value="two")
-            conn.execute(t1.insert(), value="three")
-            conn.execute(t1.insert(), value="three")
-            eq_(
-                conn.execute(t1.select().order_by(t1.c.id)).fetchall(),
-                [(1, "two"), (2, "three"), (3, "three")],
-            )
-
-            t1.drop(conn)
-            assert "schema_enum" not in [
-                e["name"]
-                for e in inspect(conn).get_enums(
-                    schema=testing.config.test_schema
-                )
-            ]
-            t1.drop(conn, checkfirst=True)
-
-    def test_name_required(self):
-        metadata = MetaData(testing.db)
-        etype = Enum("four", "five", "six", metadata=metadata)
-        assert_raises(exc.CompileError, etype.create)
-        assert_raises(
-            exc.CompileError, etype.compile, dialect=postgresql.dialect()
+        conn.execute(t1.insert(), dict(value="two"))
+        conn.execute(t1.insert(), dict(value="three"))
+        conn.execute(t1.insert(), dict(value="three"))
+        eq_(
+            conn.execute(t1.select().order_by(t1.c.id)).fetchall(),
+            [(1, "two"), (2, "three"), (3, "three")],
         )
 
-    @testing.fails_on(
-        "postgresql+zxjdbc",
-        'zxjdbc fails on ENUM: column "XXX" is of type '
-        "XXX but expression is of type character varying",
+        t1.drop(conn)
+        assert "schema_enum" not in [
+            e["name"]
+            for e in inspect(conn).get_enums(schema=testing.config.test_schema)
+        ]
+        t1.drop(conn, checkfirst=True)
+
+    @testing.combinations(
+        ("local_schema",),
+        ("metadata_schema_only",),
+        ("inherit_table_schema",),
+        ("override_metadata_schema",),
+        argnames="test_case",
     )
-    @testing.provide_metadata
-    def test_unicode_labels(self):
-        metadata = self.metadata
+    @testing.requires.schemas
+    def test_schema_inheritance(self, test_case, metadata, connection):
+        """test #6373"""
+
+        metadata.schema = testing.config.test_schema
+
+        if test_case == "metadata_schema_only":
+            enum = Enum(
+                "four", "five", "six", metadata=metadata, name="myenum"
+            )
+            assert_schema = testing.config.test_schema
+        elif test_case == "override_metadata_schema":
+            enum = Enum(
+                "four",
+                "five",
+                "six",
+                metadata=metadata,
+                schema=testing.config.test_schema_2,
+                name="myenum",
+            )
+            assert_schema = testing.config.test_schema_2
+        elif test_case == "inherit_table_schema":
+            enum = Enum(
+                "four",
+                "five",
+                "six",
+                metadata=metadata,
+                inherit_schema=True,
+                name="myenum",
+            )
+            assert_schema = testing.config.test_schema_2
+        elif test_case == "local_schema":
+            enum = Enum("four", "five", "six", name="myenum")
+            assert_schema = testing.config.db.dialect.default_schema_name
+
+        Table(
+            "t",
+            metadata,
+            Column("data", enum),
+            schema=testing.config.test_schema_2,
+        )
+
+        metadata.create_all(connection)
+
+        eq_(
+            inspect(connection).get_enums(schema=assert_schema),
+            [
+                {
+                    "labels": ["four", "five", "six"],
+                    "name": "myenum",
+                    "schema": assert_schema,
+                    "visible": assert_schema
+                    == testing.config.db.dialect.default_schema_name,
+                }
+            ],
+        )
+
+    def test_name_required(self, metadata, connection):
+        etype = Enum("four", "five", "six", metadata=metadata)
+        assert_raises(exc.CompileError, etype.create, connection)
+        assert_raises(
+            exc.CompileError, etype.compile, dialect=connection.dialect
+        )
+
+    def test_unicode_labels(self, connection, metadata):
         t1 = Table(
             "table",
             metadata,
@@ -279,42 +327,48 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
                 ),
             ),
         )
-        metadata.create_all()
-        t1.insert().execute(value=util.u("drôle"))
-        t1.insert().execute(value=util.u("réveillé"))
-        t1.insert().execute(value=util.u("S’il"))
+        metadata.create_all(connection)
+        connection.execute(t1.insert(), dict(value=util.u("drôle")))
+        connection.execute(t1.insert(), dict(value=util.u("réveillé")))
+        connection.execute(t1.insert(), dict(value=util.u("S’il")))
         eq_(
-            t1.select().order_by(t1.c.id).execute().fetchall(),
+            connection.execute(t1.select().order_by(t1.c.id)).fetchall(),
             [
                 (1, util.u("drôle")),
                 (2, util.u("réveillé")),
                 (3, util.u("S’il")),
             ],
         )
-        m2 = MetaData(testing.db)
-        t2 = Table("table", m2, autoload=True)
+        m2 = MetaData()
+        t2 = Table("table", m2, autoload_with=connection)
         eq_(
             t2.c.value.type.enums,
             [util.u("réveillé"), util.u("drôle"), util.u("S’il")],
         )
 
-    @testing.provide_metadata
-    def test_non_native_enum(self):
+    def test_non_native_enum(self, metadata, connection):
         metadata = self.metadata
         t1 = Table(
             "foo",
             metadata,
             Column(
                 "bar",
-                Enum("one", "two", "three", name="myenum", native_enum=False),
+                Enum(
+                    "one",
+                    "two",
+                    "three",
+                    name="myenum",
+                    create_constraint=True,
+                    native_enum=False,
+                ),
             ),
         )
 
         def go():
-            t1.create(testing.db)
+            t1.create(connection)
 
         self.assert_sql(
-            testing.db,
+            connection,
             go,
             [
                 (
@@ -325,26 +379,31 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
                 )
             ],
         )
-        with testing.db.begin() as conn:
-            conn.execute(t1.insert(), {"bar": "two"})
-            eq_(conn.scalar(select([t1.c.bar])), "two")
+        connection.execute(t1.insert(), {"bar": "two"})
+        eq_(connection.scalar(select(t1.c.bar)), "two")
 
-    @testing.provide_metadata
-    def test_non_native_enum_w_unicode(self):
+    def test_non_native_enum_w_unicode(self, metadata, connection):
         metadata = self.metadata
         t1 = Table(
             "foo",
             metadata,
             Column(
-                "bar", Enum("B", util.u("Ü"), name="myenum", native_enum=False)
+                "bar",
+                Enum(
+                    "B",
+                    util.u("Ü"),
+                    name="myenum",
+                    create_constraint=True,
+                    native_enum=False,
+                ),
             ),
         )
 
         def go():
-            t1.create(testing.db)
+            t1.create(connection)
 
         self.assert_sql(
-            testing.db,
+            connection,
             go,
             [
                 (
@@ -358,12 +417,10 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ],
         )
 
-        with testing.db.begin() as conn:
-            conn.execute(t1.insert(), {"bar": util.u("Ü")})
-            eq_(conn.scalar(select([t1.c.bar])), util.u("Ü"))
+        connection.execute(t1.insert(), {"bar": util.u("Ü")})
+        eq_(connection.scalar(select(t1.c.bar)), util.u("Ü"))
 
-    @testing.provide_metadata
-    def test_disable_create(self):
+    def test_disable_create(self, metadata, connection):
         metadata = self.metadata
 
         e1 = postgresql.ENUM(
@@ -373,13 +430,12 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
         t1 = Table("e1", metadata, Column("c1", e1))
         # table can be created separately
         # without conflict
-        e1.create(bind=testing.db)
-        t1.create(testing.db)
-        t1.drop(testing.db)
-        e1.drop(bind=testing.db)
+        e1.create(bind=connection)
+        t1.create(connection)
+        t1.drop(connection)
+        e1.drop(bind=connection)
 
-    @testing.provide_metadata
-    def test_dont_keep_checking(self, connection):
+    def test_dont_keep_checking(self, metadata, connection):
         metadata = self.metadata
 
         e1 = postgresql.ENUM("one", "two", "three", name="myenum")
@@ -390,10 +446,12 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             metadata.create_all(connection)
 
         asserter.assert_(
+            # check for table
             RegexSQL(
                 "select relname from pg_class c join pg_namespace.*",
                 dialect="postgresql",
             ),
+            # check for enum, just once
             RegexSQL(r".*SELECT EXISTS ", dialect="postgresql"),
             RegexSQL("CREATE TYPE myenum AS ENUM .*", dialect="postgresql"),
             RegexSQL(r"CREATE TABLE t .*", dialect="postgresql"),
@@ -412,8 +470,7 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             RegexSQL("DROP TYPE myenum", dialect="postgresql"),
         )
 
-    @testing.provide_metadata
-    def test_generate_multiple(self):
+    def test_generate_multiple(self, metadata, connection):
         """Test that the same enum twice only generates once
         for the create_all() call, without using checkfirst.
 
@@ -421,21 +478,18 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
         now handles this.
 
         """
-        metadata = self.metadata
-
         e1 = Enum("one", "two", "three", name="myenum")
         Table("e1", metadata, Column("c1", e1))
 
         Table("e2", metadata, Column("c1", e1))
 
-        metadata.create_all(checkfirst=False)
-        metadata.drop_all(checkfirst=False)
+        metadata.create_all(connection, checkfirst=False)
+        metadata.drop_all(connection, checkfirst=False)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
 
-    @testing.provide_metadata
-    def test_generate_alone_on_metadata(self):
+    def test_generate_alone_on_metadata(self, connection, metadata):
         """Test that the same enum twice only generates once
         for the create_all() call, without using checkfirst.
 
@@ -443,20 +497,17 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
         now handles this.
 
         """
-        metadata = self.metadata
 
-        Enum("one", "two", "three", name="myenum", metadata=self.metadata)
+        Enum("one", "two", "three", name="myenum", metadata=metadata)
 
-        metadata.create_all(checkfirst=False)
-        assert "myenum" in [e["name"] for e in inspect(testing.db).get_enums()]
-        metadata.drop_all(checkfirst=False)
+        metadata.create_all(connection, checkfirst=False)
+        assert "myenum" in [e["name"] for e in inspect(connection).get_enums()]
+        metadata.drop_all(connection, checkfirst=False)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
 
-    @testing.provide_metadata
-    def test_generate_multiple_on_metadata(self):
-        metadata = self.metadata
+    def test_generate_multiple_on_metadata(self, connection, metadata):
 
         e1 = Enum("one", "two", "three", name="myenum", metadata=metadata)
 
@@ -464,20 +515,20 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
 
         t2 = Table("e2", metadata, Column("c1", e1))
 
-        metadata.create_all(checkfirst=False)
-        assert "myenum" in [e["name"] for e in inspect(testing.db).get_enums()]
-        metadata.drop_all(checkfirst=False)
+        metadata.create_all(connection, checkfirst=False)
+        assert "myenum" in [e["name"] for e in inspect(connection).get_enums()]
+        metadata.drop_all(connection, checkfirst=False)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
 
-        e1.create()  # creates ENUM
-        t1.create()  # does not create ENUM
-        t2.create()  # does not create ENUM
+        e1.create(connection)  # creates ENUM
+        t1.create(connection)  # does not create ENUM
+        t2.create(connection)  # does not create ENUM
 
-    @testing.provide_metadata
-    def test_generate_multiple_schemaname_on_metadata(self):
-        metadata = self.metadata
+    def test_generate_multiple_schemaname_on_metadata(
+        self, metadata, connection
+    ):
 
         Enum("one", "two", "three", name="myenum", metadata=metadata)
         Enum(
@@ -489,38 +540,36 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             schema="test_schema",
         )
 
-        metadata.create_all(checkfirst=False)
-        assert "myenum" in [e["name"] for e in inspect(testing.db).get_enums()]
+        metadata.create_all(connection, checkfirst=False)
+        assert "myenum" in [e["name"] for e in inspect(connection).get_enums()]
         assert "myenum" in [
             e["name"]
-            for e in inspect(testing.db).get_enums(schema="test_schema")
+            for e in inspect(connection).get_enums(schema="test_schema")
         ]
-        metadata.drop_all(checkfirst=False)
+        metadata.drop_all(connection, checkfirst=False)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
         assert "myenum" not in [
             e["name"]
-            for e in inspect(testing.db).get_enums(schema="test_schema")
+            for e in inspect(connection).get_enums(schema="test_schema")
         ]
 
-    @testing.provide_metadata
-    def test_drops_on_table(self):
-        metadata = self.metadata
+    def test_drops_on_table(self, connection, metadata):
 
         e1 = Enum("one", "two", "three", name="myenum")
         table = Table("e1", metadata, Column("c1", e1))
 
-        table.create()
-        table.drop()
+        table.create(connection)
+        table.drop(connection)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
-        table.create()
-        assert "myenum" in [e["name"] for e in inspect(testing.db).get_enums()]
-        table.drop()
+        table.create(connection)
+        assert "myenum" in [e["name"] for e in inspect(connection).get_enums()]
+        table.drop(connection)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
 
     def test_create_drop_schema_translate_map(self, connection):
@@ -558,9 +607,8 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
 
         assert_raises(exc.ProgrammingError, e1.drop, conn, checkfirst=False)
 
-    @testing.provide_metadata
-    def test_remain_on_table_metadata_wide(self):
-        metadata = self.metadata
+    def test_remain_on_table_metadata_wide(self, metadata, future_connection):
+        connection = future_connection
 
         e1 = Enum("one", "two", "three", name="myenum", metadata=metadata)
         table = Table("e1", metadata, Column("c1", e1))
@@ -570,74 +618,81 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             sa.exc.ProgrammingError,
             '.*type "myenum" does not exist',
             table.create,
+            connection,
         )
-        table.create(checkfirst=True)
-        table.drop()
-        table.create(checkfirst=True)
-        table.drop()
-        assert "myenum" in [e["name"] for e in inspect(testing.db).get_enums()]
-        metadata.drop_all()
+        connection.rollback()
+
+        table.create(connection, checkfirst=True)
+        table.drop(connection)
+        table.create(connection, checkfirst=True)
+        table.drop(connection)
+        assert "myenum" in [e["name"] for e in inspect(connection).get_enums()]
+        metadata.drop_all(connection)
         assert "myenum" not in [
-            e["name"] for e in inspect(testing.db).get_enums()
+            e["name"] for e in inspect(connection).get_enums()
         ]
 
-    def test_non_native_dialect(self):
-        engine = engines.testing_engine()
+    def test_non_native_dialect(self, metadata, testing_engine):
+        engine = testing_engine()
         engine.connect()
         engine.dialect.supports_native_enum = False
-        metadata = MetaData()
         t1 = Table(
             "foo",
             metadata,
-            Column("bar", Enum("one", "two", "three", name="myenum")),
+            Column(
+                "bar",
+                Enum(
+                    "one",
+                    "two",
+                    "three",
+                    name="myenum",
+                    create_constraint=True,
+                ),
+            ),
         )
 
         def go():
             t1.create(engine)
 
-        try:
-            self.assert_sql(
-                engine,
-                go,
-                [
-                    (
-                        "CREATE TABLE foo (bar "
-                        "VARCHAR(5), CONSTRAINT myenum CHECK "
-                        "(bar IN ('one', 'two', 'three')))",
-                        {},
-                    )
-                ],
-            )
-        finally:
-            metadata.drop_all(engine)
+        self.assert_sql(
+            engine,
+            go,
+            [
+                (
+                    "CREATE TABLE foo (bar "
+                    "VARCHAR(5), CONSTRAINT myenum CHECK "
+                    "(bar IN ('one', 'two', 'three')))",
+                    {},
+                )
+            ],
+        )
 
-    def test_standalone_enum(self):
-        metadata = MetaData(testing.db)
+    def test_standalone_enum(self, connection, metadata):
         etype = Enum(
             "four", "five", "six", name="fourfivesixtype", metadata=metadata
         )
-        etype.create()
+        etype.create(connection)
         try:
-            assert testing.db.dialect.has_type(testing.db, "fourfivesixtype")
+            assert connection.dialect.has_type(connection, "fourfivesixtype")
         finally:
-            etype.drop()
-            assert not testing.db.dialect.has_type(
-                testing.db, "fourfivesixtype"
+            etype.drop(connection)
+            assert not connection.dialect.has_type(
+                connection, "fourfivesixtype"
             )
-        metadata.create_all()
+        metadata.create_all(connection)
         try:
-            assert testing.db.dialect.has_type(testing.db, "fourfivesixtype")
+            assert connection.dialect.has_type(connection, "fourfivesixtype")
         finally:
-            metadata.drop_all()
-            assert not testing.db.dialect.has_type(
-                testing.db, "fourfivesixtype"
+            metadata.drop_all(connection)
+            assert not connection.dialect.has_type(
+                connection, "fourfivesixtype"
             )
 
-    def test_no_support(self):
+    def test_no_support(self, testing_engine):
         def server_version_info(self):
             return (8, 2)
 
-        e = engines.testing_engine()
+        e = testing_engine()
         dialect = e.dialect
         dialect._get_server_version_info = server_version_info
 
@@ -650,9 +705,7 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
         e.connect()
         assert not dialect.supports_native_enum
 
-    @testing.provide_metadata
-    def test_reflection(self):
-        metadata = self.metadata
+    def test_reflection(self, metadata, connection):
         etype = Enum(
             "four", "five", "six", name="fourfivesixtype", metadata=metadata
         )
@@ -665,17 +718,15 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ),
             Column("value2", etype),
         )
-        metadata.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("table", m2, autoload=True)
+        metadata.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("table", m2, autoload_with=connection)
         eq_(t2.c.value.type.enums, ["one", "two", "three"])
         eq_(t2.c.value.type.name, "onetwothreetype")
         eq_(t2.c.value2.type.enums, ["four", "five", "six"])
         eq_(t2.c.value2.type.name, "fourfivesixtype")
 
-    @testing.provide_metadata
-    def test_schema_reflection(self):
-        metadata = self.metadata
+    def test_schema_reflection(self, metadata, connection):
         etype = Enum(
             "four",
             "five",
@@ -700,19 +751,19 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ),
             Column("value2", etype),
         )
-        metadata.create_all()
-        m2 = MetaData(testing.db)
-        t2 = Table("table", m2, autoload=True)
+        metadata.create_all(connection)
+        m2 = MetaData()
+        t2 = Table("table", m2, autoload_with=connection)
         eq_(t2.c.value.type.enums, ["one", "two", "three"])
         eq_(t2.c.value.type.name, "onetwothreetype")
         eq_(t2.c.value2.type.enums, ["four", "five", "six"])
         eq_(t2.c.value2.type.name, "fourfivesixtype")
         eq_(t2.c.value2.type.schema, "test_schema")
 
-    @testing.provide_metadata
-    def test_custom_subclass(self):
+    def test_custom_subclass(self, metadata, connection):
         class MyEnum(TypeDecorator):
             impl = Enum("oneHI", "twoHI", "threeHI", name="myenum")
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 if value is not None:
@@ -725,14 +776,12 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
                 return value
 
         t1 = Table("table1", self.metadata, Column("data", MyEnum()))
-        self.metadata.create_all(testing.db)
+        self.metadata.create_all(connection)
 
-        with testing.db.connect() as conn:
-            conn.execute(t1.insert(), {"data": "two"})
-            eq_(conn.scalar(select([t1.c.data])), "twoHITHERE")
+        connection.execute(t1.insert(), {"data": "two"})
+        eq_(connection.scalar(select(t1.c.data)), "twoHITHERE")
 
-    @testing.provide_metadata
-    def test_generic_w_pg_variant(self):
+    def test_generic_w_pg_variant(self, metadata, connection):
         some_table = Table(
             "some_table",
             self.metadata,
@@ -752,25 +801,25 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ),
         )
 
-        with testing.db.begin() as conn:
-            assert "my_enum" not in [
-                e["name"] for e in inspect(conn).get_enums()
-            ]
+        assert "my_enum" not in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
-            self.metadata.create_all(conn)
+        self.metadata.create_all(connection)
 
-            assert "my_enum" in [e["name"] for e in inspect(conn).get_enums()]
+        assert "my_enum" in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
-            conn.execute(some_table.insert(), {"data": "five"})
+        connection.execute(some_table.insert(), {"data": "five"})
 
-            self.metadata.drop_all(conn)
+        self.metadata.drop_all(connection)
 
-            assert "my_enum" not in [
-                e["name"] for e in inspect(conn).get_enums()
-            ]
+        assert "my_enum" not in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
-    @testing.provide_metadata
-    def test_generic_w_some_other_variant(self):
+    def test_generic_w_some_other_variant(self, metadata, connection):
         some_table = Table(
             "some_table",
             self.metadata,
@@ -782,40 +831,43 @@ class EnumTest(fixtures.TestBase, AssertsExecutionResults):
             ),
         )
 
-        with testing.db.begin() as conn:
-            assert "my_enum" not in [
-                e["name"] for e in inspect(conn).get_enums()
-            ]
+        assert "my_enum" not in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
-            self.metadata.create_all(conn)
+        self.metadata.create_all(connection)
 
-            assert "my_enum" in [e["name"] for e in inspect(conn).get_enums()]
+        assert "my_enum" in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
-            conn.execute(some_table.insert(), {"data": "two"})
+        connection.execute(some_table.insert(), {"data": "two"})
 
-            self.metadata.drop_all(conn)
+        self.metadata.drop_all(connection)
 
-            assert "my_enum" not in [
-                e["name"] for e in inspect(conn).get_enums()
-            ]
+        assert "my_enum" not in [
+            e["name"] for e in inspect(connection).get_enums()
+        ]
 
 
 class OIDTest(fixtures.TestBase):
     __only_on__ = "postgresql"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_reflection(self):
-        metadata = self.metadata
+    def test_reflection(self, connection, metadata):
         Table(
             "table",
             metadata,
             Column("x", Integer),
             Column("y", postgresql.OID),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
         m2 = MetaData()
-        t2 = Table("table", m2, autoload_with=testing.db, autoload=True)
+        t2 = Table(
+            "table",
+            m2,
+            autoload_with=connection,
+        )
         assert isinstance(t2.c.y.type, postgresql.OID)
 
 
@@ -823,39 +875,45 @@ class RegClassTest(fixtures.TestBase):
     __only_on__ = "postgresql"
     __backend__ = True
 
-    @staticmethod
-    def _scalar(expression):
-        with testing.db.connect() as conn:
-            return conn.scalar(select([expression]))
+    @testing.fixture()
+    def scalar(self, connection):
+        def go(expression):
+            return connection.scalar(select(expression))
 
-    def test_cast_name(self):
-        eq_(self._scalar(cast("pg_class", postgresql.REGCLASS)), "pg_class")
+        return go
 
-    def test_cast_path(self):
+    def test_cast_name(self, scalar):
+        eq_(scalar(cast("pg_class", postgresql.REGCLASS)), "pg_class")
+
+    def test_cast_path(self, scalar):
         eq_(
-            self._scalar(cast("pg_catalog.pg_class", postgresql.REGCLASS)),
+            scalar(cast("pg_catalog.pg_class", postgresql.REGCLASS)),
             "pg_class",
         )
 
-    def test_cast_oid(self):
+    def test_cast_oid(self, scalar):
         regclass = cast("pg_class", postgresql.REGCLASS)
-        oid = self._scalar(cast(regclass, postgresql.OID))
+        oid = scalar(cast(regclass, postgresql.OID))
         assert isinstance(oid, int)
-        eq_(self._scalar(cast(oid, postgresql.REGCLASS)), "pg_class")
+        eq_(
+            scalar(
+                cast(type_coerce(oid, postgresql.OID), postgresql.REGCLASS)
+            ),
+            "pg_class",
+        )
 
-    def test_cast_whereclause(self):
+    def test_cast_whereclause(self, connection):
         pga = Table(
             "pg_attribute",
-            MetaData(testing.db),
+            MetaData(),
             Column("attrelid", postgresql.OID),
             Column("attname", String(64)),
         )
-        with testing.db.connect() as conn:
-            oid = conn.scalar(
-                select([pga.c.attrelid]).where(
-                    pga.c.attrelid == cast("pg_class", postgresql.REGCLASS)
-                )
+        oid = connection.scalar(
+            select(pga.c.attrelid).where(
+                pga.c.attrelid == cast("pg_class", postgresql.REGCLASS)
             )
+        )
         assert isinstance(oid, int)
 
 
@@ -865,11 +923,11 @@ class NumericInterpretationTest(fixtures.TestBase):
 
     def test_numeric_codes(self):
         from sqlalchemy.dialects.postgresql import (
+            base,
             pg8000,
             pygresql,
             psycopg2,
             psycopg2cffi,
-            base,
         )
 
         dialects = (
@@ -889,9 +947,7 @@ class NumericInterpretationTest(fixtures.TestBase):
                     val = proc(val)
                 assert val in (23.7, decimal.Decimal("23.7"))
 
-    @testing.provide_metadata
-    def test_numeric_default(self):
-        metadata = self.metadata
+    def test_numeric_default(self, connection, metadata):
         # pg8000 appears to fail when the value is 0,
         # returns an int instead of decimal.
         t = Table(
@@ -903,10 +959,10 @@ class NumericInterpretationTest(fixtures.TestBase):
             Column("fd", Float(asdecimal=True), default=1),
             Column("ff", Float(asdecimal=False), default=1),
         )
-        metadata.create_all()
-        t.insert().execute()
+        metadata.create_all(connection)
+        connection.execute(t.insert())
 
-        row = t.select().execute().first()
+        row = connection.execute(t.select()).first()
         assert isinstance(row[1], decimal.Decimal)
         assert isinstance(row[2], float)
         assert isinstance(row[3], decimal.Decimal)
@@ -919,7 +975,7 @@ class PythonTypeTest(fixtures.TestBase):
         is_(postgresql.INTERVAL().python_type, datetime.timedelta)
 
 
-class TimezoneTest(fixtures.TestBase):
+class TimezoneTest(fixtures.TablesTest):
     __backend__ = True
 
     """Test timezone-aware datetimes.
@@ -933,14 +989,11 @@ class TimezoneTest(fixtures.TestBase):
     __only_on__ = "postgresql"
 
     @classmethod
-    def setup_class(cls):
-        global tztable, notztable, metadata
-        metadata = MetaData(testing.db)
-
+    def define_tables(cls, metadata):
         # current_timestamp() in postgresql is assumed to return
         # TIMESTAMP WITH TIMEZONE
 
-        tztable = Table(
+        Table(
             "tztable",
             metadata,
             Column("id", Integer, primary_key=True),
@@ -951,7 +1004,7 @@ class TimezoneTest(fixtures.TestBase):
             ),
             Column("name", String(20)),
         )
-        notztable = Table(
+        Table(
             "notztable",
             metadata,
             Column("id", Integer, primary_key=True),
@@ -964,53 +1017,57 @@ class TimezoneTest(fixtures.TestBase):
             ),
             Column("name", String(20)),
         )
-        metadata.create_all()
 
-    @classmethod
-    def teardown_class(cls):
-        metadata.drop_all()
-
-    @testing.fails_on(
-        "postgresql+zxjdbc",
-        "XXX: postgresql+zxjdbc doesn't give a tzinfo back",
-    )
-    def test_with_timezone(self):
-
+    def test_with_timezone(self, connection):
+        tztable, notztable = self.tables("tztable", "notztable")
         # get a date with a tzinfo
 
-        somedate = testing.db.connect().scalar(
-            func.current_timestamp().select()
-        )
+        somedate = connection.scalar(func.current_timestamp().select())
         assert somedate.tzinfo
-        tztable.insert().execute(id=1, name="row1", date=somedate)
-        row = select([tztable.c.date], tztable.c.id == 1).execute().first()
+        connection.execute(
+            tztable.insert(), dict(id=1, name="row1", date=somedate)
+        )
+        row = connection.execute(
+            select(tztable.c.date).where(tztable.c.id == 1)
+        ).first()
         eq_(row[0], somedate)
         eq_(
             somedate.tzinfo.utcoffset(somedate),
             row[0].tzinfo.utcoffset(row[0]),
         )
-        result = (
-            tztable.update(tztable.c.id == 1)
-            .returning(tztable.c.date)
-            .execute(name="newname")
+        result = connection.execute(
+            tztable.update()
+            .where(tztable.c.id == 1)
+            .returning(tztable.c.date),
+            dict(
+                name="newname",
+            ),
         )
         row = result.first()
         assert row[0] >= somedate
 
-    def test_without_timezone(self):
+    def test_without_timezone(self, connection):
 
         # get a date without a tzinfo
+        tztable, notztable = self.tables("tztable", "notztable")
 
         somedate = datetime.datetime(2005, 10, 20, 11, 52, 0)
         assert not somedate.tzinfo
-        notztable.insert().execute(id=1, name="row1", date=somedate)
-        row = select([notztable.c.date], notztable.c.id == 1).execute().first()
+        connection.execute(
+            notztable.insert(), dict(id=1, name="row1", date=somedate)
+        )
+        row = connection.execute(
+            select(notztable.c.date).where(notztable.c.id == 1)
+        ).first()
         eq_(row[0], somedate)
         eq_(row[0].tzinfo, None)
-        result = (
-            notztable.update(notztable.c.id == 1)
-            .returning(notztable.c.date)
-            .execute(name="newname")
+        result = connection.execute(
+            notztable.update()
+            .where(notztable.c.id == 1)
+            .returning(notztable.c.date),
+            dict(
+                name="newname",
+            ),
         )
         row = result.first()
         assert row[0] >= somedate
@@ -1041,14 +1098,10 @@ class TimePrecisionCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
 class TimePrecisionTest(fixtures.TestBase):
 
-    __dialect__ = postgresql.dialect()
-    __prefer__ = "postgresql"
+    __only_on__ = "postgresql"
     __backend__ = True
 
-    @testing.only_on("postgresql", "DB specific feature")
-    @testing.provide_metadata
-    def test_reflection(self):
-        metadata = self.metadata
+    def test_reflection(self, metadata, connection):
         t1 = Table(
             "t1",
             metadata,
@@ -1059,9 +1112,9 @@ class TimePrecisionTest(fixtures.TestBase):
             Column("c5", postgresql.TIMESTAMP(precision=5)),
             Column("c6", postgresql.TIMESTAMP(timezone=True, precision=5)),
         )
-        t1.create()
-        m2 = MetaData(testing.db)
-        t2 = Table("t1", m2, autoload=True)
+        t1.create(connection)
+        m2 = MetaData()
+        t2 = Table("t1", m2, autoload_with=connection)
         eq_(t2.c.c1.type.precision, None)
         eq_(t2.c.c2.type.precision, 5)
         eq_(t2.c.c3.type.precision, 5)
@@ -1146,6 +1199,45 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
             postgresql.ARRAY(Unicode(30), dimensions=3), "VARCHAR(30)[][][]"
         )
 
+    def test_array_in_enum_psycopg2_cast(self):
+        expr = column(
+            "x",
+            postgresql.ARRAY(
+                postgresql.ENUM("one", "two", "three", name="myenum")
+            ),
+        ).in_([["one", "two"], ["three", "four"]])
+
+        self.assert_compile(
+            expr,
+            "x IN (__[POSTCOMPILE_x_1~~~~REPL~~::myenum[]~~])",
+            dialect=postgresql.psycopg2.dialect(),
+        )
+
+        self.assert_compile(
+            expr,
+            "x IN (%(x_1_1)s::myenum[], %(x_1_2)s::myenum[])",
+            dialect=postgresql.psycopg2.dialect(),
+            render_postcompile=True,
+        )
+
+    def test_array_in_str_psycopg2_cast(self):
+        expr = column("x", postgresql.ARRAY(String(15))).in_(
+            [["one", "two"], ["three", "four"]]
+        )
+
+        self.assert_compile(
+            expr,
+            "x IN (__[POSTCOMPILE_x_1~~~~REPL~~::VARCHAR(15)[]~~])",
+            dialect=postgresql.psycopg2.dialect(),
+        )
+
+        self.assert_compile(
+            expr,
+            "x IN (%(x_1_1)s::VARCHAR(15)[], %(x_1_2)s::VARCHAR(15)[])",
+            dialect=postgresql.psycopg2.dialect(),
+            render_postcompile=True,
+        )
+
     def test_array_type_render_str_collate_multidim(self):
         self.assert_compile(
             postgresql.ARRAY(Unicode(30, collation="en_US"), dimensions=2),
@@ -1160,7 +1252,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_int_index(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col[3]]),
+            select(col[3]),
             "SELECT x[%(x_1)s] AS anon_1",
             checkparams={"x_1": 3},
         )
@@ -1168,23 +1260,23 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_any(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col.any(7, operator=operators.lt)]),
-            "SELECT %(param_1)s < ANY (x) AS anon_1",
-            checkparams={"param_1": 7},
+            select(col.any(7, operator=operators.lt)),
+            "SELECT %(x_1)s < ANY (x) AS anon_1",
+            checkparams={"x_1": 7},
         )
 
     def test_array_all(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col.all(7, operator=operators.lt)]),
-            "SELECT %(param_1)s < ALL (x) AS anon_1",
-            checkparams={"param_1": 7},
+            select(col.all(7, operator=operators.lt)),
+            "SELECT %(x_1)s < ALL (x) AS anon_1",
+            checkparams={"x_1": 7},
         )
 
     def test_array_contains(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col.contains(array([4, 5, 6]))]),
+            select(col.contains(array([4, 5, 6]))),
             "SELECT x @> ARRAY[%(param_1)s, %(param_2)s, %(param_3)s] "
             "AS anon_1",
             checkparams={"param_1": 4, "param_3": 6, "param_2": 5},
@@ -1202,7 +1294,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_contained_by(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col.contained_by(array([4, 5, 6]))]),
+            select(col.contained_by(array([4, 5, 6]))),
             "SELECT x <@ ARRAY[%(param_1)s, %(param_2)s, %(param_3)s] "
             "AS anon_1",
             checkparams={"param_1": 4, "param_3": 6, "param_2": 5},
@@ -1211,7 +1303,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_overlap(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col.overlap(array([4, 5, 6]))]),
+            select(col.overlap(array([4, 5, 6]))),
             "SELECT x && ARRAY[%(param_1)s, %(param_2)s, %(param_3)s] "
             "AS anon_1",
             checkparams={"param_1": 4, "param_3": 6, "param_2": 5},
@@ -1220,7 +1312,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_slice_index(self):
         col = column("x", postgresql.ARRAY(Integer))
         self.assert_compile(
-            select([col[5:10]]),
+            select(col[5:10]),
             "SELECT x[%(x_1)s:%(x_2)s] AS anon_1",
             checkparams={"x_2": 10, "x_1": 5},
         )
@@ -1228,7 +1320,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
     def test_array_dim_index(self):
         col = column("x", postgresql.ARRAY(Integer, dimensions=2))
         self.assert_compile(
-            select([col[3][5]]),
+            select(col[3][5]),
             "SELECT x[%(x_1)s][%(param_1)s] AS anon_1",
             checkparams={"x_1": 3, "param_1": 5},
         )
@@ -1238,7 +1330,7 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
         literal = array([4, 5])
 
         self.assert_compile(
-            select([col + literal]),
+            select(col + literal),
             "SELECT x || ARRAY[%(param_1)s, %(param_2)s] AS anon_1",
             checkparams={"param_1": 4, "param_2": 5},
         )
@@ -1287,13 +1379,11 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
 
         """
         stmt = select(
-            [
-                func.array_cat(
-                    array([1, 2, 3]),
-                    array([4, 5, 6]),
-                    type_=postgresql.ARRAY(Integer),
-                )[2:5]
-            ]
+            func.array_cat(
+                array([1, 2, 3]),
+                array([4, 5, 6]),
+                type_=postgresql.ARRAY(Integer),
+            )[2:5]
         )
         self.assert_compile(
             stmt,
@@ -1317,19 +1407,45 @@ class ArrayTest(AssertsCompiledSQL, fixtures.TestBase):
         is_(expr.type.__class__, types.ARRAY)
         is_(expr.type.item_type.__class__, Integer)
 
-    def test_array_agg_specific(self):
-        from sqlalchemy.dialects.postgresql import array_agg
+    @testing.combinations(
+        ("original", False, False),
+        ("just_enum", True, False),
+        ("just_order_by", False, True),
+        ("issue_5989", True, True),
+        id_="iaa",
+        argnames="with_enum, using_aggregate_order_by",
+    )
+    def test_array_agg_specific(self, with_enum, using_aggregate_order_by):
+        from sqlalchemy.dialects.postgresql import (
+            ENUM,
+            aggregate_order_by,
+            array_agg,
+        )
 
-        expr = array_agg(column("q", Integer))
+        element_type = ENUM if with_enum else Integer
+        expr = (
+            array_agg(
+                aggregate_order_by(
+                    column("q", element_type), column("idx", Integer)
+                )
+            )
+            if using_aggregate_order_by
+            else array_agg(column("q", element_type))
+        )
         is_(expr.type.__class__, postgresql.ARRAY)
-        is_(expr.type.item_type.__class__, Integer)
+        is_(expr.type.item_type.__class__, element_type)
+
+
+AnEnum = pep435_enum("AnEnum")
+AnEnum("Foo", 1)
+AnEnum("Bar", 2)
+AnEnum("Baz", 3)
 
 
 class ArrayRoundTripTest(object):
 
     __only_on__ = "postgresql"
     __backend__ = True
-    __unsupported_on__ = "postgresql+pg8000", "postgresql+zxjdbc"
 
     ARRAY = postgresql.ARRAY
 
@@ -1337,6 +1453,7 @@ class ArrayRoundTripTest(object):
     def define_tables(cls, metadata):
         class ProcValue(TypeDecorator):
             impl = cls.ARRAY(Integer, dimensions=2)
+            cache_ok = True
 
             def process_bind_param(self, value, dialect):
                 if value is None:
@@ -1366,302 +1483,362 @@ class ArrayRoundTripTest(object):
             Column("dimarr", ProcValue),
         )
 
-    def _fixture_456(self, table):
-        testing.db.execute(table.insert(), intarr=[4, 5, 6])
+    def _fixture_456(self, table, connection):
+        connection.execute(table.insert(), dict(intarr=[4, 5, 6]))
 
-    def test_reflect_array_column(self):
-        metadata2 = MetaData(testing.db)
-        tbl = Table("arrtable", metadata2, autoload=True)
+    def test_reflect_array_column(self, connection):
+        metadata2 = MetaData()
+        tbl = Table("arrtable", metadata2, autoload_with=connection)
         assert isinstance(tbl.c.intarr.type, self.ARRAY)
         assert isinstance(tbl.c.strarr.type, self.ARRAY)
         assert isinstance(tbl.c.intarr.type.item_type, Integer)
         assert isinstance(tbl.c.strarr.type.item_type, String)
 
-    @testing.provide_metadata
-    def test_array_str_collation(self):
-        m = self.metadata
-
+    def test_array_str_collation(self, metadata, connection):
         t = Table(
             "t",
-            m,
-            Column("data", sqltypes.ARRAY(String(50, collation="en_US"))),
+            metadata,
+            Column("data", self.ARRAY(String(50, collation="en_US"))),
         )
 
-        t.create()
+        t.create(connection)
 
-    @testing.provide_metadata
-    def test_array_agg(self):
-        values_table = Table("values", self.metadata, Column("value", Integer))
-        self.metadata.create_all(testing.db)
-        testing.db.execute(
+    @testing.fixture
+    def array_in_fixture(self, connection):
+        arrtable = self.tables.arrtable
+
+        connection.execute(
+            arrtable.insert(),
+            [
+                {
+                    "id": 1,
+                    "intarr": [1, 2, 3],
+                    "strarr": [u"one", u"two", u"three"],
+                },
+                {
+                    "id": 2,
+                    "intarr": [4, 5, 6],
+                    "strarr": [u"four", u"five", u"six"],
+                },
+                {"id": 3, "intarr": [1, 5], "strarr": [u"one", u"five"]},
+                {"id": 4, "intarr": [], "strarr": []},
+            ],
+        )
+
+    def test_array_in_int(self, array_in_fixture, connection):
+        """test #7177"""
+
+        arrtable = self.tables.arrtable
+
+        stmt = (
+            select(arrtable.c.intarr)
+            .where(arrtable.c.intarr.in_([[1, 5], [4, 5, 6], [9, 10]]))
+            .order_by(arrtable.c.id)
+        )
+
+        eq_(
+            connection.execute(stmt).all(),
+            [
+                ([4, 5, 6],),
+                ([1, 5],),
+            ],
+        )
+
+    def test_array_in_str(self, array_in_fixture, connection):
+        """test #7177"""
+
+        arrtable = self.tables.arrtable
+
+        stmt = (
+            select(arrtable.c.strarr)
+            .where(
+                arrtable.c.strarr.in_(
+                    [
+                        [u"one", u"five"],
+                        [u"four", u"five", u"six"],
+                        [u"nine", u"ten"],
+                    ]
+                )
+            )
+            .order_by(arrtable.c.id)
+        )
+
+        eq_(
+            connection.execute(stmt).all(),
+            [
+                (["four", "five", "six"],),
+                (["one", "five"],),
+            ],
+        )
+
+    def test_array_agg(self, metadata, connection):
+        values_table = Table("values", metadata, Column("value", Integer))
+        metadata.create_all(connection)
+        connection.execute(
             values_table.insert(), [{"value": i} for i in range(1, 10)]
         )
 
-        stmt = select([func.array_agg(values_table.c.value)])
-        eq_(testing.db.execute(stmt).scalar(), list(range(1, 10)))
+        stmt = select(func.array_agg(values_table.c.value))
+        eq_(connection.execute(stmt).scalar(), list(range(1, 10)))
 
-        stmt = select([func.array_agg(values_table.c.value)[3]])
-        eq_(testing.db.execute(stmt).scalar(), 3)
+        stmt = select(func.array_agg(values_table.c.value)[3])
+        eq_(connection.execute(stmt).scalar(), 3)
 
-        stmt = select([func.array_agg(values_table.c.value)[2:4]])
-        eq_(testing.db.execute(stmt).scalar(), [2, 3, 4])
+        stmt = select(func.array_agg(values_table.c.value)[2:4])
+        eq_(connection.execute(stmt).scalar(), [2, 3, 4])
 
-    def test_array_index_slice_exprs(self):
+    def test_array_index_slice_exprs(self, connection):
         """test a variety of expressions that sometimes need parenthesizing"""
 
-        stmt = select([array([1, 2, 3, 4])[2:3]])
-        eq_(testing.db.execute(stmt).scalar(), [2, 3])
+        stmt = select(array([1, 2, 3, 4])[2:3])
+        eq_(connection.execute(stmt).scalar(), [2, 3])
 
-        stmt = select([array([1, 2, 3, 4])[2]])
-        eq_(testing.db.execute(stmt).scalar(), 2)
+        stmt = select(array([1, 2, 3, 4])[2])
+        eq_(connection.execute(stmt).scalar(), 2)
 
-        stmt = select([(array([1, 2]) + array([3, 4]))[2:3]])
-        eq_(testing.db.execute(stmt).scalar(), [2, 3])
+        stmt = select((array([1, 2]) + array([3, 4]))[2:3])
+        eq_(connection.execute(stmt).scalar(), [2, 3])
 
-        stmt = select([array([1, 2]) + array([3, 4])[2:3]])
-        eq_(testing.db.execute(stmt).scalar(), [1, 2, 4])
+        stmt = select(array([1, 2]) + array([3, 4])[2:3])
+        eq_(connection.execute(stmt).scalar(), [1, 2, 4])
 
-        stmt = select([array([1, 2])[2:3] + array([3, 4])])
-        eq_(testing.db.execute(stmt).scalar(), [2, 3, 4])
+        stmt = select(array([1, 2])[2:3] + array([3, 4]))
+        eq_(connection.execute(stmt).scalar(), [2, 3, 4])
 
         stmt = select(
-            [
+            func.array_cat(
+                array([1, 2, 3]),
+                array([4, 5, 6]),
+                type_=self.ARRAY(Integer),
+            )[2:5]
+        )
+        eq_(connection.execute(stmt).scalar(), [2, 3, 4, 5])
+
+    def test_any_all_exprs_array(self, connection):
+        stmt = select(
+            3
+            == any_(
                 func.array_cat(
                     array([1, 2, 3]),
                     array([4, 5, 6]),
                     type_=self.ARRAY(Integer),
-                )[2:5]
-            ]
-        )
-        eq_(testing.db.execute(stmt).scalar(), [2, 3, 4, 5])
-
-    def test_any_all_exprs_array(self):
-        stmt = select(
-            [
-                3
-                == any_(
-                    func.array_cat(
-                        array([1, 2, 3]),
-                        array([4, 5, 6]),
-                        type_=self.ARRAY(Integer),
-                    )
                 )
-            ]
+            )
         )
-        eq_(testing.db.execute(stmt).scalar(), True)
+        eq_(connection.execute(stmt).scalar(), True)
 
-    def test_insert_array(self):
+    def test_insert_array(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                intarr=[1, 2, 3],
+                strarr=[util.u("abc"), util.u("def")],
+            ),
         )
-        results = arrtable.select().execute().fetchall()
+        results = connection.execute(arrtable.select()).fetchall()
         eq_(len(results), 1)
-        eq_(results[0]["intarr"], [1, 2, 3])
-        eq_(results[0]["strarr"], [util.u("abc"), util.u("def")])
+        eq_(results[0].intarr, [1, 2, 3])
+        eq_(results[0].strarr, [util.u("abc"), util.u("def")])
 
-    def test_insert_array_w_null(self):
+    def test_insert_array_w_null(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            intarr=[1, None, 3], strarr=[util.u("abc"), None]
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                intarr=[1, None, 3],
+                strarr=[util.u("abc"), None],
+            ),
         )
-        results = arrtable.select().execute().fetchall()
+        results = connection.execute(arrtable.select()).fetchall()
         eq_(len(results), 1)
-        eq_(results[0]["intarr"], [1, None, 3])
-        eq_(results[0]["strarr"], [util.u("abc"), None])
+        eq_(results[0].intarr, [1, None, 3])
+        eq_(results[0].strarr, [util.u("abc"), None])
 
-    def test_array_where(self):
+    def test_array_where(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                intarr=[1, 2, 3],
+                strarr=[util.u("abc"), util.u("def")],
+            ),
         )
-        arrtable.insert().execute(intarr=[4, 5, 6], strarr=util.u("ABC"))
-        results = (
-            arrtable.select()
-            .where(arrtable.c.intarr == [1, 2, 3])
-            .execute()
-            .fetchall()
+        connection.execute(
+            arrtable.insert(), dict(intarr=[4, 5, 6], strarr=util.u("ABC"))
         )
+        results = connection.execute(
+            arrtable.select().where(arrtable.c.intarr == [1, 2, 3])
+        ).fetchall()
         eq_(len(results), 1)
-        eq_(results[0]["intarr"], [1, 2, 3])
+        eq_(results[0].intarr, [1, 2, 3])
 
-    def test_array_concat(self):
+    def test_array_concat(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]
+        connection.execute(
+            arrtable.insert(),
+            dict(intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]),
         )
-        results = select([arrtable.c.intarr + [4, 5, 6]]).execute().fetchall()
+        results = connection.execute(
+            select(arrtable.c.intarr + [4, 5, 6])
+        ).fetchall()
         eq_(len(results), 1)
         eq_(results[0][0], [1, 2, 3, 4, 5, 6])
 
-    def test_array_comparison(self):
+    def test_array_comparison(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            id=5, intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                id=5, intarr=[1, 2, 3], strarr=[util.u("abc"), util.u("def")]
+            ),
         )
-        results = (
-            select([arrtable.c.id])
-            .where(arrtable.c.intarr < [4, 5, 6])
-            .execute()
-            .fetchall()
-        )
+        results = connection.execute(
+            select(arrtable.c.id).where(arrtable.c.intarr < [4, 5, 6])
+        ).fetchall()
         eq_(len(results), 1)
         eq_(results[0][0], 5)
 
-    def test_array_subtype_resultprocessor(self):
+    def test_array_subtype_resultprocessor(self, connection):
         arrtable = self.tables.arrtable
-        arrtable.insert().execute(
-            intarr=[4, 5, 6],
-            strarr=[[util.ue("m\xe4\xe4")], [util.ue("m\xf6\xf6")]],
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                intarr=[4, 5, 6],
+                strarr=[[util.ue("m\xe4\xe4")], [util.ue("m\xf6\xf6")]],
+            ),
         )
-        arrtable.insert().execute(
-            intarr=[1, 2, 3],
-            strarr=[util.ue("m\xe4\xe4"), util.ue("m\xf6\xf6")],
+        connection.execute(
+            arrtable.insert(),
+            dict(
+                intarr=[1, 2, 3],
+                strarr=[util.ue("m\xe4\xe4"), util.ue("m\xf6\xf6")],
+            ),
         )
-        results = (
-            arrtable.select(order_by=[arrtable.c.intarr]).execute().fetchall()
-        )
+        results = connection.execute(
+            arrtable.select().order_by(arrtable.c.intarr)
+        ).fetchall()
         eq_(len(results), 2)
-        eq_(results[0]["strarr"], [util.ue("m\xe4\xe4"), util.ue("m\xf6\xf6")])
+        eq_(results[0].strarr, [util.ue("m\xe4\xe4"), util.ue("m\xf6\xf6")])
         eq_(
-            results[1]["strarr"],
+            results[1].strarr,
             [[util.ue("m\xe4\xe4")], [util.ue("m\xf6\xf6")]],
         )
 
-    def test_array_literal_roundtrip(self):
+    def test_array_literal_roundtrip(self, connection):
         eq_(
-            testing.db.scalar(
-                select(
-                    [postgresql.array([1, 2]) + postgresql.array([3, 4, 5])]
-                )
+            connection.scalar(
+                select(postgresql.array([1, 2]) + postgresql.array([3, 4, 5]))
             ),
             [1, 2, 3, 4, 5],
         )
 
         eq_(
-            testing.db.scalar(
+            connection.scalar(
                 select(
-                    [
-                        (
-                            postgresql.array([1, 2])
-                            + postgresql.array([3, 4, 5])
-                        )[3]
-                    ]
+                    (postgresql.array([1, 2]) + postgresql.array([3, 4, 5]))[3]
                 )
             ),
             3,
         )
 
         eq_(
-            testing.db.scalar(
+            connection.scalar(
                 select(
-                    [
-                        (
-                            postgresql.array([1, 2])
-                            + postgresql.array([3, 4, 5])
-                        )[2:4]
+                    (postgresql.array([1, 2]) + postgresql.array([3, 4, 5]))[
+                        2:4
                     ]
                 )
             ),
             [2, 3, 4],
         )
 
-    def test_array_literal_multidimensional_roundtrip(self):
+    def test_array_literal_multidimensional_roundtrip(self, connection):
         eq_(
-            testing.db.scalar(
+            connection.scalar(
                 select(
-                    [
-                        postgresql.array(
-                            [
-                                postgresql.array([1, 2]),
-                                postgresql.array([3, 4]),
-                            ]
-                        )
-                    ]
+                    postgresql.array(
+                        [postgresql.array([1, 2]), postgresql.array([3, 4])]
+                    )
                 )
             ),
             [[1, 2], [3, 4]],
         )
 
         eq_(
-            testing.db.scalar(
+            connection.scalar(
                 select(
-                    [
-                        postgresql.array(
-                            [
-                                postgresql.array([1, 2]),
-                                postgresql.array([3, 4]),
-                            ]
-                        )[2][1]
-                    ]
+                    postgresql.array(
+                        [postgresql.array([1, 2]), postgresql.array([3, 4])]
+                    )[2][1]
                 )
             ),
             3,
         )
 
-    def test_array_literal_compare(self):
+    def test_array_literal_compare(self, connection):
         eq_(
-            testing.db.scalar(select([postgresql.array([1, 2]) < [3, 4, 5]])),
+            connection.scalar(select(postgresql.array([1, 2]) < [3, 4, 5])),
             True,
         )
 
-    def test_array_getitem_single_exec(self):
+    def test_array_getitem_single_exec(self, connection):
         arrtable = self.tables.arrtable
-        self._fixture_456(arrtable)
-        eq_(testing.db.scalar(select([arrtable.c.intarr[2]])), 5)
-        testing.db.execute(arrtable.update().values({arrtable.c.intarr[2]: 7}))
-        eq_(testing.db.scalar(select([arrtable.c.intarr[2]])), 7)
+        self._fixture_456(arrtable, connection)
+        eq_(connection.scalar(select(arrtable.c.intarr[2])), 5)
+        connection.execute(arrtable.update().values({arrtable.c.intarr[2]: 7}))
+        eq_(connection.scalar(select(arrtable.c.intarr[2])), 7)
 
-    def test_array_getitem_slice_exec(self):
+    def test_array_getitem_slice_exec(self, connection):
         arrtable = self.tables.arrtable
-        testing.db.execute(
+        connection.execute(
             arrtable.insert(),
-            intarr=[4, 5, 6],
-            strarr=[util.u("abc"), util.u("def")],
+            dict(
+                intarr=[4, 5, 6],
+                strarr=[util.u("abc"), util.u("def")],
+            ),
         )
-        eq_(testing.db.scalar(select([arrtable.c.intarr[2:3]])), [5, 6])
-        testing.db.execute(
+        eq_(connection.scalar(select(arrtable.c.intarr[2:3])), [5, 6])
+        connection.execute(
             arrtable.update().values({arrtable.c.intarr[2:3]: [7, 8]})
         )
-        eq_(testing.db.scalar(select([arrtable.c.intarr[2:3]])), [7, 8])
+        eq_(connection.scalar(select(arrtable.c.intarr[2:3])), [7, 8])
 
-    def test_multi_dim_roundtrip(self):
+    def test_multi_dim_roundtrip(self, connection):
         arrtable = self.tables.arrtable
-        testing.db.execute(arrtable.insert(), dimarr=[[1, 2, 3], [4, 5, 6]])
+        connection.execute(
+            arrtable.insert(), dict(dimarr=[[1, 2, 3], [4, 5, 6]])
+        )
         eq_(
-            testing.db.scalar(select([arrtable.c.dimarr])),
+            connection.scalar(select(arrtable.c.dimarr)),
             [[-1, 0, 1], [2, 3, 4]],
         )
 
-    def test_array_any_exec(self):
+    def test_array_any_exec(self, connection):
         arrtable = self.tables.arrtable
-        with testing.db.connect() as conn:
-            conn.execute(arrtable.insert(), intarr=[4, 5, 6])
-            eq_(
-                conn.scalar(
-                    select([arrtable.c.intarr]).where(
-                        postgresql.Any(5, arrtable.c.intarr)
-                    )
-                ),
-                [4, 5, 6],
-            )
+        connection.execute(arrtable.insert(), dict(intarr=[4, 5, 6]))
+        eq_(
+            connection.scalar(
+                select(arrtable.c.intarr).where(
+                    postgresql.Any(5, arrtable.c.intarr)
+                )
+            ),
+            [4, 5, 6],
+        )
 
-    def test_array_all_exec(self):
+    def test_array_all_exec(self, connection):
         arrtable = self.tables.arrtable
-        with testing.db.connect() as conn:
-            conn.execute(arrtable.insert(), intarr=[4, 5, 6])
-            eq_(
-                conn.scalar(
-                    select([arrtable.c.intarr]).where(
-                        arrtable.c.intarr.all(4, operator=operators.le)
-                    )
-                ),
-                [4, 5, 6],
-            )
+        connection.execute(arrtable.insert(), dict(intarr=[4, 5, 6]))
+        eq_(
+            connection.scalar(
+                select(arrtable.c.intarr).where(
+                    arrtable.c.intarr.all(4, operator=operators.le)
+                )
+            ),
+            [4, 5, 6],
+        )
 
-    @testing.provide_metadata
-    def test_tuple_flag(self):
-        metadata = self.metadata
+    def test_tuple_flag(self, connection, metadata):
 
         t1 = Table(
             "t1",
@@ -1672,21 +1849,23 @@ class ArrayRoundTripTest(object):
                 "data2", self.ARRAY(Numeric(asdecimal=False), as_tuple=True)
             ),
         )
-        metadata.create_all()
-        testing.db.execute(
-            t1.insert(), id=1, data=["1", "2", "3"], data2=[5.4, 5.6]
+        metadata.create_all(connection)
+        connection.execute(
+            t1.insert(), dict(id=1, data=["1", "2", "3"], data2=[5.4, 5.6])
         )
-        testing.db.execute(
-            t1.insert(), id=2, data=["4", "5", "6"], data2=[1.0]
+        connection.execute(
+            t1.insert(), dict(id=2, data=["4", "5", "6"], data2=[1.0])
         )
-        testing.db.execute(
+        connection.execute(
             t1.insert(),
-            id=3,
-            data=[["4", "5"], ["6", "7"]],
-            data2=[[5.4, 5.6], [1.0, 1.1]],
+            dict(
+                id=3,
+                data=[["4", "5"], ["6", "7"]],
+                data2=[[5.4, 5.6], [1.0, 1.1]],
+            ),
         )
 
-        r = testing.db.execute(t1.select().order_by(t1.c.id)).fetchall()
+        r = connection.execute(t1.select().order_by(t1.c.id)).fetchall()
         eq_(
             r,
             [
@@ -1701,11 +1880,10 @@ class ArrayRoundTripTest(object):
             set([("1", "2", "3"), ("4", "5", "6"), (("4", "5"), ("6", "7"))]),
         )
 
-    def test_array_plus_native_enum_create(self):
-        m = MetaData()
+    def test_array_plus_native_enum_create(self, metadata, connection):
         t = Table(
             "t",
-            m,
+            metadata,
             Column(
                 "data_1",
                 self.ARRAY(postgresql.ENUM("a", "b", "c", name="my_enum_1")),
@@ -1714,15 +1892,327 @@ class ArrayRoundTripTest(object):
                 "data_2",
                 self.ARRAY(types.Enum("a", "b", "c", name="my_enum_2")),
             ),
+            Column(
+                "data_3",
+                self.ARRAY(
+                    types.Enum("a", "b", "c", name="my_enum_3")
+                ).with_variant(String(), "other"),
+            ),
         )
 
-        t.create(testing.db)
+        t.create(connection)
         eq_(
-            set(e["name"] for e in inspect(testing.db).get_enums()),
-            set(["my_enum_1", "my_enum_2"]),
+            set(e["name"] for e in inspect(connection).get_enums()),
+            set(["my_enum_1", "my_enum_2", "my_enum_3"]),
         )
-        t.drop(testing.db)
-        eq_(inspect(testing.db).get_enums(), [])
+        t.drop(connection)
+        eq_(inspect(connection).get_enums(), [])
+
+    def _type_combinations(exclude_json=False, exclude_empty_lists=False):
+        def str_values(x):
+            return ["one", "two: %s" % x, "three", "four", "five"]
+
+        def unicode_values(x):
+            return [
+                util.u("réveillé"),
+                util.u("drôle"),
+                util.u("S’il %s" % x),
+                util.u("🐍 %s" % x),
+                util.u("« S’il vous"),
+            ]
+
+        def json_values(x):
+            return [
+                1,
+                {"a": x},
+                {"b": [1, 2, 3]},
+                ["d", "e", "f"],
+                {"struct": True, "none": None},
+            ]
+
+        def binary_values(x):
+            return [v.encode("utf-8") for v in unicode_values(x)]
+
+        def enum_values(x):
+            return [
+                AnEnum.Foo,
+                AnEnum.Baz,
+                AnEnum.get(x),
+                AnEnum.Baz,
+                AnEnum.Foo,
+            ]
+
+        def empty_list(x):
+            return []
+
+        class inet_str(str):
+            def __eq__(self, other):
+                return str(self) == str(other)
+
+            def __ne__(self, other):
+                return str(self) != str(other)
+
+        class money_str(str):
+            def __eq__(self, other):
+                comp = re.sub(r"[^\d\.]", "", other)
+                return float(self) == float(comp)
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+        difficult_enum = [
+            "Value",
+            "With space",
+            "With,comma",
+            'With"quote',
+            "With\\escape",
+            """Various!@#$%^*()"'\\][{};:.<>|_+~chars""",
+        ]
+
+        def make_difficult_enum(cls_, native):
+            return cls_(
+                *difficult_enum, name="difficult_enum", native_enum=native
+            )
+
+        def difficult_enum_values(x):
+            return [v for i, v in enumerate(difficult_enum) if i != x - 1]
+
+        elements = [
+            (sqltypes.Integer, lambda x: [1, x, 3, 4, 5]),
+            (sqltypes.Text, str_values),
+            (sqltypes.String, str_values),
+            (sqltypes.Unicode, unicode_values),
+            (postgresql.JSONB, json_values),
+            (sqltypes.Boolean, lambda x: [False] + [True] * x),
+            (sqltypes.LargeBinary, binary_values),
+            (postgresql.BYTEA, binary_values),
+            (
+                postgresql.INET,
+                lambda x: [
+                    inet_str("1.1.1.1"),
+                    inet_str("{0}.{0}.{0}.{0}".format(x)),
+                    inet_str("192.168.1.1"),
+                    inet_str("10.1.2.25"),
+                    inet_str("192.168.22.5"),
+                ],
+            ),
+            (
+                postgresql.CIDR,
+                lambda x: [
+                    inet_str("10.0.0.0/8"),
+                    inet_str("%s.0.0.0/8" % x),
+                    inet_str("192.168.1.0/24"),
+                    inet_str("192.168.0.0/16"),
+                    inet_str("192.168.1.25/32"),
+                ],
+            ),
+            (
+                sqltypes.Date,
+                lambda x: [
+                    datetime.date(2020, 5, x),
+                    datetime.date(2020, 7, 12),
+                    datetime.date(2018, 12, 15),
+                    datetime.date(2009, 1, 5),
+                    datetime.date(2021, 3, 18),
+                ],
+            ),
+            (
+                sqltypes.DateTime,
+                lambda x: [
+                    datetime.datetime(2020, 5, x, 2, 15, 0),
+                    datetime.datetime(2020, 7, 12, 15, 30, x),
+                    datetime.datetime(2018, 12, 15, 3, x, 25),
+                    datetime.datetime(2009, 1, 5, 12, 45, x),
+                    datetime.datetime(2021, 3, 18, 17, 1, 0),
+                ],
+            ),
+            (
+                sqltypes.Numeric,
+                lambda x: [
+                    decimal.Decimal("45.10"),
+                    decimal.Decimal(x),
+                    decimal.Decimal(".03242"),
+                    decimal.Decimal("532.3532"),
+                    decimal.Decimal("95503.23"),
+                ],
+            ),
+            (
+                postgresql.MONEY,
+                lambda x: [
+                    money_str("2"),
+                    money_str("%s" % (5 + x)),
+                    money_str("50.25"),
+                    money_str("18.99"),
+                    money_str("15.%s" % x),
+                ],
+                testing.skip_if(
+                    "postgresql+psycopg2", "this is a psycopg2 bug"
+                ),
+            ),
+            (
+                postgresql.HSTORE,
+                lambda x: [
+                    {"a": "1"},
+                    {"b": "%s" % x},
+                    {"c": "3"},
+                    {"c": "c2"},
+                    {"d": "e"},
+                ],
+                testing.requires.hstore,
+            ),
+            (postgresql.ENUM(AnEnum), enum_values),
+            (sqltypes.Enum(AnEnum, native_enum=True), enum_values),
+            (sqltypes.Enum(AnEnum, native_enum=False), enum_values),
+            (postgresql.ENUM(AnEnum, native_enum=True), enum_values),
+            (
+                make_difficult_enum(sqltypes.Enum, native=True),
+                difficult_enum_values,
+            ),
+            (
+                make_difficult_enum(sqltypes.Enum, native=False),
+                difficult_enum_values,
+            ),
+            (
+                make_difficult_enum(postgresql.ENUM, native=True),
+                difficult_enum_values,
+            ),
+        ]
+
+        if not exclude_empty_lists:
+            elements.extend(
+                [
+                    (postgresql.ENUM(AnEnum), empty_list),
+                    (sqltypes.Enum(AnEnum, native_enum=True), empty_list),
+                    (sqltypes.Enum(AnEnum, native_enum=False), empty_list),
+                    (postgresql.ENUM(AnEnum, native_enum=True), empty_list),
+                ]
+            )
+        if not exclude_json:
+            elements.extend(
+                [
+                    (sqltypes.JSON, json_values),
+                    (postgresql.JSON, json_values),
+                ]
+            )
+
+        _pg8000_skip_types = {
+            postgresql.HSTORE,  # return not parsed returned as string
+        }
+        for i in range(len(elements)):
+            elem = elements[i]
+            if (
+                elem[0] in _pg8000_skip_types
+                or type(elem[0]) in _pg8000_skip_types
+            ):
+                elem += (
+                    testing.skip_if(
+                        "postgresql+pg8000", "type not supported by pg8000"
+                    ),
+                )
+                elements[i] = elem
+
+        return testing.combinations_list(
+            elements, argnames="type_,gen", id_="na"
+        )
+
+    @classmethod
+    def _cls_type_combinations(cls, **kw):
+        return ArrayRoundTripTest.__dict__["_type_combinations"](**kw)
+
+    @testing.fixture(params=[True, False])
+    def type_specific_fixture(self, request, metadata, connection, type_):
+        use_variant = request.param
+        meta = MetaData()
+
+        if use_variant:
+            typ = self.ARRAY(type_).with_variant(String(), "other")
+        else:
+            typ = self.ARRAY(type_)
+
+        table = Table(
+            "foo",
+            meta,
+            Column("id", Integer),
+            Column("bar", typ),
+        )
+
+        meta.create_all(connection)
+
+        def go(gen):
+            connection.execute(
+                table.insert(),
+                [{"id": 1, "bar": gen(1)}, {"id": 2, "bar": gen(2)}],
+            )
+            return table
+
+        return go
+
+    @_type_combinations()
+    def test_type_specific_value_select(
+        self, type_specific_fixture, connection, type_, gen
+    ):
+        table = type_specific_fixture(gen)
+
+        rows = connection.execute(
+            select(table.c.bar).order_by(table.c.id)
+        ).all()
+
+        eq_(rows, [(gen(1),), (gen(2),)])
+
+    @_type_combinations()
+    def test_type_specific_value_update(
+        self, type_specific_fixture, connection, type_, gen
+    ):
+        table = type_specific_fixture(gen)
+
+        new_gen = gen(3)
+        connection.execute(
+            table.update().where(table.c.id == 2).values(bar=new_gen)
+        )
+
+        eq_(
+            new_gen,
+            connection.scalar(select(table.c.bar).where(table.c.id == 2)),
+        )
+
+    @_type_combinations(exclude_empty_lists=True)
+    def test_type_specific_slice_update(
+        self, type_specific_fixture, connection, type_, gen
+    ):
+        table = type_specific_fixture(gen)
+
+        new_gen = gen(3)
+
+        if isinstance(table.c.bar.type, Variant):
+            # this is not likely to occur to users but we need to just
+            # exercise this as far as we can
+            expr = type_coerce(table.c.bar, ARRAY(type_))[1:3]
+        else:
+            expr = table.c.bar[1:3]
+        connection.execute(
+            table.update().where(table.c.id == 2).values({expr: new_gen[1:4]})
+        )
+
+        rows = connection.execute(
+            select(table.c.bar).order_by(table.c.id)
+        ).all()
+
+        sliced_gen = gen(2)
+        sliced_gen[0:3] = new_gen[1:4]
+
+        eq_(rows, [(gen(1),), (sliced_gen,)])
+
+    @_type_combinations(exclude_json=True, exclude_empty_lists=True)
+    def test_type_specific_value_delete(
+        self, type_specific_fixture, connection, type_, gen
+    ):
+        table = type_specific_fixture(gen)
+
+        new_gen = gen(2)
+
+        connection.execute(table.delete().where(table.c.bar == new_gen))
+
+        eq_(connection.scalar(select(func.count(table.c.id))), 1)
 
 
 class CoreArrayRoundTripTest(
@@ -1737,72 +2227,93 @@ class PGArrayRoundTripTest(
 ):
     ARRAY = postgresql.ARRAY
 
-    @testing.combinations((set,), (list,), (lambda elem: (x for x in elem),))
-    def test_undim_array_contains_typed_exec(self, struct):
+    @ArrayRoundTripTest._cls_type_combinations(exclude_json=True)
+    def test_type_specific_contains(
+        self, type_specific_fixture, connection, type_, gen
+    ):
+        table = type_specific_fixture(gen)
+
+        connection.execute(
+            table.insert(),
+            [{"id": 1, "bar": gen(1)}, {"id": 2, "bar": gen(2)}],
+        )
+
+        id_, value = connection.execute(
+            select(table).where(table.c.bar.contains(gen(1)))
+        ).first()
+        eq_(id_, 1)
+        eq_(value, gen(1))
+
+    @testing.combinations(
+        (set,), (list,), (lambda elem: (x for x in elem),), argnames="struct"
+    )
+    def test_undim_array_contains_typed_exec(self, struct, connection):
         arrtable = self.tables.arrtable
-        self._fixture_456(arrtable)
+        self._fixture_456(arrtable, connection)
         eq_(
-            testing.db.scalar(
-                select([arrtable.c.intarr]).where(
+            connection.scalar(
+                select(arrtable.c.intarr).where(
                     arrtable.c.intarr.contains(struct([4, 5]))
                 )
             ),
             [4, 5, 6],
         )
 
-    @testing.combinations((set,), (list,), (lambda elem: (x for x in elem),))
-    def test_dim_array_contains_typed_exec(self, struct):
+    @testing.combinations(
+        (set,), (list,), (lambda elem: (x for x in elem),), argnames="struct"
+    )
+    def test_dim_array_contains_typed_exec(self, struct, connection):
         dim_arrtable = self.tables.dim_arrtable
-        self._fixture_456(dim_arrtable)
+        self._fixture_456(dim_arrtable, connection)
         eq_(
-            testing.db.scalar(
-                select([dim_arrtable.c.intarr]).where(
+            connection.scalar(
+                select(dim_arrtable.c.intarr).where(
                     dim_arrtable.c.intarr.contains(struct([4, 5]))
                 )
             ),
             [4, 5, 6],
         )
 
-    def test_array_contained_by_exec(self):
+    def test_array_contained_by_exec(self, connection):
         arrtable = self.tables.arrtable
-        with testing.db.connect() as conn:
-            conn.execute(arrtable.insert(), intarr=[6, 5, 4])
-            eq_(
-                conn.scalar(
-                    select([arrtable.c.intarr.contained_by([4, 5, 6, 7])])
-                ),
-                True,
-            )
-
-    def test_undim_array_empty(self):
-        arrtable = self.tables.arrtable
-        self._fixture_456(arrtable)
+        connection.execute(arrtable.insert(), dict(intarr=[6, 5, 4]))
         eq_(
-            testing.db.scalar(
-                select([arrtable.c.intarr]).where(
-                    arrtable.c.intarr.contains([])
+            connection.scalar(
+                select(arrtable.c.intarr.contained_by([4, 5, 6, 7]))
+            ),
+            True,
+        )
+
+    def test_undim_array_empty(self, connection):
+        arrtable = self.tables.arrtable
+        self._fixture_456(arrtable, connection)
+        eq_(
+            connection.scalar(
+                select(arrtable.c.intarr).where(arrtable.c.intarr.contains([]))
+            ),
+            [4, 5, 6],
+        )
+
+    def test_array_overlap_exec(self, connection):
+        arrtable = self.tables.arrtable
+        connection.execute(arrtable.insert(), dict(intarr=[4, 5, 6]))
+        eq_(
+            connection.scalar(
+                select(arrtable.c.intarr).where(
+                    arrtable.c.intarr.overlap([7, 6])
                 )
             ),
             [4, 5, 6],
         )
 
-    def test_array_overlap_exec(self):
-        arrtable = self.tables.arrtable
-        with testing.db.connect() as conn:
-            conn.execute(arrtable.insert(), intarr=[4, 5, 6])
-            eq_(
-                conn.scalar(
-                    select([arrtable.c.intarr]).where(
-                        arrtable.c.intarr.overlap([7, 6])
-                    )
-                ),
-                [4, 5, 6],
-            )
-
 
 class _ArrayOfEnum(TypeDecorator):
     # previous workaround for array of enum
     impl = postgresql.ARRAY
+    cache_ok = True
+
+    # note expanding logic is checking _is_array here so that has to
+    # translate through the TypeDecorator
 
     def bind_expression(self, bindvalue):
         return sa.cast(bindvalue, self)
@@ -1830,9 +2341,9 @@ class ArrayEnum(fixtures.TestBase):
     @testing.combinations(
         sqltypes.ARRAY, postgresql.ARRAY, argnames="array_cls"
     )
-    @testing.combinations(sqltypes.Enum, postgresql.ENUM, argnames="enum_cls")
-    @testing.provide_metadata
-    def test_raises_non_native_enums(self, array_cls, enum_cls):
+    def test_raises_non_native_enums(self, metadata, connection, array_cls):
+        enum_cls = sqltypes.Enum
+
         Table(
             "my_table",
             self.metadata,
@@ -1840,7 +2351,12 @@ class ArrayEnum(fixtures.TestBase):
                 "my_col",
                 array_cls(
                     enum_cls(
-                        "foo", "bar", "baz", name="my_enum", native_enum=False
+                        "foo",
+                        "bar",
+                        "baz",
+                        name="my_enum",
+                        create_constraint=True,
+                        native_enum=False,
                     )
                 ),
             ),
@@ -1852,55 +2368,122 @@ class ArrayEnum(fixtures.TestBase):
             "for ARRAY of non-native ENUM; please specify "
             "create_constraint=False on this Enum datatype.",
             self.metadata.create_all,
-            testing.db,
+            connection,
         )
 
-    @testing.combinations(
-        sqltypes.ARRAY, postgresql.ARRAY, _ArrayOfEnum, argnames="array_cls"
-    )
-    @testing.combinations(sqltypes.Enum, postgresql.ENUM, argnames="enum_cls")
-    @testing.provide_metadata
-    def test_array_of_enums(self, array_cls, enum_cls, connection):
-        tbl = Table(
-            "enum_table",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
-            Column(
-                "enum_col",
-                array_cls(enum_cls("foo", "bar", "baz", name="an_enum")),
-            ),
-        )
-
-        if util.py3k:
-            from enum import Enum
-
-            class MyEnum(Enum):
-                a = "aaa"
-                b = "bbb"
-                c = "ccc"
-
-            tbl.append_column(
+    @testing.fixture
+    def array_of_enum_fixture(self, metadata, connection):
+        def go(array_cls, enum_cls):
+            tbl = Table(
+                "enum_table",
+                metadata,
+                Column("id", Integer, primary_key=True),
                 Column(
-                    "pyenum_col",
-                    array_cls(enum_cls(MyEnum)),
+                    "enum_col",
+                    array_cls(enum_cls("foo", "bar", "baz", name="an_enum")),
                 ),
             )
+            if util.py3k:
+                from enum import Enum
 
-        self.metadata.create_all(connection)
+                class MyEnum(Enum):
+                    a = "aaa"
+                    b = "bbb"
+                    c = "ccc"
 
-        connection.execute(
-            tbl.insert(), [{"enum_col": ["foo"]}, {"enum_col": ["foo", "bar"]}]
+                tbl.append_column(
+                    Column(
+                        "pyenum_col",
+                        array_cls(enum_cls(MyEnum)),
+                    ),
+                )
+                data = [
+                    {"enum_col": ["foo"], "pyenum_col": [MyEnum.a, MyEnum.b]},
+                    {"enum_col": ["foo", "bar"], "pyenum_col": [MyEnum.b]},
+                ]
+            else:
+                MyEnum = None
+                data = [
+                    {"enum_col": ["foo"]},
+                    {"enum_col": ["foo", "bar"]},
+                ]
+
+            metadata.create_all(connection)
+            connection.execute(tbl.insert(), data)
+            return tbl, MyEnum
+
+        yield go
+
+    def _enum_combinations(fn):
+        return testing.combinations(
+            sqltypes.Enum, postgresql.ENUM, argnames="enum_cls"
+        )(
+            testing.combinations(
+                sqltypes.ARRAY,
+                postgresql.ARRAY,
+                (_ArrayOfEnum, testing.only_on("postgresql+psycopg2")),
+                argnames="array_cls",
+            )(fn)
         )
 
-        sel = select([tbl.c.enum_col]).order_by(tbl.c.id)
+    @testing.requires.python3
+    @_enum_combinations
+    @testing.combinations("all", "any", argnames="fn")
+    def test_any_all_roundtrip(
+        self, array_of_enum_fixture, connection, array_cls, enum_cls, fn
+    ):
+        """test #6515"""
+
+        tbl, MyEnum = array_of_enum_fixture(array_cls, enum_cls)
+
+        if fn == "all":
+            expr = tbl.c.pyenum_col.all(MyEnum.b)
+            result = [([MyEnum.b],)]
+        elif fn == "any":
+            expr = tbl.c.pyenum_col.any(MyEnum.b)
+            result = [([MyEnum.a, MyEnum.b],), ([MyEnum.b],)]
+        else:
+            assert False
+        sel = select(tbl.c.pyenum_col).where(expr).order_by(tbl.c.id)
+        eq_(connection.execute(sel).fetchall(), result)
+
+    @_enum_combinations
+    def test_array_of_enums_roundtrip(
+        self, array_of_enum_fixture, connection, array_cls, enum_cls
+    ):
+        tbl, MyEnum = array_of_enum_fixture(array_cls, enum_cls)
+
+        # test select back
+        sel = select(tbl.c.enum_col).order_by(tbl.c.id)
         eq_(
             connection.execute(sel).fetchall(), [(["foo"],), (["foo", "bar"],)]
         )
 
-        if util.py3k:
-            connection.execute(tbl.insert(), {"pyenum_col": [MyEnum.a]})
-            sel = select([tbl.c.pyenum_col]).order_by(tbl.c.id.desc())
-            eq_(connection.scalar(sel), [MyEnum.a])
+    @_enum_combinations
+    def test_array_of_enums_expanding_in(
+        self, array_of_enum_fixture, connection, array_cls, enum_cls
+    ):
+        tbl, MyEnum = array_of_enum_fixture(array_cls, enum_cls)
+
+        # test select with WHERE using expanding IN against arrays
+        # #7177
+        sel = (
+            select(tbl.c.enum_col)
+            .where(tbl.c.enum_col.in_([["foo", "bar"], ["bar", "foo"]]))
+            .order_by(tbl.c.id)
+        )
+        eq_(connection.execute(sel).fetchall(), [(["foo", "bar"],)])
+
+    @_enum_combinations
+    @testing.requires.python3
+    def test_array_of_enums_native_roundtrip(
+        self, array_of_enum_fixture, connection, array_cls, enum_cls
+    ):
+        tbl, MyEnum = array_of_enum_fixture(array_cls, enum_cls)
+
+        connection.execute(tbl.insert(), {"pyenum_col": [MyEnum.a]})
+        sel = select(tbl.c.pyenum_col).order_by(tbl.c.id.desc())
+        eq_(connection.scalar(sel), [MyEnum.a])
 
 
 class ArrayJSON(fixtures.TestBase):
@@ -1914,8 +2497,7 @@ class ArrayJSON(fixtures.TestBase):
     @testing.combinations(
         sqltypes.JSON, postgresql.JSON, postgresql.JSONB, argnames="json_cls"
     )
-    @testing.provide_metadata
-    def test_array_of_json(self, array_cls, json_cls, connection):
+    def test_array_of_json(self, array_cls, json_cls, metadata, connection):
         tbl = Table(
             "json_table",
             self.metadata,
@@ -1931,16 +2513,69 @@ class ArrayJSON(fixtures.TestBase):
         connection.execute(
             tbl.insert(),
             [
-                {"json_col": ["foo"]},
-                {"json_col": [{"foo": "bar"}, [1]]},
-                {"json_col": [None]},
+                {"id": 1, "json_col": ["foo"]},
+                {"id": 2, "json_col": [{"foo": "bar"}, [1]]},
+                {"id": 3, "json_col": [None]},
+                {"id": 4, "json_col": [42]},
+                {"id": 5, "json_col": [True]},
+                {"id": 6, "json_col": None},
             ],
         )
 
-        sel = select([tbl.c.json_col]).order_by(tbl.c.id)
+        sel = select(tbl.c.json_col).order_by(tbl.c.id)
         eq_(
             connection.execute(sel).fetchall(),
-            [(["foo"],), ([{"foo": "bar"}, [1]],), ([None],)],
+            [
+                (["foo"],),
+                ([{"foo": "bar"}, [1]],),
+                ([None],),
+                ([42],),
+                ([True],),
+                (None,),
+            ],
+        )
+
+        eq_(
+            connection.exec_driver_sql(
+                """select json_col::text = array['"foo"']::json[]::text"""
+                " from json_table where id = 1"
+            ).scalar(),
+            True,
+        )
+        eq_(
+            connection.exec_driver_sql(
+                "select json_col::text = "
+                """array['{"foo": "bar"}', '[1]']::json[]::text"""
+                " from json_table where id = 2"
+            ).scalar(),
+            True,
+        )
+        eq_(
+            connection.exec_driver_sql(
+                """select json_col::text = array['null']::json[]::text"""
+                " from json_table where id = 3"
+            ).scalar(),
+            True,
+        )
+        eq_(
+            connection.exec_driver_sql(
+                """select json_col::text = array['42']::json[]::text"""
+                " from json_table where id = 4"
+            ).scalar(),
+            True,
+        )
+        eq_(
+            connection.exec_driver_sql(
+                """select json_col::text = array['true']::json[]::text"""
+                " from json_table where id = 5"
+            ).scalar(),
+            True,
+        )
+        eq_(
+            connection.exec_driver_sql(
+                "select json_col is null from json_table where id = 6"
+            ).scalar(),
+            True,
         )
 
 
@@ -1968,19 +2603,38 @@ class HashableFlagORMTest(fixtures.TestBase):
                 },
             ],
         ),
+        (
+            "HSTORE",
+            postgresql.HSTORE(),
+            [{"a": "1", "b": "2", "c": "3"}, {"d": "4", "e": "5", "f": "6"}],
+            testing.requires.hstore,
+        ),
+        (
+            "JSONB",
+            postgresql.JSONB(),
+            [
+                {"a": "1", "b": "2", "c": "3"},
+                {
+                    "d": "4",
+                    "e": {"e1": "5", "e2": "6"},
+                    "f": {"f1": [9, 10, 11]},
+                },
+            ],
+            testing.requires.postgresql_jsonb,
+        ),
+        argnames="type_,data",
         id_="iaa",
     )
-    @testing.provide_metadata
-    def test_hashable_flag(self, type_, data):
-        Base = declarative_base(metadata=self.metadata)
+    def test_hashable_flag(self, metadata, connection, type_, data):
+        Base = declarative_base(metadata=metadata)
 
         class A(Base):
             __tablename__ = "a1"
             id = Column(Integer, primary_key=True)
             data = Column(type_)
 
-        Base.metadata.create_all(testing.db)
-        s = Session(testing.db)
+        Base.metadata.create_all(connection)
+        s = Session(connection)
         s.add_all([A(data=elem) for elem in data])
         s.commit()
 
@@ -1992,47 +2646,20 @@ class HashableFlagORMTest(fixtures.TestBase):
             list(enumerate(data, 1)),
         )
 
-    @testing.requires.hstore
-    def test_hstore(self):
-        self.test_hashable_flag(
-            postgresql.HSTORE(),
-            [{"a": "1", "b": "2", "c": "3"}, {"d": "4", "e": "5", "f": "6"}],
-        )
-
-    @testing.requires.postgresql_jsonb
-    def test_jsonb(self):
-        self.test_hashable_flag(
-            postgresql.JSONB(),
-            [
-                {"a": "1", "b": "2", "c": "3"},
-                {
-                    "d": "4",
-                    "e": {"e1": "5", "e2": "6"},
-                    "f": {"f1": [9, 10, 11]},
-                },
-            ],
-        )
-
 
 class TimestampTest(fixtures.TestBase, AssertsExecutionResults):
     __only_on__ = "postgresql"
     __backend__ = True
 
-    def test_timestamp(self):
-        engine = testing.db
-        connection = engine.connect()
-
-        s = select([text("timestamp '2007-12-25'")])
+    def test_timestamp(self, connection):
+        s = select(text("timestamp '2007-12-25'"))
         result = connection.execute(s).first()
         eq_(result[0], datetime.datetime(2007, 12, 25, 0, 0))
 
-    def test_interval_arithmetic(self):
+    def test_interval_arithmetic(self, connection):
         # basically testing that we get timedelta back for an INTERVAL
         # result.  more of a driver assertion.
-        engine = testing.db
-        connection = engine.connect()
-
-        s = select([text("timestamp '2007-12-25' - timestamp '2007-11-15'")])
+        s = select(text("timestamp '2007-12-25' - timestamp '2007-11-15'"))
         result = connection.execute(s).first()
         eq_(result[0], datetime.timedelta(40))
 
@@ -2045,6 +2672,10 @@ class TimestampTest(fixtures.TestBase, AssertsExecutionResults):
         )
         eq_(expr.type._type_affinity, types.Interval)
         assert isinstance(expr.type, postgresql.INTERVAL)
+
+    def test_interval_coercion_literal(self):
+        expr = column("bar", postgresql.INTERVAL) == datetime.timedelta(days=1)
+        eq_(expr.right.type._type_affinity, types.Interval)
 
 
 class SpecialTypesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -2062,7 +2693,7 @@ class SpecialTypesCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
 class SpecialTypesTest(fixtures.TablesTest, ComparesTables):
 
-    """test DDL and reflection of PG-specific types """
+    """test DDL and reflection of PG-specific types"""
 
     __only_on__ = ("postgresql >= 8.3.0",)
     __backend__ = True
@@ -2088,6 +2719,7 @@ class SpecialTypesTest(fixtures.TablesTest, ComparesTables):
             Column("bitstring", postgresql.BIT(4)),
             Column("addr", postgresql.INET),
             Column("addr2", postgresql.MACADDR),
+            Column("addr4", postgresql.MACADDR8),
             Column("price", postgresql.MONEY),
             Column("addr3", postgresql.CIDR),
             Column("doubleprec", postgresql.DOUBLE_PRECISION),
@@ -2100,37 +2732,36 @@ class SpecialTypesTest(fixtures.TablesTest, ComparesTables):
 
         return table
 
-    def test_reflection(self, special_types_table):
+    def test_reflection(self, special_types_table, connection):
         # cheat so that the "strict type check"
         # works
         special_types_table.c.year_interval.type = postgresql.INTERVAL()
         special_types_table.c.month_interval.type = postgresql.INTERVAL()
 
-        m = MetaData(testing.db)
-        t = Table("sometable", m, autoload=True)
+        m = MetaData()
+        t = Table("sometable", m, autoload_with=connection)
 
         self.assert_tables_equal(special_types_table, t, strict_types=True)
         assert t.c.plain_interval.type.precision is None
         assert t.c.precision_interval.type.precision == 3
         assert t.c.bitstring.type.length == 4
 
-    @testing.provide_metadata
-    def test_tsvector_round_trip(self):
-        t = Table("t1", self.metadata, Column("data", postgresql.TSVECTOR))
-        t.create()
-        testing.db.execute(t.insert(), data="a fat cat sat")
-        eq_(testing.db.scalar(select([t.c.data])), "'a' 'cat' 'fat' 'sat'")
+    def test_tsvector_round_trip(self, connection, metadata):
+        t = Table("t1", metadata, Column("data", postgresql.TSVECTOR))
+        t.create(connection)
+        connection.execute(t.insert(), dict(data="a fat cat sat"))
+        eq_(connection.scalar(select(t.c.data)), "'a' 'cat' 'fat' 'sat'")
 
-        testing.db.execute(t.update(), data="'a' 'cat' 'fat' 'mat' 'sat'")
+        connection.execute(
+            t.update(), dict(data="'a' 'cat' 'fat' 'mat' 'sat'")
+        )
 
         eq_(
-            testing.db.scalar(select([t.c.data])),
+            connection.scalar(select(t.c.data)),
             "'a' 'cat' 'fat' 'mat' 'sat'",
         )
 
-    @testing.provide_metadata
-    def test_bit_reflection(self):
-        metadata = self.metadata
+    def test_bit_reflection(self, metadata, connection):
         t1 = Table(
             "t1",
             metadata,
@@ -2139,9 +2770,9 @@ class SpecialTypesTest(fixtures.TablesTest, ComparesTables):
             Column("bitvarying", postgresql.BIT(varying=True)),
             Column("bitvarying5", postgresql.BIT(5, varying=True)),
         )
-        t1.create()
-        m2 = MetaData(testing.db)
-        t2 = Table("t1", m2, autoload=True)
+        t1.create(connection)
+        m2 = MetaData()
+        t2 = Table("t1", m2, autoload_with=connection)
         eq_(t2.c.bit1.type.length, 1)
         eq_(t2.c.bit1.type.varying, False)
         eq_(t2.c.bit5.type.length, 5)
@@ -2168,21 +2799,18 @@ class UUIDTest(fixtures.TestBase):
         ),
         ("as_uuid", postgresql.UUID(as_uuid=True), uuid.uuid4(), uuid.uuid4()),
         id_="iaaa",
+        argnames="datatype, value1, value2",
     )
-    def test_round_trip(self, datatype, value1, value2):
-
+    def test_round_trip(self, datatype, value1, value2, connection):
         utable = Table("utable", MetaData(), Column("data", datatype))
-
-        with testing.db.connect() as conn:
-            conn.begin()
-            utable.create(conn)
-            conn.execute(utable.insert(), {"data": value1})
-            conn.execute(utable.insert(), {"data": value2})
-            r = conn.execute(
-                select([utable.c.data]).where(utable.c.data != value1)
-            )
-            eq_(r.fetchone()[0], value2)
-            eq_(r.fetchone(), None)
+        utable.create(connection)
+        connection.execute(utable.insert(), {"data": value1})
+        connection.execute(utable.insert(), {"data": value2})
+        r = connection.execute(
+            select(utable.c.data).where(utable.c.data != value1)
+        )
+        eq_(r.fetchone()[0], value2)
+        eq_(r.fetchone(), None)
 
     @testing.combinations(
         (
@@ -2198,25 +2826,48 @@ class UUIDTest(fixtures.TestBase):
             [str(uuid.uuid4()), str(uuid.uuid4())],
         ),
         id_="iaaa",
+        argnames="datatype, value1, value2",
     )
-    @testing.fails_on("postgresql+pg8000", "No support for UUID with ARRAY")
-    def test_uuid_array(self, datatype, value1, value2):
-        self.test_round_trip(datatype, value1, value2)
+    # passes pg8000 as of 1.19.1
+    def test_uuid_array(self, datatype, value1, value2, connection):
+        self.test_round_trip(datatype, value1, value2, connection)
 
-    def test_no_uuid_available(self):
+    @testing.combinations(
+        (
+            "not_as_uuid",
+            postgresql.UUID(as_uuid=False),
+            str(uuid.uuid4()),
+        ),
+        (
+            "as_uuid",
+            postgresql.UUID(as_uuid=True),
+            uuid.uuid4(),
+        ),
+        id_="iaa",
+        argnames="datatype, value1",
+    )
+    def test_uuid_literal(self, datatype, value1, connection):
+        v1 = connection.execute(
+            select(
+                bindparam(
+                    "key",
+                    value=value1,
+                    literal_execute=True,
+                    type_=datatype,
+                )
+            ),
+        )
+        eq_(v1.fetchone()[0], value1)
 
-        uuid_type = base._python_UUID
-        base._python_UUID = None
-        try:
-            assert_raises(NotImplementedError, postgresql.UUID, as_uuid=True)
-        finally:
-            base._python_UUID = uuid_type
+    def test_python_type(self):
+        eq_(postgresql.UUID(as_uuid=True).python_type, uuid.UUID)
+        eq_(postgresql.UUID(as_uuid=False).python_type, str)
 
 
 class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
     __dialect__ = "postgresql"
 
-    def setup(self):
+    def setup_test(self):
         metadata = MetaData()
         self.test_table = Table(
             "test_table",
@@ -2227,7 +2878,7 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
         self.hashcol = self.test_table.c.hash
 
     def _test_where(self, whereclause, expected):
-        stmt = select([self.test_table]).where(whereclause)
+        stmt = select(self.test_table).where(whereclause)
         self.assert_compile(
             stmt,
             "SELECT test_table.id, test_table.hash FROM test_table "
@@ -2236,7 +2887,7 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
 
     def test_bind_serialize_default(self):
 
-        dialect = postgresql.dialect()
+        dialect = postgresql.dialect(use_native_hstore=False)
         proc = self.test_table.c.hash.type._cached_bind_processor(dialect)
         eq_(
             proc(util.OrderedDict([("key1", "value1"), ("key2", "value2")])),
@@ -2244,12 +2895,12 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
         )
 
     def test_bind_serialize_with_slashes_and_quotes(self):
-        dialect = postgresql.dialect()
+        dialect = postgresql.dialect(use_native_hstore=False)
         proc = self.test_table.c.hash.type._cached_bind_processor(dialect)
         eq_(proc({'\\"a': '\\"1'}), '"\\\\\\"a"=>"\\\\\\"1"')
 
     def test_parse_error(self):
-        dialect = postgresql.dialect()
+        dialect = postgresql.dialect(use_native_hstore=False)
         proc = self.test_table.c.hash.type._cached_result_processor(
             dialect, None
         )
@@ -2263,7 +2914,7 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
         )
 
     def test_result_deserialize_default(self):
-        dialect = postgresql.dialect()
+        dialect = postgresql.dialect(use_native_hstore=False)
         proc = self.test_table.c.hash.type._cached_result_processor(
             dialect, None
         )
@@ -2273,7 +2924,7 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
         )
 
     def test_result_deserialize_with_slashes_and_quotes(self):
-        dialect = postgresql.dialect()
+        dialect = postgresql.dialect(use_native_hstore=False)
         proc = self.test_table.c.hash.type._cached_result_processor(
             dialect, None
         )
@@ -2478,7 +3129,7 @@ class HStoreTest(AssertsCompiledSQL, fixtures.TestBase):
     )
     def test_cols(self, colclause_fn, expected, from_):
         colclause = colclause_fn(self)
-        stmt = select([colclause])
+        stmt = select(colclause)
         self.assert_compile(
             stmt,
             ("SELECT %s" + (" FROM test_table" if from_ else "")) % expected,
@@ -2500,48 +3151,57 @@ class HStoreRoundTripTest(fixtures.TablesTest):
             Column("data", HSTORE),
         )
 
-    def _fixture_data(self, engine):
+    def _fixture_data(self, connection):
         data_table = self.tables.data_table
-        engine.execute(
+        connection.execute(
             data_table.insert(),
-            {"name": "r1", "data": {"k1": "r1v1", "k2": "r1v2"}},
-            {"name": "r2", "data": {"k1": "r2v1", "k2": "r2v2"}},
-            {"name": "r3", "data": {"k1": "r3v1", "k2": "r3v2"}},
-            {"name": "r4", "data": {"k1": "r4v1", "k2": "r4v2"}},
-            {"name": "r5", "data": {"k1": "r5v1", "k2": "r5v2"}},
+            [
+                {"name": "r1", "data": {"k1": "r1v1", "k2": "r1v2"}},
+                {"name": "r2", "data": {"k1": "r2v1", "k2": "r2v2"}},
+                {"name": "r3", "data": {"k1": "r3v1", "k2": "r3v2"}},
+                {"name": "r4", "data": {"k1": "r4v1", "k2": "r4v2"}},
+                {"name": "r5", "data": {"k1": "r5v1", "k2": "r5v2"}},
+            ],
         )
 
-    def _assert_data(self, compare):
-        data = testing.db.execute(
-            select([self.tables.data_table.c.data]).order_by(
+    def _assert_data(self, compare, conn):
+        data = conn.execute(
+            select(self.tables.data_table.c.data).order_by(
                 self.tables.data_table.c.name
             )
         ).fetchall()
         eq_([d for d, in data], compare)
 
-    def _test_insert(self, engine):
-        engine.execute(
+    def _test_insert(self, connection):
+        connection.execute(
             self.tables.data_table.insert(),
             {"name": "r1", "data": {"k1": "r1v1", "k2": "r1v2"}},
         )
-        self._assert_data([{"k1": "r1v1", "k2": "r1v2"}])
+        self._assert_data([{"k1": "r1v1", "k2": "r1v2"}], connection)
 
-    def _non_native_engine(self):
-        if testing.requires.psycopg2_native_hstore.enabled:
-            engine = engines.testing_engine(
-                options=dict(use_native_hstore=False)
-            )
+    @testing.fixture
+    def non_native_hstore_connection(self, testing_engine):
+        local_engine = testing.requires.psycopg2_native_hstore.enabled
+
+        if local_engine:
+            engine = testing_engine(options=dict(use_native_hstore=False))
         else:
             engine = testing.db
-        engine.connect().close()
-        return engine
 
-    def test_reflect(self):
-        insp = inspect(testing.db)
+        conn = engine.connect()
+        trans = conn.begin()
+        yield conn
+        try:
+            trans.rollback()
+        finally:
+            conn.close()
+
+    def test_reflect(self, connection):
+        insp = inspect(connection)
         cols = insp.get_columns("data_table")
         assert isinstance(cols[2]["type"], HSTORE)
 
-    def test_literal_round_trip(self):
+    def test_literal_round_trip(self, connection):
         # in particular, this tests that the array index
         # operator against the function is handled by PG; with some
         # array functions it requires outer parenthezisation on the left and
@@ -2549,75 +3209,59 @@ class HStoreRoundTripTest(fixtures.TablesTest):
         expr = hstore(
             postgresql.array(["1", "2"]), postgresql.array(["3", None])
         )["1"]
-        eq_(testing.db.scalar(select([expr])), "3")
+        eq_(connection.scalar(select(expr)), "3")
 
     @testing.requires.psycopg2_native_hstore
-    def test_insert_native(self):
-        engine = testing.db
-        self._test_insert(engine)
+    def test_insert_native(self, connection):
+        self._test_insert(connection)
 
-    def test_insert_python(self):
-        engine = self._non_native_engine()
-        self._test_insert(engine)
+    def test_insert_python(self, non_native_hstore_connection):
+        self._test_insert(non_native_hstore_connection)
 
     @testing.requires.psycopg2_native_hstore
-    def test_criterion_native(self):
-        engine = testing.db
-        self._fixture_data(engine)
-        self._test_criterion(engine)
+    def test_criterion_native(self, connection):
+        self._fixture_data(connection)
+        self._test_criterion(connection)
 
-    def test_criterion_python(self):
-        engine = self._non_native_engine()
-        self._fixture_data(engine)
-        self._test_criterion(engine)
+    def test_criterion_python(self, non_native_hstore_connection):
+        self._fixture_data(non_native_hstore_connection)
+        self._test_criterion(non_native_hstore_connection)
 
-    def _test_criterion(self, engine):
+    def _test_criterion(self, connection):
         data_table = self.tables.data_table
-        result = engine.execute(
-            select([data_table.c.data]).where(
-                data_table.c.data["k1"] == "r3v1"
-            )
+        result = connection.execute(
+            select(data_table.c.data).where(data_table.c.data["k1"] == "r3v1")
         ).first()
         eq_(result, ({"k1": "r3v1", "k2": "r3v2"},))
 
-    def _test_fixed_round_trip(self, engine):
+    def _test_fixed_round_trip(self, connection):
         s = select(
-            [
-                hstore(
-                    array(["key1", "key2", "key3"]),
-                    array(["value1", "value2", "value3"]),
-                )
-            ]
+            hstore(
+                array(["key1", "key2", "key3"]),
+                array(["value1", "value2", "value3"]),
+            )
         )
         eq_(
-            engine.scalar(s),
+            connection.scalar(s),
             {"key1": "value1", "key2": "value2", "key3": "value3"},
         )
 
-    def test_fixed_round_trip_python(self):
-        engine = self._non_native_engine()
-        self._test_fixed_round_trip(engine)
+    def test_fixed_round_trip_python(self, non_native_hstore_connection):
+        self._test_fixed_round_trip(non_native_hstore_connection)
 
     @testing.requires.psycopg2_native_hstore
-    def test_fixed_round_trip_native(self):
-        engine = testing.db
-        self._test_fixed_round_trip(engine)
+    def test_fixed_round_trip_native(self, connection):
+        self._test_fixed_round_trip(connection)
 
-    def _test_unicode_round_trip(self, engine):
+    def _test_unicode_round_trip(self, connection):
         s = select(
-            [
-                hstore(
-                    array(
-                        [util.u("réveillé"), util.u("drôle"), util.u("S’il")]
-                    ),
-                    array(
-                        [util.u("réveillé"), util.u("drôle"), util.u("S’il")]
-                    ),
-                )
-            ]
+            hstore(
+                array([util.u("réveillé"), util.u("drôle"), util.u("S’il")]),
+                array([util.u("réveillé"), util.u("drôle"), util.u("S’il")]),
+            )
         )
         eq_(
-            engine.scalar(s),
+            connection.scalar(s),
             {
                 util.u("réveillé"): util.u("réveillé"),
                 util.u("drôle"): util.u("drôle"),
@@ -2626,47 +3270,44 @@ class HStoreRoundTripTest(fixtures.TablesTest):
         )
 
     @testing.requires.psycopg2_native_hstore
-    def test_unicode_round_trip_python(self):
-        engine = self._non_native_engine()
-        self._test_unicode_round_trip(engine)
+    def test_unicode_round_trip_python(self, non_native_hstore_connection):
+        self._test_unicode_round_trip(non_native_hstore_connection)
 
     @testing.requires.psycopg2_native_hstore
-    def test_unicode_round_trip_native(self):
-        engine = testing.db
-        self._test_unicode_round_trip(engine)
+    def test_unicode_round_trip_native(self, connection):
+        self._test_unicode_round_trip(connection)
 
-    def test_escaped_quotes_round_trip_python(self):
-        engine = self._non_native_engine()
-        self._test_escaped_quotes_round_trip(engine)
+    def test_escaped_quotes_round_trip_python(
+        self, non_native_hstore_connection
+    ):
+        self._test_escaped_quotes_round_trip(non_native_hstore_connection)
 
     @testing.requires.psycopg2_native_hstore
-    def test_escaped_quotes_round_trip_native(self):
-        engine = testing.db
-        self._test_escaped_quotes_round_trip(engine)
+    def test_escaped_quotes_round_trip_native(self, connection):
+        self._test_escaped_quotes_round_trip(connection)
 
-    def _test_escaped_quotes_round_trip(self, engine):
-        engine.execute(
+    def _test_escaped_quotes_round_trip(self, connection):
+        connection.execute(
             self.tables.data_table.insert(),
             {"name": "r1", "data": {r"key \"foo\"": r'value \"bar"\ xyz'}},
         )
-        self._assert_data([{r"key \"foo\"": r'value \"bar"\ xyz'}])
+        self._assert_data([{r"key \"foo\"": r'value \"bar"\ xyz'}], connection)
 
-    def test_orm_round_trip(self):
-        from sqlalchemy import orm
-
+    def test_orm_round_trip(self, registry):
         class Data(object):
             def __init__(self, name, data):
                 self.name = name
                 self.data = data
 
-        orm.mapper(Data, self.tables.data_table)
-        s = orm.Session(testing.db)
-        d = Data(
-            name="r1",
-            data={"key1": "value1", "key2": "value2", "key3": "value3"},
-        )
-        s.add(d)
-        eq_(s.query(Data.data, Data).all(), [(d.data, d)])
+        registry.map_imperatively(Data, self.tables.data_table)
+
+        with fixtures.fixture_session() as s:
+            d = Data(
+                name="r1",
+                data={"key1": "value1", "key2": "value2", "key3": "value3"},
+            )
+            s.add(d)
+            eq_(s.query(Data.data, Data).all(), [(d.data, d)])
 
 
 class _RangeTypeCompilation(AssertsCompiledSQL, fixtures.TestBase):
@@ -2675,7 +3316,7 @@ class _RangeTypeCompilation(AssertsCompiledSQL, fixtures.TestBase):
     # operator tests
 
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         table = Table(
             "data_table",
             MetaData(),
@@ -2689,14 +3330,14 @@ class _RangeTypeCompilation(AssertsCompiledSQL, fixtures.TestBase):
 
     def test_where_equal(self):
         self._test_clause(
-            self.col == self._data_str,
+            self.col == self._data_str(),
             "data_table.range = %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_where_not_equal(self):
         self._test_clause(
-            self.col != self._data_str,
+            self.col != self._data_str(),
             "data_table.range <> %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
@@ -2715,94 +3356,94 @@ class _RangeTypeCompilation(AssertsCompiledSQL, fixtures.TestBase):
 
     def test_where_less_than(self):
         self._test_clause(
-            self.col < self._data_str,
+            self.col < self._data_str(),
             "data_table.range < %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_where_greater_than(self):
         self._test_clause(
-            self.col > self._data_str,
+            self.col > self._data_str(),
             "data_table.range > %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_where_less_than_or_equal(self):
         self._test_clause(
-            self.col <= self._data_str,
+            self.col <= self._data_str(),
             "data_table.range <= %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_where_greater_than_or_equal(self):
         self._test_clause(
-            self.col >= self._data_str,
+            self.col >= self._data_str(),
             "data_table.range >= %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_contains(self):
         self._test_clause(
-            self.col.contains(self._data_str),
+            self.col.contains(self._data_str()),
             "data_table.range @> %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_contained_by(self):
         self._test_clause(
-            self.col.contained_by(self._data_str),
+            self.col.contained_by(self._data_str()),
             "data_table.range <@ %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_overlaps(self):
         self._test_clause(
-            self.col.overlaps(self._data_str),
+            self.col.overlaps(self._data_str()),
             "data_table.range && %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_strictly_left_of(self):
         self._test_clause(
-            self.col << self._data_str,
+            self.col << self._data_str(),
             "data_table.range << %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
         self._test_clause(
-            self.col.strictly_left_of(self._data_str),
+            self.col.strictly_left_of(self._data_str()),
             "data_table.range << %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_strictly_right_of(self):
         self._test_clause(
-            self.col >> self._data_str,
+            self.col >> self._data_str(),
             "data_table.range >> %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
         self._test_clause(
-            self.col.strictly_right_of(self._data_str),
+            self.col.strictly_right_of(self._data_str()),
             "data_table.range >> %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_not_extend_right_of(self):
         self._test_clause(
-            self.col.not_extend_right_of(self._data_str),
+            self.col.not_extend_right_of(self._data_str()),
             "data_table.range &< %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_not_extend_left_of(self):
         self._test_clause(
-            self.col.not_extend_left_of(self._data_str),
+            self.col.not_extend_left_of(self._data_str()),
             "data_table.range &> %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
 
     def test_adjacent_to(self):
         self._test_clause(
-            self.col.adjacent_to(self._data_str),
+            self.col.adjacent_to(self._data_str()),
             "data_table.range -|- %(range_1)s",
             sqltypes.BOOLEANTYPE,
         )
@@ -2856,59 +3497,57 @@ class _RangeTypeRoundTrip(fixtures.TablesTest):
     def test_actual_type(self):
         eq_(str(self._col_type()), self._col_str)
 
-    def test_reflect(self):
+    def test_reflect(self, connection):
         from sqlalchemy import inspect
 
-        insp = inspect(testing.db)
+        insp = inspect(connection)
         cols = insp.get_columns("data_table")
         assert isinstance(cols[0]["type"], self._col_type)
 
-    def _assert_data(self):
-        data = testing.db.execute(
-            select([self.tables.data_table.c.range])
-        ).fetchall()
+    def _assert_data(self, conn):
+        data = conn.execute(select(self.tables.data_table.c.range)).fetchall()
         eq_(data, [(self._data_obj(),)])
 
-    def test_insert_obj(self):
-        testing.db.engine.execute(
+    def test_insert_obj(self, connection):
+        connection.execute(
             self.tables.data_table.insert(), {"range": self._data_obj()}
         )
-        self._assert_data()
+        self._assert_data(connection)
 
-    def test_insert_text(self):
-        testing.db.engine.execute(
-            self.tables.data_table.insert(), {"range": self._data_str}
+    def test_insert_text(self, connection):
+        connection.execute(
+            self.tables.data_table.insert(), {"range": self._data_str()}
         )
-        self._assert_data()
+        self._assert_data(connection)
 
-    def test_union_result(self):
+    def test_union_result(self, connection):
         # insert
-        testing.db.engine.execute(
-            self.tables.data_table.insert(), {"range": self._data_str}
+        connection.execute(
+            self.tables.data_table.insert(), {"range": self._data_str()}
         )
         # select
         range_ = self.tables.data_table.c.range
-        data = testing.db.execute(select([range_ + range_])).fetchall()
+        data = connection.execute(select(range_ + range_)).fetchall()
         eq_(data, [(self._data_obj(),)])
 
-    def test_intersection_result(self):
+    def test_intersection_result(self, connection):
         # insert
-        testing.db.engine.execute(
-            self.tables.data_table.insert(), {"range": self._data_str}
+        connection.execute(
+            self.tables.data_table.insert(), {"range": self._data_str()}
         )
         # select
         range_ = self.tables.data_table.c.range
-        data = testing.db.execute(select([range_ * range_])).fetchall()
+        data = connection.execute(select(range_ * range_)).fetchall()
         eq_(data, [(self._data_obj(),)])
 
-    def test_difference_result(self):
+    def test_difference_result(self, connection):
         # insert
-        testing.db.engine.execute(
-            self.tables.data_table.insert(), {"range": self._data_str}
+        connection.execute(
+            self.tables.data_table.insert(), {"range": self._data_str()}
         )
         # select
         range_ = self.tables.data_table.c.range
-        data = testing.db.execute(select([range_ - range_])).fetchall()
+        data = connection.execute(select(range_ - range_)).fetchall()
         eq_(data, [(self._data_obj().__class__(empty=True),)])
 
 
@@ -2916,7 +3555,9 @@ class _Int4RangeTests(object):
 
     _col_type = INT4RANGE
     _col_str = "INT4RANGE"
-    _data_str = "[1,2)"
+
+    def _data_str(self):
+        return "[1,2)"
 
     def _data_obj(self):
         return self.extras().NumericRange(1, 2)
@@ -2926,7 +3567,9 @@ class _Int8RangeTests(object):
 
     _col_type = INT8RANGE
     _col_str = "INT8RANGE"
-    _data_str = "[9223372036854775806,9223372036854775807)"
+
+    def _data_str(self):
+        return "[9223372036854775806,9223372036854775807)"
 
     def _data_obj(self):
         return self.extras().NumericRange(
@@ -2938,7 +3581,9 @@ class _NumRangeTests(object):
 
     _col_type = NUMRANGE
     _col_str = "NUMRANGE"
-    _data_str = "[1.0,2.0)"
+
+    def _data_str(self):
+        return "[1.0,2.0)"
 
     def _data_obj(self):
         return self.extras().NumericRange(
@@ -2950,7 +3595,9 @@ class _DateRangeTests(object):
 
     _col_type = DATERANGE
     _col_str = "DATERANGE"
-    _data_str = "[2013-03-23,2013-03-24)"
+
+    def _data_str(self):
+        return "[2013-03-23,2013-03-24)"
 
     def _data_obj(self):
         return self.extras().DateRange(
@@ -2962,7 +3609,9 @@ class _DateTimeRangeTests(object):
 
     _col_type = TSRANGE
     _col_str = "TSRANGE"
-    _data_str = "[2013-03-23 14:30,2013-03-23 23:30)"
+
+    def _data_str(self):
+        return "[2013-03-23 14:30,2013-03-23 23:30)"
 
     def _data_obj(self):
         return self.extras().DateTimeRange(
@@ -2982,12 +3631,12 @@ class _DateTimeTZRangeTests(object):
 
     def tstzs(self):
         if self._tstzs is None:
-            lower = testing.db.scalar(func.current_timestamp().select())
-            upper = lower + datetime.timedelta(1)
-            self._tstzs = (lower, upper)
+            with testing.db.connect() as connection:
+                lower = connection.scalar(func.current_timestamp().select())
+                upper = lower + datetime.timedelta(1)
+                self._tstzs = (lower, upper)
         return self._tstzs
 
-    @property
     def _data_str(self):
         return "[%s,%s)" % self.tstzs()
 
@@ -3048,7 +3697,7 @@ class DateTimeTZRangeRoundTripTest(_DateTimeTZRangeTests, _RangeTypeRoundTrip):
 class JSONTest(AssertsCompiledSQL, fixtures.TestBase):
     __dialect__ = "postgresql"
 
-    def setup(self):
+    def setup_test(self):
         metadata = MetaData()
         self.test_table = Table(
             "test_table",
@@ -3088,7 +3737,7 @@ class JSONTest(AssertsCompiledSQL, fixtures.TestBase):
     )
     def test_where(self, whereclause_fn, expected):
         whereclause = whereclause_fn(self)
-        stmt = select([self.test_table]).where(whereclause)
+        stmt = select(self.test_table).where(whereclause)
         self.assert_compile(
             stmt,
             "SELECT test_table.id, test_table.test_column FROM test_table "
@@ -3123,7 +3772,7 @@ class JSONTest(AssertsCompiledSQL, fixtures.TestBase):
     )
     def test_cols(self, colclause_fn, expected, from_):
         colclause = colclause_fn(self)
-        stmt = select([colclause])
+        stmt = select(colclause)
         self.assert_compile(
             stmt,
             ("SELECT %s" + (" FROM test_table" if from_ else "")) % expected,
@@ -3134,7 +3783,7 @@ class JSONRoundTripTest(fixtures.TablesTest):
     __only_on__ = ("postgresql >= 9.3",)
     __backend__ = True
 
-    test_type = JSON
+    data_type = JSON
 
     @classmethod
     def define_tables(cls, metadata):
@@ -3143,146 +3792,103 @@ class JSONRoundTripTest(fixtures.TablesTest):
             metadata,
             Column("id", Integer, primary_key=True),
             Column("name", String(30), nullable=False),
-            Column("data", cls.test_type),
-            Column("nulldata", cls.test_type(none_as_null=True)),
+            Column("data", cls.data_type),
+            Column("nulldata", cls.data_type(none_as_null=True)),
         )
 
-    def _fixture_data(self, engine):
+    def _fixture_data(self, connection):
         data_table = self.tables.data_table
-        engine.execute(
-            data_table.insert(),
+
+        data = [
             {"name": "r1", "data": {"k1": "r1v1", "k2": "r1v2"}},
             {"name": "r2", "data": {"k1": "r2v1", "k2": "r2v2"}},
             {"name": "r3", "data": {"k1": "r3v1", "k2": "r3v2"}},
             {"name": "r4", "data": {"k1": "r4v1", "k2": "r4v2"}},
             {"name": "r5", "data": {"k1": "r5v1", "k2": "r5v2", "k3": 5}},
             {"name": "r6", "data": {"k1": {"r6v1": {"subr": [1, 2, 3]}}}},
-        )
+        ]
+        connection.execute(data_table.insert(), data)
+        return data
 
-    def _assert_data(self, compare, column="data"):
+    def _assert_data(self, compare, conn, column="data"):
         col = self.tables.data_table.c[column]
-
-        data = testing.db.execute(
-            select([col]).order_by(self.tables.data_table.c.name)
+        data = conn.execute(
+            select(col).order_by(self.tables.data_table.c.name)
         ).fetchall()
         eq_([d for d, in data], compare)
 
-    def _assert_column_is_NULL(self, column="data"):
+    def _assert_column_is_NULL(self, conn, column="data"):
         col = self.tables.data_table.c[column]
+        data = conn.execute(select(col).where(col.is_(null()))).fetchall()
+        eq_([d for d, in data], [None])
 
-        data = testing.db.execute(
-            select([col]).where(col.is_(null()))
+    def _assert_column_is_JSON_NULL(self, conn, column="data"):
+        col = self.tables.data_table.c[column]
+        data = conn.execute(
+            select(col).where(cast(col, String) == "null")
         ).fetchall()
         eq_([d for d, in data], [None])
 
-    def _assert_column_is_JSON_NULL(self, column="data"):
-        col = self.tables.data_table.c[column]
+    @testing.combinations(
+        "key",
+        "réve🐍 illé",
+        'name_with"quotes"name',
+        "name with spaces",
+        "name with ' single ' quotes",
+        'some_key("idx")',
+        argnames="key",
+    )
+    def test_indexed_special_keys(self, connection, key):
+        data_table = self.tables.data_table
+        data_element = {key: "some value"}
 
-        data = testing.db.execute(
-            select([col]).where(cast(col, String) == "null")
-        ).fetchall()
-        eq_([d for d, in data], [None])
+        connection.execute(
+            data_table.insert(),
+            {
+                "name": "row1",
+                "data": data_element,
+                "nulldata": data_element,
+            },
+        )
 
-    def _test_insert(self, engine):
-        engine.execute(
+        row = connection.execute(
+            select(data_table.c.data[key], data_table.c.nulldata[key])
+        ).one()
+        eq_(row, ("some value", "some value"))
+
+    def test_reflect(self, connection):
+        insp = inspect(connection)
+        cols = insp.get_columns("data_table")
+        assert isinstance(cols[2]["type"], self.data_type)
+
+    def test_insert(self, connection):
+        connection.execute(
             self.tables.data_table.insert(),
             {"name": "r1", "data": {"k1": "r1v1", "k2": "r1v2"}},
         )
-        self._assert_data([{"k1": "r1v1", "k2": "r1v2"}])
+        self._assert_data([{"k1": "r1v1", "k2": "r1v2"}], connection)
 
-    def _test_insert_nulls(self, engine):
-        engine.execute(
+    def test_insert_nulls(self, connection):
+        connection.execute(
             self.tables.data_table.insert(), {"name": "r1", "data": null()}
         )
-        self._assert_data([None])
+        self._assert_data([None], connection)
 
-    def _test_insert_none_as_null(self, engine):
-        engine.execute(
-            self.tables.data_table.insert(), {"name": "r1", "nulldata": None}
+    def test_insert_none_as_null(self, connection):
+        connection.execute(
+            self.tables.data_table.insert(),
+            {"name": "r1", "nulldata": None},
         )
-        self._assert_column_is_NULL(column="nulldata")
+        self._assert_column_is_NULL(connection, column="nulldata")
 
-    def _test_insert_nulljson_into_none_as_null(self, engine):
-        engine.execute(
+    def test_insert_nulljson_into_none_as_null(self, connection):
+        connection.execute(
             self.tables.data_table.insert(),
             {"name": "r1", "nulldata": JSON.NULL},
         )
-        self._assert_column_is_JSON_NULL(column="nulldata")
+        self._assert_column_is_JSON_NULL(connection, column="nulldata")
 
-    def _non_native_engine(self, json_serializer=None, json_deserializer=None):
-        if json_serializer is not None or json_deserializer is not None:
-            options = {
-                "json_serializer": json_serializer,
-                "json_deserializer": json_deserializer,
-            }
-        else:
-            options = {}
-
-        if testing.against(
-            "postgresql+psycopg2"
-        ) and testing.db.dialect.psycopg2_version >= (2, 5):
-            from psycopg2.extras import register_default_json
-
-            engine = engines.testing_engine(options=options)
-
-            @event.listens_for(engine, "connect")
-            def connect(dbapi_connection, connection_record):
-                engine.dialect._has_native_json = False
-
-                def pass_(value):
-                    return value
-
-                register_default_json(dbapi_connection, loads=pass_)
-
-        elif options:
-            engine = engines.testing_engine(options=options)
-        else:
-            engine = testing.db
-        engine.connect().close()
-        return engine
-
-    def test_reflect(self):
-        insp = inspect(testing.db)
-        cols = insp.get_columns("data_table")
-        assert isinstance(cols[2]["type"], self.test_type)
-
-    @testing.requires.psycopg2_native_json
-    def test_insert_native(self):
-        engine = testing.db
-        self._test_insert(engine)
-
-    @testing.requires.psycopg2_native_json
-    def test_insert_native_nulls(self):
-        engine = testing.db
-        self._test_insert_nulls(engine)
-
-    @testing.requires.psycopg2_native_json
-    def test_insert_native_none_as_null(self):
-        engine = testing.db
-        self._test_insert_none_as_null(engine)
-
-    @testing.requires.psycopg2_native_json
-    def test_insert_native_nulljson_into_none_as_null(self):
-        engine = testing.db
-        self._test_insert_nulljson_into_none_as_null(engine)
-
-    def test_insert_python(self):
-        engine = self._non_native_engine()
-        self._test_insert(engine)
-
-    def test_insert_python_nulls(self):
-        engine = self._non_native_engine()
-        self._test_insert_nulls(engine)
-
-    def test_insert_python_none_as_null(self):
-        engine = self._non_native_engine()
-        self._test_insert_none_as_null(engine)
-
-    def test_insert_python_nulljson_into_none_as_null(self):
-        engine = self._non_native_engine()
-        self._test_insert_nulljson_into_none_as_null(engine)
-
-    def _test_custom_serialize_deserialize(self, native):
+    def test_custom_serialize_deserialize(self, testing_engine):
         import json
 
         def loads(value):
@@ -3295,44 +3901,38 @@ class JSONRoundTripTest(fixtures.TablesTest):
             value["x"] = "dumps_y"
             return json.dumps(value)
 
-        if native:
-            engine = engines.testing_engine(
-                options=dict(json_serializer=dumps, json_deserializer=loads)
-            )
-        else:
-            engine = self._non_native_engine(
-                json_serializer=dumps, json_deserializer=loads
-            )
+        engine = testing_engine(
+            options=dict(json_serializer=dumps, json_deserializer=loads)
+        )
 
-        s = select([cast({"key": "value", "x": "q"}, self.test_type)])
-        eq_(engine.scalar(s), {"key": "value", "x": "dumps_y_loads"})
+        s = select(cast({"key": "value", "x": "q"}, self.data_type))
+        with engine.begin() as conn:
+            eq_(conn.scalar(s), {"key": "value", "x": "dumps_y_loads"})
 
-    @testing.requires.psycopg2_native_json
-    def test_custom_native(self):
-        self._test_custom_serialize_deserialize(True)
-
-    @testing.requires.psycopg2_native_json
-    def test_custom_python(self):
-        self._test_custom_serialize_deserialize(False)
-
-    @testing.requires.psycopg2_native_json
-    def test_criterion_native(self):
-        engine = testing.db
-        self._fixture_data(engine)
-        self._test_criterion(engine)
-
-    def test_criterion_python(self):
-        engine = self._non_native_engine()
-        self._fixture_data(engine)
-        self._test_criterion(engine)
-
-    def test_path_query(self):
-        engine = testing.db
-        self._fixture_data(engine)
+    def test_criterion(self, connection):
+        self._fixture_data(connection)
         data_table = self.tables.data_table
 
-        result = engine.execute(
-            select([data_table.c.name]).where(
+        result = connection.execute(
+            select(data_table.c.data).where(
+                data_table.c.data["k1"].astext == "r3v1"
+            )
+        ).first()
+        eq_(result, ({"k1": "r3v1", "k2": "r3v2"},))
+
+        result = connection.execute(
+            select(data_table.c.data).where(
+                data_table.c.data["k1"].astext.cast(String) == "r3v1"
+            )
+        ).first()
+        eq_(result, ({"k1": "r3v1", "k2": "r3v2"},))
+
+    def test_path_query(self, connection):
+        self._fixture_data(connection)
+        data_table = self.tables.data_table
+
+        result = connection.execute(
+            select(data_table.c.name).where(
                 data_table.c.data[("k1", "r6v1", "subr")].astext == "[1, 2, 3]"
             )
         )
@@ -3341,146 +3941,114 @@ class JSONRoundTripTest(fixtures.TablesTest):
     @testing.fails_on(
         "postgresql < 9.4", "Improvement in PostgreSQL behavior?"
     )
-    def test_multi_index_query(self):
-        engine = testing.db
-        self._fixture_data(engine)
+    def test_multi_index_query(self, connection):
+        self._fixture_data(connection)
         data_table = self.tables.data_table
 
-        result = engine.execute(
-            select([data_table.c.name]).where(
+        result = connection.execute(
+            select(data_table.c.name).where(
                 data_table.c.data["k1"]["r6v1"]["subr"].astext == "[1, 2, 3]"
             )
         )
         eq_(result.scalar(), "r6")
 
-    def test_query_returned_as_text(self):
-        engine = testing.db
-        self._fixture_data(engine)
+    def test_query_returned_as_text(self, connection):
+        self._fixture_data(connection)
         data_table = self.tables.data_table
-        result = engine.execute(
-            select([data_table.c.data["k1"].astext])
+        result = connection.execute(
+            select(data_table.c.data["k1"].astext)
         ).first()
-        if engine.dialect.returns_unicode_strings:
+        if connection.dialect.returns_unicode_strings:
             assert isinstance(result[0], util.text_type)
         else:
             assert isinstance(result[0], util.string_types)
 
-    def test_query_returned_as_int(self):
-        engine = testing.db
-        self._fixture_data(engine)
+    def test_query_returned_as_int(self, connection):
+        self._fixture_data(connection)
         data_table = self.tables.data_table
-        result = engine.execute(
-            select([data_table.c.data["k3"].astext.cast(Integer)]).where(
+        result = connection.execute(
+            select(data_table.c.data["k3"].astext.cast(Integer)).where(
                 data_table.c.name == "r5"
             )
         ).first()
         assert isinstance(result[0], int)
 
-    def _test_criterion(self, engine):
-        data_table = self.tables.data_table
-        result = engine.execute(
-            select([data_table.c.data]).where(
-                data_table.c.data["k1"].astext == "r3v1"
-            )
-        ).first()
-        eq_(result, ({"k1": "r3v1", "k2": "r3v2"},))
-
-        result = engine.execute(
-            select([data_table.c.data]).where(
-                data_table.c.data["k1"].astext.cast(String) == "r3v1"
-            )
-        ).first()
-        eq_(result, ({"k1": "r3v1", "k2": "r3v2"},))
-
-    def _test_fixed_round_trip(self, engine):
+    def test_fixed_round_trip(self, connection):
         s = select(
-            [
-                cast(
-                    {"key": "value", "key2": {"k1": "v1", "k2": "v2"}},
-                    self.test_type,
-                )
-            ]
+            cast(
+                {"key": "value", "key2": {"k1": "v1", "k2": "v2"}},
+                self.data_type,
+            )
         )
         eq_(
-            engine.scalar(s),
+            connection.scalar(s),
             {"key": "value", "key2": {"k1": "v1", "k2": "v2"}},
         )
 
-    def test_fixed_round_trip_python(self):
-        engine = self._non_native_engine()
-        self._test_fixed_round_trip(engine)
-
-    @testing.requires.psycopg2_native_json
-    def test_fixed_round_trip_native(self):
-        engine = testing.db
-        self._test_fixed_round_trip(engine)
-
-    def _test_unicode_round_trip(self, engine):
+    def test_unicode_round_trip(self, connection):
         s = select(
-            [
-                cast(
-                    {
-                        util.u("réveillé"): util.u("réveillé"),
-                        "data": {"k1": util.u("drôle")},
-                    },
-                    self.test_type,
-                )
-            ]
+            cast(
+                {
+                    util.u("réveillé"): util.u("réveillé"),
+                    "data": {"k1": util.u("drôle")},
+                },
+                self.data_type,
+            )
         )
         eq_(
-            engine.scalar(s),
+            connection.scalar(s),
             {
                 util.u("réveillé"): util.u("réveillé"),
                 "data": {"k1": util.u("drôle")},
             },
         )
 
-    def test_unicode_round_trip_python(self):
-        engine = self._non_native_engine()
-        self._test_unicode_round_trip(engine)
-
-    @testing.requires.psycopg2_native_json
-    def test_unicode_round_trip_native(self):
-        engine = testing.db
-        self._test_unicode_round_trip(engine)
-
-    def test_eval_none_flag_orm(self):
+    def test_eval_none_flag_orm(self, connection):
         Base = declarative_base()
 
         class Data(Base):
             __table__ = self.tables.data_table
 
-        s = Session(testing.db)
+        with Session(connection) as s:
+            d1 = Data(name="d1", data=None, nulldata=None)
+            s.add(d1)
+            s.commit()
 
-        d1 = Data(name="d1", data=None, nulldata=None)
-        s.add(d1)
-        s.commit()
+            s.bulk_insert_mappings(
+                Data, [{"name": "d2", "data": None, "nulldata": None}]
+            )
+            eq_(
+                s.query(
+                    cast(self.tables.data_table.c.data, String),
+                    cast(self.tables.data_table.c.nulldata, String),
+                )
+                .filter(self.tables.data_table.c.name == "d1")
+                .first(),
+                ("null", None),
+            )
+            eq_(
+                s.query(
+                    cast(self.tables.data_table.c.data, String),
+                    cast(self.tables.data_table.c.nulldata, String),
+                )
+                .filter(self.tables.data_table.c.name == "d2")
+                .first(),
+                ("null", None),
+            )
 
-        s.bulk_insert_mappings(
-            Data, [{"name": "d2", "data": None, "nulldata": None}]
+    def test_literal(self, connection):
+        exp = self._fixture_data(connection)
+        result = connection.exec_driver_sql(
+            "select data from data_table order by name"
         )
-        eq_(
-            s.query(
-                cast(self.tables.data_table.c.data, String),
-                cast(self.tables.data_table.c.nulldata, String),
-            )
-            .filter(self.tables.data_table.c.name == "d1")
-            .first(),
-            ("null", None),
-        )
-        eq_(
-            s.query(
-                cast(self.tables.data_table.c.data, String),
-                cast(self.tables.data_table.c.nulldata, String),
-            )
-            .filter(self.tables.data_table.c.name == "d2")
-            .first(),
-            ("null", None),
-        )
+        res = list(result)
+        eq_(len(res), len(exp))
+        for row, expected in zip(res, exp):
+            eq_(row[0], expected["data"])
 
 
 class JSONBTest(JSONTest):
-    def setup(self):
+    def setup_test(self):
         metadata = MetaData()
         self.test_table = Table(
             "test_table",
@@ -3524,15 +4092,11 @@ class JSONBTest(JSONTest):
 class JSONBRoundTripTest(JSONRoundTripTest):
     __requires__ = ("postgresql_jsonb",)
 
-    test_type = JSONB
+    data_type = JSONB
 
     @testing.requires.postgresql_utf8_server_encoding
-    def test_unicode_round_trip_python(self):
-        super(JSONBRoundTripTest, self).test_unicode_round_trip_python()
-
-    @testing.requires.postgresql_utf8_server_encoding
-    def test_unicode_round_trip_native(self):
-        super(JSONBRoundTripTest, self).test_unicode_round_trip_native()
+    def test_unicode_round_trip(self, connection):
+        super(JSONBRoundTripTest, self).test_unicode_round_trip(connection)
 
 
 class JSONBSuiteTest(suite.JSONTest):
@@ -3541,7 +4105,7 @@ class JSONBSuiteTest(suite.JSONTest):
     datatype = JSONB
 
 
-class JSONBCastSuiteTest(suite.JSONStringCastIndexTest):
+class JSONBCastSuiteTest(suite.JSONLegacyStringCastIndexTest):
     __requires__ = ("postgresql_jsonb",)
 
     datatype = JSONB

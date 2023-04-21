@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.abspath("."))
 # -- General configuration --------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-needs_sphinx = "1.6.0"
+needs_sphinx = "3.5.0"
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
@@ -36,13 +36,20 @@ extensions = [
     "zzzeeksphinx",
     "changelog",
     "sphinx_paramlinks",
+    "sphinx_copybutton",
 ]
-needs_extensions = {"zzzeeksphinx": "1.1.5"}
+needs_extensions = {"zzzeeksphinx": "1.2.1"}
 
 # Add any paths that contain templates here, relative to this directory.
 # not sure why abspath() is needed here, some users
 # have reported this.
 templates_path = [os.path.abspath("templates")]
+
+# https://sphinx-copybutton.readthedocs.io/en/latest/use.html#strip-and-configure-input-prompts-for-code-cells
+copybutton_prompt_text = (
+    r">>> |\.\.\. |\$ |In \[\d*\]: | {2,5}\.\.\.: | {5,8}: "
+)
+copybutton_prompt_is_regexp = True
 
 nitpicky = False
 
@@ -53,41 +60,53 @@ source_suffix = ".rst"
 # section names used by the changelog extension.
 changelog_sections = [
     "general",
+    "platform",
     "orm",
     "orm declarative",
     "orm querying",
     "orm configuration",
+    "examples",
     "engine",
     "sql",
     "schema",
+    "extensions",
+    "mypy",
+    "asyncio",
     "postgresql",
     "mysql",
+    "mariadb",
     "sqlite",
     "mssql",
     "oracle",
     "firebird",
+    "tests",
 ]
 # tags to sort on inside of sections
 changelog_inner_tag_sort = [
     "feature",
-    "changed",
     "usecase",
-    "removed",
+    "change",
+    "changed",
+    "performance",
     "bug",
+    "deprecated",
+    "removed",
+    "renamed",
     "moved",
 ]
 
+
 # how to render changelog links
-changelog_render_ticket = "http://www.sqlalchemy.org/trac/ticket/%s"
+changelog_render_ticket = "https://www.sqlalchemy.org/trac/ticket/%s"
 
 changelog_render_pullreq = {
     "default": "https://github.com/sqlalchemy/sqlalchemy/pull/%s",
     "github": "https://github.com/sqlalchemy/sqlalchemy/pull/%s",
 }
 
-changelog_render_changeset = "http://www.sqlalchemy.org/trac/changeset/%s"
+changelog_render_changeset = "https://www.sqlalchemy.org/trac/changeset/%s"
 
-exclude_patterns = ["build", "**/unreleased*/*"]
+exclude_patterns = ["build", "**/unreleased*/*", "**/*_include.rst", ".venv"]
 
 # zzzeeksphinx makes these conversions when it is rendering the
 # docstrings classes, methods, and functions within the scope of
@@ -101,12 +120,22 @@ autodocmods_convert_modname = {
     "sqlalchemy.sql.dml": "sqlalchemy.sql.expression",
     "sqlalchemy.sql.ddl": "sqlalchemy.schema",
     "sqlalchemy.sql.base": "sqlalchemy.sql.expression",
+    "sqlalchemy.sql.operators": "sqlalchemy.sql.expression",
     "sqlalchemy.event.base": "sqlalchemy.event",
     "sqlalchemy.engine.base": "sqlalchemy.engine",
+    "sqlalchemy.engine.url": "sqlalchemy.engine",
+    "sqlalchemy.engine.row": "sqlalchemy.engine",
+    "sqlalchemy.engine.cursor": "sqlalchemy.engine",
     "sqlalchemy.engine.result": "sqlalchemy.engine",
+    "sqlalchemy.ext.asyncio.result": "sqlalchemy.ext.asyncio",
+    "sqlalchemy.ext.asyncio.engine": "sqlalchemy.ext.asyncio",
+    "sqlalchemy.ext.asyncio.session": "sqlalchemy.ext.asyncio",
     "sqlalchemy.util._collections": "sqlalchemy.util",
+    "sqlalchemy.orm.attributes": "sqlalchemy.orm",
     "sqlalchemy.orm.relationships": "sqlalchemy.orm",
     "sqlalchemy.orm.interfaces": "sqlalchemy.orm",
+    "sqlalchemy.orm.query": "sqlalchemy.orm",
+    "sqlalchemy.orm.util": "sqlalchemy.orm",
 }
 
 autodocmods_convert_modname_w_class = {
@@ -120,24 +149,36 @@ autodocmods_convert_modname_w_class = {
 zzzeeksphinx_module_prefixes = {
     "_sa": "sqlalchemy",
     "_engine": "sqlalchemy.engine",
+    "_url": "sqlalchemy.engine",
+    "_result": "sqlalchemy.engine",
+    "_row": "sqlalchemy.engine",
     "_schema": "sqlalchemy.schema",
     "_types": "sqlalchemy.types",
+    "_sqltypes": "sqlalchemy.types",
+    "_asyncio": "sqlalchemy.ext.asyncio",
     "_expression": "sqlalchemy.sql.expression",
     "_sql": "sqlalchemy.sql.expression",
     "_dml": "sqlalchemy.sql.expression",
     "_ddl": "sqlalchemy.schema",
     "_functions": "sqlalchemy.sql.functions",
     "_pool": "sqlalchemy.pool",
+    # base event API, like listen() etc.
     "_event": "sqlalchemy.event",
+    # core events like PoolEvents, ConnectionEvents
     "_events": "sqlalchemy.events",
+    # note Core events are linked as sqlalchemy.event.<cls>
+    # ORM is sqlalchemy.orm.<cls>.
+    "_ormevent": "sqlalchemy.orm",
+    "_ormevents": "sqlalchemy.orm",
+    "_scoping": "sqlalchemy.orm.scoping",
     "_exc": "sqlalchemy.exc",
     "_reflection": "sqlalchemy.engine.reflection",
     "_orm": "sqlalchemy.orm",
-    "_query": "sqlalchemy.orm.query",
-    "_ormevent": "sqlalchemy.orm.events",
-    "_ormsession": "sqlalchemy.orm.session",
+    "_query": "sqlalchemy.orm",
     "_ormexc": "sqlalchemy.orm.exc",
+    "_roles": "sqlalchemy.sql.roles",
     "_baked": "sqlalchemy.ext.baked",
+    "_horizontal": "sqlalchemy.ext.horizontal_shard",
     "_associationproxy": "sqlalchemy.ext.associationproxy",
     "_automap": "sqlalchemy.ext.automap",
     "_hybrid": "sqlalchemy.ext.hybrid",
@@ -151,6 +192,7 @@ zzzeeksphinx_module_prefixes = {
     "_mssql": "sqlalchemy.dialects.mssql",
     "_oracle": "sqlalchemy.dialects.oracle",
     "_sqlite": "sqlalchemy.dialects.sqlite",
+    "_util": "sqlalchemy.util",
 }
 
 
@@ -162,20 +204,20 @@ master_doc = "contents"
 
 # General information about the project.
 project = u"SQLAlchemy"
-copyright = u"2007-2020, the SQLAlchemy authors and contributors"  # noqa
+copyright = u"2007-2023, the SQLAlchemy authors and contributors"  # noqa
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
 # built documents.
 #
 # The short X.Y version.
-version = "1.3"
+version = "1.4"
 # The full version, including alpha/beta/rc tags.
-release = "1.3.22"
+release = "1.4.46"
 
-release_date = "December 18, 2020"
+release_date = "January 3, 2023"
 
-site_base = os.environ.get("RTD_SITE_BASE", "http://www.sqlalchemy.org")
+site_base = os.environ.get("RTD_SITE_BASE", "https://www.sqlalchemy.org")
 site_adapter_template = "docs_adapter.mako"
 site_adapter_py = "docs_adapter.py"
 

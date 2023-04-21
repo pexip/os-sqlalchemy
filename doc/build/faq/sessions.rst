@@ -67,8 +67,9 @@ Three ways, from most common to least:
    :class:`.Session.refresh`.  See :ref:`session_expire` for detail on this.
 
 3. We can run whole queries while setting them to definitely overwrite
-   already-loaded objects as they read rows by using
-   :meth:`_query.Query.populate_existing`.
+   already-loaded objects as they read rows by using "populate existing".
+   This is an execution option described at
+   :ref:`orm_queryguide_populate_existing`.
 
 But remember, **the ORM cannot see changes in rows if our isolation
 level is repeatable read or higher, unless we start a new transaction**.
@@ -90,11 +91,13 @@ does not properly handle the exception.    For example::
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.ext.declarative import declarative_base
 
-    Base = declarative_base(create_engine('sqlite://'))
+    Base = declarative_base(create_engine("sqlite://"))
+
 
     class Foo(Base):
-        __tablename__ = 'foo'
+        __tablename__ = "foo"
         id = Column(Integer, primary_key=True)
+
 
     Base.metadata.create_all()
 
@@ -111,7 +114,6 @@ does not properly handle the exception.    For example::
 
     # continue using session without rolling back
     session.commit()
-
 
 The usage of the :class:`.Session` should fit within a structure similar to this::
 
@@ -185,7 +187,7 @@ point of view there is still a transaction that is now in an inactive state.
 
 Given a block such as::
 
-  sess = Session()   # begins a logical transaction
+  sess = Session()  # begins a logical transaction
   try:
       sess.flush()
 
@@ -224,7 +226,7 @@ above code is predictable and consistent.
 How do I make a Query that always adds a certain filter to every query?
 ------------------------------------------------------------------------------------------------
 
-See the recipe at `FilteredQuery <http://www.sqlalchemy.org/trac/wiki/UsageRecipes/FilteredQuery>`_.
+See the recipe at `FilteredQuery <https://www.sqlalchemy.org/trac/wiki/UsageRecipes/FilteredQuery>`_.
 
 .. _faq_query_deduplicating:
 
@@ -236,7 +238,7 @@ will **deduplicate the objects based on primary key**.   That is, if we
 for example use the ``User`` mapping described at :ref:`ormtutorial_toplevel`,
 and we had a SQL query like the following::
 
-    q = session.query(User).outerjoin(User.addresses).filter(User.name == 'jack')
+    q = session.query(User).outerjoin(User.addresses).filter(User.name == "jack")
 
 Above, the sample data used in the tutorial has two rows in the ``addresses``
 table for the ``users`` row with the name ``'jack'``, primary key value 5.
@@ -256,7 +258,9 @@ This is because when the :class:`_query.Query` object returns full entities, the
 are **deduplicated**.    This does not occur if we instead request individual
 columns back::
 
-  >>> session.query(User.id, User.name).outerjoin(User.addresses).filter(User.name == 'jack').all()
+  >>> session.query(User.id, User.name).outerjoin(User.addresses).filter(
+  ...     User.name == "jack"
+  ... ).all()
   [(5, 'jack'), (5, 'jack')]
 
 There are two main reasons the :class:`_query.Query` will deduplicate:
@@ -337,6 +341,7 @@ one::
             print("ITER!")
             return iter([1, 2, 3, 4, 5])
 
+
     list(Iterates())
 
 output::
@@ -349,7 +354,7 @@ How Do I use Textual SQL with ORM Queries?
 
 See:
 
-* :ref:`orm_tutorial_literal_sql` - Ad-hoc textual blocks with :class:`_query.Query`
+* :ref:`orm_queryguide_selecting_text` - Ad-hoc textual blocks with :class:`_query.Query`
 
 * :ref:`session_sql_expressions` - Using :class:`.Session` with textual SQL directly.
 
@@ -395,14 +400,21 @@ an "expire" event of the :func:`_orm.relationship` in which it's involved.  This
 that for the following sequence::
 
     o = Session.query(SomeClass).first()
-    assert o.foo is None  # accessing an un-set attribute sets it to None
+
+    # assume the existing o.foo_id value is None;
+    # accessing o.foo will reconcile this as ``None``, but will effectively
+    # "load" the value of None
+    assert o.foo is None
+
+    # now set foo_id to something.  o.foo will not be immediately affected
     o.foo_id = 7
 
-``o.foo`` is initialized to ``None`` when we first accessed it.  Setting
-``o.foo_id = 7`` will have the value of "7" as pending, but no flush
+``o.foo`` is loaded with its effective database value of ``None`` when it
+is first accessed.  Setting
+``o.foo_id = 7`` will have the value of "7" as a pending change, but no flush
 has occurred - so ``o.foo`` is still ``None``::
 
-    # attribute is already set to None, has not been
+    # attribute is already "loaded" as None, has not been
     # reconciled with o.foo_id = 7 yet
     assert o.foo is None
 
@@ -410,18 +422,19 @@ For ``o.foo`` to load based on the foreign key mutation is usually achieved
 naturally after the commit, which both flushes the new foreign key value
 and expires all state::
 
-    Session.commit()  # expires all attributes
+    session.commit()  # expires all attributes
 
     foo_7 = Session.query(Foo).get(7)
 
-    assert o.foo is foo_7  # o.foo lazyloads on access
+    # o.foo will lazyload again, this time getting the new object
+    assert o.foo is foo_7
 
 A more minimal operation is to expire the attribute individually - this can
 be performed for any :term:`persistent` object using :meth:`.Session.expire`::
 
     o = Session.query(SomeClass).first()
     o.foo_id = 7
-    Session.expire(o, ['foo'])  # object must be persistent for this
+    Session.expire(o, ["foo"])  # object must be persistent for this
 
     foo_7 = Session.query(Foo).get(7)
 
@@ -437,16 +450,14 @@ have meaning until the row is inserted; otherwise there is no row yet::
 
     Session.add(new_obj)
 
-    # accessing an un-set attribute sets it to None
+    # returns None but this is not a "lazyload", as the object is not
+    # persistent in the DB yet, and the None value is not part of the
+    # object's state
     assert new_obj.foo is None
 
     Session.flush()  # emits INSERT
 
-    # expire this because we already set .foo to None
-    Session.expire(o, ['foo'])
-
     assert new_obj.foo is foo_7  # now it loads
-
 
 .. topic:: Attribute loading for non-persistent objects
 
@@ -461,7 +472,7 @@ have meaning until the row is inserted; otherwise there is no row yet::
     specific programming scenarios encountered by users which involve the repurposing
     of the ORM's usual object states.
 
-The recipe `ExpireRelationshipOnFKChange <http://www.sqlalchemy.org/trac/wiki/UsageRecipes/ExpireRelationshipOnFKChange>`_ features an example using SQLAlchemy events
+The recipe `ExpireRelationshipOnFKChange <https://www.sqlalchemy.org/trac/wiki/UsageRecipes/ExpireRelationshipOnFKChange>`_ features an example using SQLAlchemy events
 in order to coordinate the setting of foreign key attributes with many-to-one
 relationships.
 
@@ -503,21 +514,21 @@ The function can be demonstrated as follows::
 
 
     class A(Base):
-        __tablename__ = 'a'
+        __tablename__ = "a"
         id = Column(Integer, primary_key=True)
         bs = relationship("B", backref="a")
 
 
     class B(Base):
-        __tablename__ = 'b'
+        __tablename__ = "b"
         id = Column(Integer, primary_key=True)
-        a_id = Column(ForeignKey('a.id'))
-        c_id = Column(ForeignKey('c.id'))
+        a_id = Column(ForeignKey("a.id"))
+        c_id = Column(ForeignKey("c.id"))
         c = relationship("C", backref="bs")
 
 
     class C(Base):
-        __tablename__ = 'c'
+        __tablename__ = "c"
         id = Column(Integer, primary_key=True)
 
 
@@ -543,7 +554,7 @@ When people read the many-to-many example in the docs, they get hit with the
 fact that if you create the same ``Keyword`` twice, it gets put in the DB twice.
 Which is somewhat inconvenient.
 
-This `UniqueObject <http://www.sqlalchemy.org/trac/wiki/UsageRecipes/UniqueObject>`_ recipe was created to address this issue.
+This `UniqueObject <https://www.sqlalchemy.org/trac/wiki/UsageRecipes/UniqueObject>`_ recipe was created to address this issue.
 
 .. _faq_post_update_update:
 

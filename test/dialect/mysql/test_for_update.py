@@ -21,15 +21,14 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import column
 from sqlalchemy.sql import table
-from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
-from sqlalchemy.testing import expect_warnings
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
 
 
 class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
     __backend__ = True
-    __only_on__ = "mysql"
+    __only_on__ = "mysql", "mariadb"
     __requires__ = ("mysql_for_update",)
 
     @classmethod
@@ -42,7 +41,10 @@ class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
             x = Column(Integer)
             y = Column(Integer)
             bs = relationship("B")
-            __table_args__ = {"mysql_engine": "InnoDB"}
+            __table_args__ = {
+                "mysql_engine": "InnoDB",
+                "mariadb_engine": "InnoDB",
+            }
 
         class B(Base):
             __tablename__ = "b"
@@ -50,7 +52,10 @@ class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
             a_id = Column(ForeignKey("a.id"))
             x = Column(Integer)
             y = Column(Integer)
-            __table_args__ = {"mysql_engine": "InnoDB"}
+            __table_args__ = {
+                "mysql_engine": "InnoDB",
+                "mariadb_engine": "InnoDB",
+            }
 
     @classmethod
     def insert_data(cls, connection):
@@ -70,7 +75,7 @@ class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
     @contextlib.contextmanager
     def run_test(self):
         connection = testing.db.connect()
-        connection.execute("set innodb_lock_wait_timeout=1")
+        connection.exec_driver_sql("set innodb_lock_wait_timeout=1")
         main_trans = connection.begin()
         try:
             yield Session(bind=connection)
@@ -81,7 +86,7 @@ class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
     def _assert_a_is_locked(self, should_be_locked):
         A = self.classes.A
         with testing.db.begin() as alt_trans:
-            alt_trans.execute("set innodb_lock_wait_timeout=1")
+            alt_trans.exec_driver_sql("set innodb_lock_wait_timeout=1")
             # set x/y > 10
             try:
                 alt_trans.execute(update(A).values(x=15, y=19))
@@ -94,7 +99,7 @@ class MySQLForUpdateLockingTest(fixtures.DeclarativeMappedTest):
     def _assert_b_is_locked(self, should_be_locked):
         B = self.classes.B
         with testing.db.begin() as alt_trans:
-            alt_trans.execute("set innodb_lock_wait_timeout=1")
+            alt_trans.exec_driver_sql("set innodb_lock_wait_timeout=1")
             # set x/y > 10
             try:
                 alt_trans.execute(update(B).values(x=15, y=19))
@@ -186,25 +191,27 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_basic(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s FOR UPDATE",
         )
 
     def test_for_update_read(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s LOCK IN SHARE MODE",
         )
 
     def test_for_update_skip_locked(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                skip_locked=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(skip_locked=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE SKIP LOCKED",
@@ -212,9 +219,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_read_and_skip_locked(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True, skip_locked=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True, skip_locked=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "LOCK IN SHARE MODE SKIP LOCKED",
@@ -222,9 +229,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_nowait(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                nowait=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(nowait=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE NOWAIT",
@@ -232,9 +239,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_read_and_nowait(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True, nowait=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True, nowait=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "LOCK IN SHARE MODE NOWAIT",
@@ -242,9 +249,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_nowait(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                of=self.table1, nowait=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(of=self.table1, nowait=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE OF mytable NOWAIT",
@@ -253,9 +260,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_basic(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                of=self.table1
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(of=self.table1),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE OF mytable",
@@ -264,9 +271,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_skip_locked(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                of=self.table1, skip_locked=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(of=self.table1, skip_locked=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE OF mytable SKIP LOCKED",
@@ -275,9 +282,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_join_one(self):
         self.assert_compile(
-            self.join.select(self.table2.c.mytable_id == 7).with_for_update(
-                of=[self.join]
-            ),
+            self.join.select()
+            .where(self.table2.c.mytable_id == 7)
+            .with_for_update(of=[self.join]),
             "SELECT table2.mytable_id, "
             "mytable.myid, mytable.name, mytable.description "
             "FROM table2 "
@@ -290,9 +297,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_for_update_of_column_list_aliased(self):
         ta = self.table1.alias()
         self.assert_compile(
-            ta.select(ta.c.myid == 7).with_for_update(
-                of=[ta.c.myid, ta.c.name]
-            ),
+            ta.select()
+            .where(ta.c.myid == 7)
+            .with_for_update(of=[ta.c.myid, ta.c.name]),
             "SELECT mytable_1.myid, mytable_1.name, mytable_1.description "
             "FROM mytable AS mytable_1 "
             "WHERE mytable_1.myid = %s FOR UPDATE OF mytable_1",
@@ -305,9 +312,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             ta, self.table2.c.mytable_id == ta.c.myid
         )
         self.assert_compile(
-            alias_join.select(self.table2.c.mytable_id == 7).with_for_update(
-                of=[alias_join]
-            ),
+            alias_join.select()
+            .where(self.table2.c.mytable_id == 7)
+            .with_for_update(of=[alias_join]),
             "SELECT table2.mytable_id, "
             "mytable_1.myid, mytable_1.name, mytable_1.description "
             "FROM table2 "
@@ -320,9 +327,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_read_nowait(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True, of=self.table1, nowait=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True, of=self.table1, nowait=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "LOCK IN SHARE MODE OF mytable NOWAIT",
@@ -331,9 +338,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_read_skip_locked(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True, of=self.table1, skip_locked=True
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True, of=self.table1, skip_locked=True),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "LOCK IN SHARE MODE OF mytable SKIP LOCKED",
@@ -342,7 +349,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_read_nowait_column_list(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(
                 read=True,
                 of=[self.table1.c.myid, self.table1.c.name],
                 nowait=True,
@@ -355,9 +364,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_of_read(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                read=True, of=self.table1
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(read=True, of=self.table1),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "LOCK IN SHARE MODE OF mytable",
@@ -366,9 +375,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_for_update_textual_of(self):
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                of=text("mytable")
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(of=text("mytable")),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE OF mytable",
@@ -376,9 +385,9 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         self.assert_compile(
-            self.table1.select(self.table1.c.myid == 7).with_for_update(
-                of=literal_column("mytable")
-            ),
+            self.table1.select()
+            .where(self.table1.c.myid == 7)
+            .with_for_update(of=literal_column("mytable")),
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable WHERE mytable.myid = %s "
             "FOR UPDATE OF mytable",
@@ -387,12 +396,12 @@ class MySQLForUpdateCompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class SkipLockedTest(fixtures.TablesTest):
-    __only_on__ = ("mysql",)
+    __only_on__ = ("mysql", "mariadb")
+
     __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
-
         Table(
             "stuff",
             metadata,
@@ -400,40 +409,19 @@ class SkipLockedTest(fixtures.TablesTest):
             Column("value", Integer),
         )
 
-    @testing.only_on("mysql>=8")
-    @testing.skip_if(lambda config: testing.db.dialect._is_mariadb)
+    @testing.only_on(["mysql>=8", "mariadb>=10.6"])
     def test_skip_locked(self, connection):
-
         stuff = self.tables.stuff
-
         stmt = stuff.select().with_for_update(skip_locked=True)
 
         connection.execute(stmt).fetchall()
 
-    @testing.only_on(lambda config: testing.db.dialect._is_mariadb)
-    def test_warning_skip_locked(self, connection):
-
-        stuff = self.tables.stuff
-
-        stmt = stuff.select().with_for_update(skip_locked=True)
-
-        with expect_warnings(
-            "SKIP LOCKED ignored on non-supporting MariaDB backend. "
-            "This will raise an error in SQLAlchemy 1.4."
-        ):
-
-            connection.execute(stmt).fetchall()
-
-    @testing.only_on("mysql<8")
+    @testing.only_on(["mysql<8", "mariadb<10.6"])
     def test_unsupported_skip_locked(self, connection):
-
         stuff = self.tables.stuff
-
         stmt = stuff.select().with_for_update(skip_locked=True)
 
-        assert_raises_message(
-            ProgrammingError,
-            "You have an error in your SQL syntax",
-            connection.execute,
-            stmt,
-        )
+        with expect_raises_message(
+            ProgrammingError, "You have an error in your SQL syntax"
+        ):
+            connection.execute(stmt).fetchall()

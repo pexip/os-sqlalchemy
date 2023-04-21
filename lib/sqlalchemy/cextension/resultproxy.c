@@ -1,10 +1,10 @@
 /*
 resultproxy.c
-Copyright (C) 2010-2020 the SQLAlchemy authors and contributors <see AUTHORS file>
+Copyright (C) 2010-2023 the SQLAlchemy authors and contributors <see AUTHORS file>
 Copyright (C) 2010-2011 Gaetan de Menten gdementen@gmail.com
 
 This module is part of SQLAlchemy and is released under
-the MIT License: http://www.opensource.org/licenses/mit-license.php
+the MIT License: https://www.opensource.org/licenses/mit-license.php
 */
 
 #include <Python.h>
@@ -21,6 +21,20 @@ typedef Py_ssize_t (*lenfunc)(PyObject *);
 typedef intargfunc ssizeargfunc;
 #endif
 
+#if PY_MAJOR_VERSION < 3
+
+// new typedef in Python 3
+typedef long Py_hash_t;
+
+// from pymacro.h, new in Python 3.2
+#if defined(__GNUC__) || defined(__clang__)
+#  define Py_UNUSED(name) _unused_ ## name __attribute__((unused))
+#else
+#  define Py_UNUSED(name) _unused_ ## name
+#endif
+
+#endif
+
 
 /***********
  * Structs *
@@ -30,24 +44,34 @@ typedef struct {
     PyObject_HEAD
     PyObject *parent;
     PyObject *row;
-    PyObject *processors;
     PyObject *keymap;
-} BaseRowProxy;
+    long key_style;
+} BaseRow;
+
+
+static PyObject *sqlalchemy_engine_row = NULL;
+static PyObject *sqlalchemy_engine_result = NULL;
+
+
+static int KEY_INTEGER_ONLY = 0;
+static int KEY_OBJECTS_ONLY = 1;
+static int KEY_OBJECTS_BUT_WARN = 2;
+//static int KEY_OBJECTS_NO_WARN = 3;
 
 /****************
- * BaseRowProxy *
+ * BaseRow *
  ****************/
 
 static PyObject *
 safe_rowproxy_reconstructor(PyObject *self, PyObject *args)
 {
     PyObject *cls, *state, *tmp;
-    BaseRowProxy *obj;
+    BaseRow *obj;
 
     if (!PyArg_ParseTuple(args, "OO", &cls, &state))
         return NULL;
 
-    obj = (BaseRowProxy *)PyObject_CallMethod(cls, "__new__", "O", cls);
+    obj = (BaseRow *)PyObject_CallMethod(cls, "__new__", "O", cls);
     if (obj == NULL)
         return NULL;
 
@@ -59,10 +83,10 @@ safe_rowproxy_reconstructor(PyObject *self, PyObject *args)
     Py_DECREF(tmp);
 
     if (obj->parent == NULL || obj->row == NULL ||
-        obj->processors == NULL || obj->keymap == NULL) {
+        obj->keymap == NULL) {
         PyErr_SetString(PyExc_RuntimeError,
-            "__setstate__ for BaseRowProxy subclasses must set values "
-            "for parent, row, processors and keymap");
+            "__setstate__ for BaseRow subclasses must set values "
+            "for parent, row, and keymap");
         Py_DECREF(obj);
         return NULL;
     }
@@ -71,30 +95,81 @@ safe_rowproxy_reconstructor(PyObject *self, PyObject *args)
 }
 
 static int
-BaseRowProxy_init(BaseRowProxy *self, PyObject *args, PyObject *kwds)
+BaseRow_init(BaseRow *self, PyObject *args, PyObject *kwds)
 {
-    PyObject *parent, *row, *processors, *keymap;
+    PyObject *parent, *keymap, *row, *processors, *key_style;
+    Py_ssize_t num_values, num_processors;
+    PyObject **valueptr, **funcptr, **resultptr;
+    PyObject *func, *result, *processed_value, *values_fastseq;
 
-    if (!PyArg_UnpackTuple(args, "BaseRowProxy", 4, 4,
-                           &parent, &row, &processors, &keymap))
+    if (!PyArg_UnpackTuple(args, "BaseRow", 5, 5,
+                           &parent, &processors, &keymap, &key_style, &row))
         return -1;
 
     Py_INCREF(parent);
     self->parent = parent;
 
-    if (!PySequence_Check(row)) {
-        PyErr_SetString(PyExc_TypeError, "row must be a sequence");
+    values_fastseq = PySequence_Fast(row, "row must be a sequence");
+    if (values_fastseq == NULL)
         return -1;
-    }
-    Py_INCREF(row);
-    self->row = row;
 
-    if (!PyList_CheckExact(processors)) {
-        PyErr_SetString(PyExc_TypeError, "processors must be a list");
-        return -1;
+    num_values = PySequence_Length(values_fastseq);
+
+
+    if (processors != Py_None) {
+        num_processors = PySequence_Size(processors);
+        if (num_values != num_processors) {
+            PyErr_Format(PyExc_RuntimeError,
+                "number of values in row (%d) differ from number of column "
+                "processors (%d)",
+                (int)num_values, (int)num_processors);
+            return -1;
+        }
+
+    } else {
+        num_processors = -1;
     }
-    Py_INCREF(processors);
-    self->processors = processors;
+
+    result = PyTuple_New(num_values);
+    if (result == NULL)
+        return -1;
+
+    if (num_processors != -1) {
+        valueptr = PySequence_Fast_ITEMS(values_fastseq);
+        funcptr = PySequence_Fast_ITEMS(processors);
+        resultptr = PySequence_Fast_ITEMS(result);
+        while (--num_values >= 0) {
+            func = *funcptr;
+            if (func != Py_None) {
+                processed_value = PyObject_CallFunctionObjArgs(
+                    func, *valueptr, NULL);
+                if (processed_value == NULL) {
+                    Py_DECREF(values_fastseq);
+                    Py_DECREF(result);
+                    return -1;
+                }
+                *resultptr = processed_value;
+            } else {
+                Py_INCREF(*valueptr);
+                *resultptr = *valueptr;
+            }
+            valueptr++;
+            funcptr++;
+            resultptr++;
+        }
+    } else {
+        valueptr = PySequence_Fast_ITEMS(values_fastseq);
+        resultptr = PySequence_Fast_ITEMS(result);
+        while (--num_values >= 0) {
+            Py_INCREF(*valueptr);
+            *resultptr = *valueptr;
+            valueptr++;
+            resultptr++;
+        }
+    }
+
+    Py_DECREF(values_fastseq);
+    self->row = result;
 
     if (!PyDict_CheckExact(keymap)) {
         PyErr_SetString(PyExc_TypeError, "keymap must be a dict");
@@ -102,16 +177,32 @@ BaseRowProxy_init(BaseRowProxy *self, PyObject *args, PyObject *kwds)
     }
     Py_INCREF(keymap);
     self->keymap = keymap;
+    self->key_style = PyLong_AsLong(key_style);
 
+    // observation: because we have not implemented our own new method,
+    // cPython is apparently already calling PyObject_GC_Track for us.
+    // We assume it also called PyObject_GC_New since prior to #5348 we
+    // were already relying upon it to call PyObject_New, and we have now
+    // set Py_TPFLAGS_HAVE_GC.
+
+    return 0;
+}
+
+static int
+BaseRow_traverse(BaseRow *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->parent);
+    Py_VISIT(self->row);
+    Py_VISIT(self->keymap);
     return 0;
 }
 
 /* We need the reduce method because otherwise the default implementation
  * does very weird stuff for pickle protocol 0 and 1. It calls
- * BaseRowProxy.__new__(RowProxy_instance) upon *pickling*.
+ * BaseRow.__new__(Row_instance) upon *pickling*.
  */
 static PyObject *
-BaseRowProxy_reduce(PyObject *self)
+BaseRow_reduce(PyObject *self)
 {
     PyObject *method, *state;
     PyObject *module, *reconstructor, *cls;
@@ -125,12 +216,14 @@ BaseRowProxy_reduce(PyObject *self)
     if (state == NULL)
         return NULL;
 
-    module = PyImport_ImportModule("sqlalchemy.engine.result");
-    if (module == NULL)
-        return NULL;
+    if (sqlalchemy_engine_row == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.row");
+        if (module == NULL)
+            return NULL;
+        sqlalchemy_engine_row = module;
+    }
 
-    reconstructor = PyObject_GetAttrString(module, "rowproxy_reconstructor");
-    Py_DECREF(module);
+    reconstructor = PyObject_GetAttrString(sqlalchemy_engine_row, "rowproxy_reconstructor");
     if (reconstructor == NULL) {
         Py_DECREF(state);
         return NULL;
@@ -146,88 +239,83 @@ BaseRowProxy_reduce(PyObject *self)
     return Py_BuildValue("(N(NN))", reconstructor, cls, state);
 }
 
-static void
-BaseRowProxy_dealloc(BaseRowProxy *self)
-{
-    Py_XDECREF(self->parent);
-    Py_XDECREF(self->row);
-    Py_XDECREF(self->processors);
-    Py_XDECREF(self->keymap);
-#if PY_MAJOR_VERSION >= 3
-    Py_TYPE(self)->tp_free((PyObject *)self);
-#else
-    self->ob_type->tp_free((PyObject *)self);
-#endif
-}
-
 static PyObject *
-BaseRowProxy_processvalues(PyObject *values, PyObject *processors, int astuple)
+BaseRow_filter_on_values(BaseRow *self, PyObject *filters)
 {
-    Py_ssize_t num_values, num_processors;
-    PyObject **valueptr, **funcptr, **resultptr;
-    PyObject *func, *result, *processed_value, *values_fastseq;
+    PyObject *module, *row_class, *new_obj, *key_style;
 
-    num_values = PySequence_Length(values);
-    num_processors = PyList_Size(processors);
-    if (num_values != num_processors) {
-        PyErr_Format(PyExc_RuntimeError,
-            "number of values in row (%d) differ from number of column "
-            "processors (%d)",
-            (int)num_values, (int)num_processors);
+    if (sqlalchemy_engine_row == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.row");
+        if (module == NULL)
+            return NULL;
+        sqlalchemy_engine_row = module;
+    }
+
+    // TODO: do we want to get self.__class__ instead here?   I'm not sure
+    // how to use METH_VARARGS and then also get the BaseRow struct
+    // at the same time
+    row_class = PyObject_GetAttrString(sqlalchemy_engine_row, "Row");
+
+    key_style = PyLong_FromLong(self->key_style);
+
+    new_obj = PyObject_CallFunction(
+        row_class, "OOOOO", self->parent, filters, self->keymap,
+        key_style, self->row);
+    Py_DECREF(key_style);
+    Py_DECREF(row_class);
+    if (new_obj == NULL) {
         return NULL;
     }
 
+    return new_obj;
+
+}
+
+static void
+BaseRow_dealloc(BaseRow *self)
+{
+    PyObject_GC_UnTrack(self);
+    Py_XDECREF(self->parent);
+    Py_XDECREF(self->row);
+    Py_XDECREF(self->keymap);
+    PyObject_GC_Del(self);
+
+}
+
+static PyObject *
+BaseRow_valuescollection(PyObject *values, int astuple)
+{
+    PyObject *result;
+
     if (astuple) {
-        result = PyTuple_New(num_values);
+        result = PySequence_Tuple(values);
     } else {
-        result = PyList_New(num_values);
+        result = PySequence_List(values);
     }
     if (result == NULL)
         return NULL;
 
-    values_fastseq = PySequence_Fast(values, "row must be a sequence");
-    if (values_fastseq == NULL)
-        return NULL;
-
-    valueptr = PySequence_Fast_ITEMS(values_fastseq);
-    funcptr = PySequence_Fast_ITEMS(processors);
-    resultptr = PySequence_Fast_ITEMS(result);
-    while (--num_values >= 0) {
-        func = *funcptr;
-        if (func != Py_None) {
-            processed_value = PyObject_CallFunctionObjArgs(func, *valueptr,
-                                                           NULL);
-            if (processed_value == NULL) {
-                Py_DECREF(values_fastseq);
-                Py_DECREF(result);
-                return NULL;
-            }
-            *resultptr = processed_value;
-        } else {
-            Py_INCREF(*valueptr);
-            *resultptr = *valueptr;
-        }
-        valueptr++;
-        funcptr++;
-        resultptr++;
-    }
-    Py_DECREF(values_fastseq);
     return result;
 }
 
 static PyListObject *
-BaseRowProxy_values(BaseRowProxy *self)
+BaseRow_values_impl(BaseRow *self)
 {
-    return (PyListObject *)BaseRowProxy_processvalues(self->row,
-                                                      self->processors, 0);
+    return (PyListObject *)BaseRow_valuescollection(self->row, 0);
+}
+
+static Py_hash_t
+BaseRow_hash(BaseRow *self)
+{
+    return PyObject_Hash(self->row);
 }
 
 static PyObject *
-BaseRowProxy_iter(BaseRowProxy *self)
+BaseRow_iter(BaseRow *self)
 {
     PyObject *values, *result;
 
-    values = BaseRowProxy_processvalues(self->row, self->processors, 1);
+    values = BaseRow_valuescollection(self->row, 1);
     if (values == NULL)
         return NULL;
 
@@ -240,176 +328,192 @@ BaseRowProxy_iter(BaseRowProxy *self)
 }
 
 static Py_ssize_t
-BaseRowProxy_length(BaseRowProxy *self)
+BaseRow_length(BaseRow *self)
 {
     return PySequence_Length(self->row);
 }
 
 static PyObject *
-BaseRowProxy_subscript(BaseRowProxy *self, PyObject *key)
+BaseRow_getitem(BaseRow *self, Py_ssize_t i)
 {
-    PyObject *processors, *values;
-    PyObject *processor, *value, *processed_value;
-    PyObject *row, *record, *result, *indexobject;
-    PyObject *exc_module, *exception, *cstr_obj;
-#if PY_MAJOR_VERSION >= 3
-    PyObject *bytes;
-#endif
-    char *cstr_key;
-    long index;
-    int key_fallback = 0;
-    int tuple_check = 0;
-
-#if PY_MAJOR_VERSION < 3
-    if (PyInt_CheckExact(key)) {
-        index = PyInt_AS_LONG(key);
-        if (index < 0)
-            index += BaseRowProxy_length(self);
-    } else
-#endif
-
-    if (PyLong_CheckExact(key)) {
-        index = PyLong_AsLong(key);
-        if ((index == -1) && PyErr_Occurred())
-            /* -1 can be either the actual value, or an error flag. */
-            return NULL;
-        if (index < 0)
-            index += BaseRowProxy_length(self);
-    } else if (PySlice_Check(key)) {
-        values = PyObject_GetItem(self->row, key);
-        if (values == NULL)
-            return NULL;
-
-        processors = PyObject_GetItem(self->processors, key);
-        if (processors == NULL) {
-            Py_DECREF(values);
-            return NULL;
-        }
-
-        result = BaseRowProxy_processvalues(values, processors, 1);
-        Py_DECREF(values);
-        Py_DECREF(processors);
-        return result;
-    } else {
-        record = PyDict_GetItem((PyObject *)self->keymap, key);
-        if (record == NULL) {
-            record = PyObject_CallMethod(self->parent, "_key_fallback",
-                                         "OO", key, Py_None);
-            if (record == NULL)
-                return NULL;
-            key_fallback = 1;
-        }
-
-        indexobject = PyTuple_GetItem(record, 2);
-        if (indexobject == NULL)
-            return NULL;
-
-        if (key_fallback) {
-            Py_DECREF(record);
-        }
-
-        if (indexobject == Py_None) {
-            exc_module = PyImport_ImportModule("sqlalchemy.exc");
-            if (exc_module == NULL)
-                return NULL;
-
-            exception = PyObject_GetAttrString(exc_module,
-                                               "InvalidRequestError");
-            Py_DECREF(exc_module);
-            if (exception == NULL)
-                return NULL;
-
-            cstr_obj = PyTuple_GetItem(record, 1);
-            if (cstr_obj == NULL)
-                return NULL;
-
-            cstr_obj = PyObject_Str(cstr_obj);
-            if (cstr_obj == NULL)
-                return NULL;
-
-/*
-           FIXME: raise encoding error exception (in both versions below)
-           if the key contains non-ascii chars, instead of an
-           InvalidRequestError without any message like in the
-           python version.
-*/
-
-
-#if PY_MAJOR_VERSION >= 3
-            bytes = PyUnicode_AsASCIIString(cstr_obj);
-            if (bytes == NULL)
-                return NULL;
-            cstr_key = PyBytes_AS_STRING(bytes);
-#else
-            cstr_key = PyString_AsString(cstr_obj);
-#endif
-            if (cstr_key == NULL) {
-                Py_DECREF(cstr_obj);
-                return NULL;
-            }
-            Py_DECREF(cstr_obj);
-
-            PyErr_Format(exception,
-                    "Ambiguous column name '%.200s' in "
-                    "result set column descriptions", cstr_key);
-            return NULL;
-        }
-
-#if PY_MAJOR_VERSION >= 3
-        index = PyLong_AsLong(indexobject);
-#else
-        index = PyInt_AsLong(indexobject);
-#endif
-        if ((index == -1) && PyErr_Occurred())
-            /* -1 can be either the actual value, or an error flag. */
-            return NULL;
-    }
-    processor = PyList_GetItem(self->processors, index);
-    if (processor == NULL)
-        return NULL;
+    PyObject *value;
+    PyObject *row;
 
     row = self->row;
-    if (PyTuple_CheckExact(row)) {
-        value = PyTuple_GetItem(row, index);
-        tuple_check = 1;
-    }
-    else {
-        value = PySequence_GetItem(row, index);
-        tuple_check = 0;
-    }
+
+    // row is a Tuple
+    value = PyTuple_GetItem(row, i);
 
     if (value == NULL)
         return NULL;
 
-    if (processor != Py_None) {
-        processed_value = PyObject_CallFunctionObjArgs(processor, value, NULL);
-        if (!tuple_check) {
-            Py_DECREF(value);
+    Py_INCREF(value);
+
+    return value;
+}
+
+static PyObject *
+BaseRow_getitem_by_object(BaseRow *self, PyObject *key, int asmapping)
+{
+    PyObject *record, *indexobject;
+    long index;
+    int key_fallback = 0;
+
+    // we want to raise TypeError for slice access on a mapping.
+    // Py3 will do this with PyDict_GetItemWithError, Py2 will do it
+    // with PyObject_GetItem.  However in the Python2 case the object
+    // protocol gets in the way for reasons not entirely clear, so
+    // detect slice we have a key error and raise directly.
+
+    record = PyDict_GetItem((PyObject *)self->keymap, key);
+
+    if (record == NULL) {
+        if (PySlice_Check(key)) {
+            PyErr_Format(PyExc_TypeError, "can't use slices for mapping access");
+            return NULL;
         }
-        return processed_value;
+        record = PyObject_CallMethod(self->parent, "_key_fallback",
+                                     "OO", key, Py_None);
+        if (record == NULL)
+            return NULL;
+
+        key_fallback = 1;  // boolean to indicate record is a new reference
+    }
+
+    indexobject = PyTuple_GetItem(record, 0);
+    if (indexobject == NULL)
+        return NULL;
+
+    if (key_fallback) {
+        Py_DECREF(record);
+    }
+
+    if (indexobject == Py_None) {
+        PyObject *tmp;
+
+        tmp = PyObject_CallMethod(self->parent, "_raise_for_ambiguous_column_name", "(O)", record);
+        if (tmp == NULL) {
+            return NULL;
+        }
+        Py_DECREF(tmp);
+
+        return NULL;
+    }
+
+#if PY_MAJOR_VERSION >= 3
+    index = PyLong_AsLong(indexobject);
+#else
+    index = PyInt_AsLong(indexobject);
+#endif
+    if ((index == -1) && PyErr_Occurred())
+        /* -1 can be either the actual value, or an error flag. */
+        return NULL;
+
+    if (!asmapping && self->key_style == KEY_OBJECTS_BUT_WARN) {
+        PyObject *tmp;
+
+        tmp = PyObject_CallMethod(self->parent, "_warn_for_nonint", "O", key);
+        if (tmp == NULL) {
+            return NULL;
+        }
+        Py_DECREF(tmp);
+    }
+
+    return BaseRow_getitem(self, index);
+
+}
+
+static PyObject *
+BaseRow_subscript_impl(BaseRow *self, PyObject *key, int asmapping)
+{
+    PyObject *values;
+    PyObject *result;
+    long index;
+    PyObject *tmp;
+
+#if PY_MAJOR_VERSION < 3
+    if (PyInt_CheckExact(key)) {
+        if (self->key_style == KEY_OBJECTS_ONLY) {
+            // TODO: being very lazy with error catching here
+            PyErr_Format(PyExc_KeyError, "%s", PyString_AsString(PyObject_Repr(key)));
+            return NULL;
+        }
+        index = PyInt_AS_LONG(key);
+
+        // support negative indexes.   We can also call PySequence_GetItem,
+        // but here we can stay with the simpler tuple protocol
+        // rather than the sequence protocol which has to check for
+        // __getitem__ methods etc.
+        if (index < 0)
+            index += (long)BaseRow_length(self);
+        return BaseRow_getitem(self, index);
+    } else
+#endif
+
+    if (PyLong_CheckExact(key)) {
+        if (self->key_style == KEY_OBJECTS_ONLY) {
+#if PY_MAJOR_VERSION < 3
+            // TODO: being very lazy with error catching here
+            PyErr_Format(PyExc_KeyError, "%s", PyString_AsString(PyObject_Repr(key)));
+#else
+            PyErr_Format(PyExc_KeyError, "%R", key);
+#endif
+            return NULL;
+        }
+        index = PyLong_AsLong(key);
+        if ((index == -1) && PyErr_Occurred() != NULL)
+            /* -1 can be either the actual value, or an error flag. */
+            return NULL;
+
+        // support negative indexes.   We can also call PySequence_GetItem,
+        // but here we can stay with the simpler tuple protocol
+        // rather than the sequence protocol which has to check for
+        // __getitem__ methods etc.
+        if (index < 0)
+            index += (long)BaseRow_length(self);
+        return BaseRow_getitem(self, index);
+
+    } else if (PySlice_Check(key) && self->key_style != KEY_OBJECTS_ONLY) {
+        values = PyObject_GetItem(self->row, key);
+        if (values == NULL)
+            return NULL;
+
+        result = BaseRow_valuescollection(values, 1);
+        Py_DECREF(values);
+        return result;
+    }
+    else if (!asmapping && self->key_style == KEY_INTEGER_ONLY) {
+        tmp = PyObject_CallMethod(self->parent, "_raise_for_nonint", "(O)", key);
+        if (tmp == NULL) {
+            return NULL;
+        }
+        Py_DECREF(tmp);
+        return NULL;
     } else {
-        if (tuple_check) {
-            Py_INCREF(value);
-        }
-        return value;
+        return BaseRow_getitem_by_object(self, key, asmapping);
     }
 }
 
 static PyObject *
-BaseRowProxy_getitem(PyObject *self, Py_ssize_t i)
+BaseRow_subscript(BaseRow *self, PyObject *key)
 {
-    PyObject *index;
-
-#if PY_MAJOR_VERSION >= 3
-    index = PyLong_FromSsize_t(i);
-#else
-    index = PyInt_FromSsize_t(i);
-#endif
-    return BaseRowProxy_subscript((BaseRowProxy*)self, index);
+    return BaseRow_subscript_impl(self, key, 0);
 }
 
 static PyObject *
-BaseRowProxy_getattro(BaseRowProxy *self, PyObject *name)
+BaseRow_subscript_mapping(BaseRow *self, PyObject *key)
+{
+    if (self->key_style == KEY_OBJECTS_BUT_WARN || self->key_style == KEY_INTEGER_ONLY) {
+        return BaseRow_subscript_impl(self, key, 0);
+    }
+    else {
+        return BaseRow_subscript_impl(self, key, 1);
+    }
+}
+
+
+static PyObject *
+BaseRow_getattro(BaseRow *self, PyObject *name)
 {
     PyObject *tmp;
 #if PY_MAJOR_VERSION >= 3
@@ -424,7 +528,8 @@ BaseRowProxy_getattro(BaseRowProxy *self, PyObject *name)
     else
         return tmp;
 
-    tmp = BaseRowProxy_subscript(self, name);
+    tmp = BaseRow_subscript_impl(self, name, 1);
+
     if (tmp == NULL && PyErr_ExceptionMatches(PyExc_KeyError)) {
 
 #if PY_MAJOR_VERSION >= 3
@@ -436,6 +541,7 @@ BaseRowProxy_getattro(BaseRowProxy *self, PyObject *name)
                 "Could not locate column in row for column '%.200s'",
                 PyBytes_AS_STRING(err_bytes)
             );
+        Py_DECREF(err_bytes);
 #else
         PyErr_Format(
                 PyExc_AttributeError,
@@ -453,14 +559,14 @@ BaseRowProxy_getattro(BaseRowProxy *self, PyObject *name)
  ***********************/
 
 static PyObject *
-BaseRowProxy_getparent(BaseRowProxy *self, void *closure)
+BaseRow_getparent(BaseRow *self, void *closure)
 {
     Py_INCREF(self->parent);
     return self->parent;
 }
 
 static int
-BaseRowProxy_setparent(BaseRowProxy *self, PyObject *value, void *closure)
+BaseRow_setparent(BaseRow *self, PyObject *value, void *closure)
 {
     PyObject *module, *cls;
 
@@ -470,12 +576,14 @@ BaseRowProxy_setparent(BaseRowProxy *self, PyObject *value, void *closure)
         return -1;
     }
 
-    module = PyImport_ImportModule("sqlalchemy.engine.result");
-    if (module == NULL)
-        return -1;
+    if (sqlalchemy_engine_result == NULL) {
+        module = PyImport_ImportModule("sqlalchemy.engine.result");
+        if (module == NULL)
+            return -1;
+        sqlalchemy_engine_result = module;
+    }
 
-    cls = PyObject_GetAttrString(module, "ResultMetaData");
-    Py_DECREF(module);
+    cls = PyObject_GetAttrString(sqlalchemy_engine_result, "ResultMetaData");
     if (cls == NULL)
         return -1;
 
@@ -494,14 +602,14 @@ BaseRowProxy_setparent(BaseRowProxy *self, PyObject *value, void *closure)
 }
 
 static PyObject *
-BaseRowProxy_getrow(BaseRowProxy *self, void *closure)
+BaseRow_getrow(BaseRow *self, void *closure)
 {
     Py_INCREF(self->row);
     return self->row;
 }
 
 static int
-BaseRowProxy_setrow(BaseRowProxy *self, PyObject *value, void *closure)
+BaseRow_setrow(BaseRow *self, PyObject *value, void *closure)
 {
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError,
@@ -522,44 +630,17 @@ BaseRowProxy_setrow(BaseRowProxy *self, PyObject *value, void *closure)
     return 0;
 }
 
-static PyObject *
-BaseRowProxy_getprocessors(BaseRowProxy *self, void *closure)
-{
-    Py_INCREF(self->processors);
-    return self->processors;
-}
 
-static int
-BaseRowProxy_setprocessors(BaseRowProxy *self, PyObject *value, void *closure)
-{
-    if (value == NULL) {
-        PyErr_SetString(PyExc_TypeError,
-                        "Cannot delete the 'processors' attribute");
-        return -1;
-    }
-
-    if (!PyList_CheckExact(value)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "The 'processors' attribute value must be a list");
-        return -1;
-    }
-
-    Py_XDECREF(self->processors);
-    Py_INCREF(value);
-    self->processors = value;
-
-    return 0;
-}
 
 static PyObject *
-BaseRowProxy_getkeymap(BaseRowProxy *self, void *closure)
+BaseRow_getkeymap(BaseRow *self, void *closure)
 {
     Py_INCREF(self->keymap);
     return self->keymap;
 }
 
 static int
-BaseRowProxy_setkeymap(BaseRowProxy *self, PyObject *value, void *closure)
+BaseRow_setkeymap(BaseRow *self, PyObject *value, void *closure)
 {
     if (value == NULL) {
         PyErr_SetString(PyExc_TypeError,
@@ -580,39 +661,86 @@ BaseRowProxy_setkeymap(BaseRowProxy *self, PyObject *value, void *closure)
     return 0;
 }
 
-static PyGetSetDef BaseRowProxy_getseters[] = {
+static PyObject *
+BaseRow_getkeystyle(BaseRow *self, void *closure)
+{
+    PyObject *result;
+
+    result = PyLong_FromLong(self->key_style);
+    Py_INCREF(result);
+    return result;
+}
+
+
+static int
+BaseRow_setkeystyle(BaseRow *self, PyObject *value, void *closure)
+{
+    if (value == NULL) {
+
+        PyErr_SetString(
+            PyExc_TypeError,
+            "Cannot delete the 'key_style' attribute");
+        return -1;
+    }
+
+    if (!PyLong_CheckExact(value)) {
+        PyErr_SetString(
+            PyExc_TypeError,
+            "The 'key_style' attribute value must be an integer");
+        return -1;
+    }
+
+    self->key_style = PyLong_AsLong(value);
+
+    return 0;
+}
+
+static PyGetSetDef BaseRow_getseters[] = {
     {"_parent",
-     (getter)BaseRowProxy_getparent, (setter)BaseRowProxy_setparent,
+     (getter)BaseRow_getparent, (setter)BaseRow_setparent,
      "ResultMetaData",
      NULL},
-    {"_row",
-     (getter)BaseRowProxy_getrow, (setter)BaseRowProxy_setrow,
-     "Original row tuple",
-     NULL},
-    {"_processors",
-     (getter)BaseRowProxy_getprocessors, (setter)BaseRowProxy_setprocessors,
-     "list of type processors",
+    {"_data",
+     (getter)BaseRow_getrow, (setter)BaseRow_setrow,
+     "processed data list",
      NULL},
     {"_keymap",
-     (getter)BaseRowProxy_getkeymap, (setter)BaseRowProxy_setkeymap,
-     "Key to (processor, index) dict",
+     (getter)BaseRow_getkeymap, (setter)BaseRow_setkeymap,
+     "Key to (obj, index) dict",
+     NULL},
+    {"_key_style",
+     (getter)BaseRow_getkeystyle, (setter)BaseRow_setkeystyle,
+     "Return the key style",
      NULL},
     {NULL}
 };
 
-static PyMethodDef BaseRowProxy_methods[] = {
-    {"values", (PyCFunction)BaseRowProxy_values, METH_NOARGS,
-     "Return the values represented by this BaseRowProxy as a list."},
-    {"__reduce__",  (PyCFunction)BaseRowProxy_reduce, METH_NOARGS,
+static PyMethodDef BaseRow_methods[] = {
+    {"_values_impl", (PyCFunction)BaseRow_values_impl, METH_NOARGS,
+     "Return the values represented by this BaseRow as a list."},
+    {"__reduce__",  (PyCFunction)BaseRow_reduce, METH_NOARGS,
      "Pickle support method."},
+    {"_get_by_key_impl", (PyCFunction)BaseRow_subscript, METH_O,
+    "implement mapping-like getitem as well as sequence getitem"},
+    {"_get_by_key_impl_mapping", (PyCFunction)BaseRow_subscript_mapping, METH_O,
+    "implement mapping-like getitem as well as sequence getitem"},
+    {"_filter_on_values", (PyCFunction)BaseRow_filter_on_values, METH_O,
+    "return a new Row with per-value filters applied to columns"},
+
     {NULL}  /* Sentinel */
 };
 
-static PySequenceMethods BaseRowProxy_as_sequence = {
-    (lenfunc)BaseRowProxy_length,   /* sq_length */
+// currently, the sq_item hook is not used by Python except for slices,
+// because we also implement subscript_mapping which seems to intercept
+// integers.  Ideally, when there
+// is a complete separation of "row" from "mapping", we can make
+// two separate types here so that one has only sq_item and the other
+// has only mp_subscript.
+static PySequenceMethods BaseRow_as_sequence = {
+    (lenfunc)BaseRow_length,   /* sq_length */
     0,                              /* sq_concat */
     0,                              /* sq_repeat */
-    (ssizeargfunc)BaseRowProxy_getitem,          /* sq_item */
+    (ssizeargfunc)BaseRow_getitem,  /* sq_item */
     0,                              /* sq_slice */
     0,                              /* sq_ass_item */
     0,                              /* sq_ass_slice */
@@ -621,56 +749,241 @@ static PySequenceMethods BaseRowProxy_as_sequence = {
     0,                              /* sq_inplace_repeat */
 };
 
-static PyMappingMethods BaseRowProxy_as_mapping = {
-    (lenfunc)BaseRowProxy_length,       /* mp_length */
-    (binaryfunc)BaseRowProxy_subscript, /* mp_subscript */
+static PyMappingMethods BaseRow_as_mapping = {
+    (lenfunc)BaseRow_length,       /* mp_length */
+    (binaryfunc)BaseRow_subscript_mapping, /* mp_subscript */
     0                                   /* mp_ass_subscript */
 };
 
-static PyTypeObject BaseRowProxyType = {
+static PyTypeObject BaseRowType = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    "sqlalchemy.cresultproxy.BaseRowProxy",          /* tp_name */
-    sizeof(BaseRowProxy),               /* tp_basicsize */
+    "sqlalchemy.cresultproxy.BaseRow",          /* tp_name */
+    sizeof(BaseRow),               /* tp_basicsize */
     0,                                  /* tp_itemsize */
-    (destructor)BaseRowProxy_dealloc,   /* tp_dealloc */
+    (destructor)BaseRow_dealloc,   /* tp_dealloc */
     0,                                  /* tp_print */
     0,                                  /* tp_getattr */
     0,                                  /* tp_setattr */
     0,                                  /* tp_compare */
     0,                                  /* tp_repr */
     0,                                  /* tp_as_number */
-    &BaseRowProxy_as_sequence,          /* tp_as_sequence */
-    &BaseRowProxy_as_mapping,           /* tp_as_mapping */
-    0,                                  /* tp_hash */
+    &BaseRow_as_sequence,          /* tp_as_sequence */
+    &BaseRow_as_mapping,           /* tp_as_mapping */
+    (hashfunc)BaseRow_hash,             /* tp_hash */
     0,                                  /* tp_call */
     0,                                  /* tp_str */
-    (getattrofunc)BaseRowProxy_getattro,/* tp_getattro */
+    (getattrofunc)BaseRow_getattro,/* tp_getattro */
     0,                                  /* tp_setattro */
     0,                                  /* tp_as_buffer */
-    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,               /* tp_flags */
-    "BaseRowProxy is a abstract base class for RowProxy",   /* tp_doc */
-    0,                                  /* tp_traverse */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC, /* tp_flags */
+    "BaseRow is a abstract base class for Row",   /* tp_doc */
+    (traverseproc)BaseRow_traverse,           /* tp_traverse */
     0,                                  /* tp_clear */
     0,                                  /* tp_richcompare */
     0,                                  /* tp_weaklistoffset */
-    (getiterfunc)BaseRowProxy_iter,     /* tp_iter */
+    (getiterfunc)BaseRow_iter,     /* tp_iter */
     0,                                  /* tp_iternext */
-    BaseRowProxy_methods,               /* tp_methods */
+    BaseRow_methods,               /* tp_methods */
     0,                                  /* tp_members */
-    BaseRowProxy_getseters,             /* tp_getset */
+    BaseRow_getseters,             /* tp_getset */
     0,                                  /* tp_base */
     0,                                  /* tp_dict */
     0,                                  /* tp_descr_get */
     0,                                  /* tp_descr_set */
     0,                                  /* tp_dictoffset */
-    (initproc)BaseRowProxy_init,        /* tp_init */
+    (initproc)BaseRow_init,        /* tp_init */
     0,                                  /* tp_alloc */
     0                                   /* tp_new */
 };
 
+
+
+/* _tuplegetter function ************************************************/
+/*
+retrieves segments of a row as tuples.
+
+mostly like operator.itemgetter but calls a fixed method instead,
+returns tuple every time.
+
+*/
+
+typedef struct {
+    PyObject_HEAD
+    Py_ssize_t nitems;
+    PyObject *item;
+} tuplegetterobject;
+
+static PyTypeObject tuplegetter_type;
+
+static PyObject *
+tuplegetter_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
+{
+    tuplegetterobject *tg;
+    PyObject *item;
+    Py_ssize_t nitems;
+
+    if (!_PyArg_NoKeywords("tuplegetter", kwds))
+        return NULL;
+
+    nitems = PyTuple_GET_SIZE(args);
+    item = args;
+
+    tg = PyObject_GC_New(tuplegetterobject, &tuplegetter_type);
+    if (tg == NULL)
+        return NULL;
+
+    Py_INCREF(item);
+    tg->item = item;
+    tg->nitems = nitems;
+    PyObject_GC_Track(tg);
+    return (PyObject *)tg;
+}
+
+static void
+tuplegetter_dealloc(tuplegetterobject *tg)
+{
+    PyObject_GC_UnTrack(tg);
+    Py_XDECREF(tg->item);
+    PyObject_GC_Del(tg);
+}
+
+static int
+tuplegetter_traverse(tuplegetterobject *tg, visitproc visit, void *arg)
+{
+    Py_VISIT(tg->item);
+    return 0;
+}
+
+static PyObject *
+tuplegetter_call(tuplegetterobject *tg, PyObject *args, PyObject *kw)
+{
+    PyObject *row_or_tuple, *result;
+    Py_ssize_t i, nitems=tg->nitems;
+    int has_row_method;
+
+    assert(PyTuple_CheckExact(args));
+
+    // this is a tuple, however if its a BaseRow subclass we want to
+    // call specific methods to bypass the pure python LegacyRow.__getitem__
+    // method for now
+    row_or_tuple = PyTuple_GET_ITEM(args, 0);
+
+    has_row_method = PyObject_HasAttrString(row_or_tuple, "_get_by_key_impl_mapping");
+
+    assert(PyTuple_Check(tg->item));
+    assert(PyTuple_GET_SIZE(tg->item) == nitems);
+
+    result = PyTuple_New(nitems);
+    if (result == NULL)
+        return NULL;
+
+    for (i=0 ; i < nitems ; i++) {
+        PyObject *item, *val;
+        item = PyTuple_GET_ITEM(tg->item, i);
+
+        if (has_row_method) {
+            val = PyObject_CallMethod(row_or_tuple, "_get_by_key_impl_mapping", "O", item);
+        }
+        else {
+            val = PyObject_GetItem(row_or_tuple, item);
+        }
+
+        if (val == NULL) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(result, i, val);
+    }
+    return result;
+}
+
+static PyObject *
+tuplegetter_repr(tuplegetterobject *tg)
+{
+    PyObject *repr;
+    const char *reprfmt;
+
+    int status = Py_ReprEnter((PyObject *)tg);
+    if (status != 0) {
+        if (status < 0)
+            return NULL;
+        return PyUnicode_FromFormat("%s(...)", Py_TYPE(tg)->tp_name);
+    }
+
+    reprfmt = tg->nitems == 1 ? "%s(%R)" : "%s%R";
+    repr = PyUnicode_FromFormat(reprfmt, Py_TYPE(tg)->tp_name, tg->item);
+    Py_ReprLeave((PyObject *)tg);
+    return repr;
+}
+
+static PyObject *
+tuplegetter_reduce(tuplegetterobject *tg, PyObject *Py_UNUSED(ignored))
+{
+    return PyTuple_Pack(2, Py_TYPE(tg), tg->item);
+}
+
+PyDoc_STRVAR(reduce_doc, "Return state information for pickling");
+
+static PyMethodDef tuplegetter_methods[] = {
+    {"__reduce__", (PyCFunction)tuplegetter_reduce, METH_NOARGS,
+     reduce_doc},
+    {NULL}
+};
+
+PyDoc_STRVAR(tuplegetter_doc,
+"tuplegetter(item, ...) --> tuplegetter object\n\
+\n\
+Return a callable object that fetches the given item(s) from its operand\n\
+and returns them as a tuple.\n");
+
+static PyTypeObject tuplegetter_type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    "sqlalchemy.engine.util.tuplegetter",  /* tp_name */
+    sizeof(tuplegetterobject),           /* tp_basicsize */
+    0,                                  /* tp_itemsize */
+    /* methods */
+    (destructor)tuplegetter_dealloc,     /* tp_dealloc */
+    0,                                  /* tp_vectorcall_offset */
+    0,                                  /* tp_getattr */
+    0,                                  /* tp_setattr */
+    0,                                  /* tp_as_async */
+    (reprfunc)tuplegetter_repr,          /* tp_repr */
+    0,                                  /* tp_as_number */
+    0,                                  /* tp_as_sequence */
+    0,                                  /* tp_as_mapping */
+    0,                                  /* tp_hash */
+    (ternaryfunc)tuplegetter_call,       /* tp_call */
+    0,                                  /* tp_str */
+    PyObject_GenericGetAttr,            /* tp_getattro */
+    0,                                  /* tp_setattro */
+    0,                                  /* tp_as_buffer */
+    Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC,            /* tp_flags */
+    tuplegetter_doc,                     /* tp_doc */
+    (traverseproc)tuplegetter_traverse,          /* tp_traverse */
+    0,                                  /* tp_clear */
+    0,                                  /* tp_richcompare */
+    0,                                  /* tp_weaklistoffset */
+    0,                                  /* tp_iter */
+    0,                                  /* tp_iternext */
+    tuplegetter_methods,                 /* tp_methods */
+    0,                                  /* tp_members */
+    0,                                  /* tp_getset */
+    0,                                  /* tp_base */
+    0,                                  /* tp_dict */
+    0,                                  /* tp_descr_get */
+    0,                                  /* tp_descr_set */
+    0,                                  /* tp_dictoffset */
+    0,                                  /* tp_init */
+    0,                                  /* tp_alloc */
+    tuplegetter_new,                     /* tp_new */
+    0,                                  /* tp_free */
+};
+
+
+
 static PyMethodDef module_methods[] = {
     {"safe_rowproxy_reconstructor", safe_rowproxy_reconstructor, METH_VARARGS,
-     "reconstruct a RowProxy instance from its pickled form."},
+     "reconstruct a Row instance from its pickled form."},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
 
@@ -706,8 +1019,11 @@ initcresultproxy(void)
 {
     PyObject *m;
 
-    BaseRowProxyType.tp_new = PyType_GenericNew;
-    if (PyType_Ready(&BaseRowProxyType) < 0)
+    BaseRowType.tp_new = PyType_GenericNew;
+    if (PyType_Ready(&BaseRowType) < 0)
+        INITERROR;
+
+    if (PyType_Ready(&tuplegetter_type) < 0)
         INITERROR;
 
 #if PY_MAJOR_VERSION >= 3
@@ -718,8 +1034,11 @@ initcresultproxy(void)
     if (m == NULL)
         INITERROR;
 
-    Py_INCREF(&BaseRowProxyType);
-    PyModule_AddObject(m, "BaseRowProxy", (PyObject *)&BaseRowProxyType);
+    Py_INCREF(&BaseRowType);
+    PyModule_AddObject(m, "BaseRow", (PyObject *)&BaseRowType);
+
+    Py_INCREF(&tuplegetter_type);
+    PyModule_AddObject(m, "tuplegetter", (PyObject *)&tuplegetter_type);
 
 #if PY_MAJOR_VERSION >= 3
     return m;

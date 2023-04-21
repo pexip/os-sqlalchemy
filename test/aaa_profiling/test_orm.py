@@ -1,8 +1,8 @@
 from sqlalchemy import and_
 from sqlalchemy import ForeignKey
-from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import join
+from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.orm import aliased
@@ -13,18 +13,19 @@ from sqlalchemy.orm import defer
 from sqlalchemy.orm import join as orm_join
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Load
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import profiling
+from sqlalchemy.testing.fixtures import fixture_session
+from sqlalchemy.testing.fixtures import NoCache
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
 
-class MergeTest(fixtures.MappedTest):
+class MergeTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -66,12 +67,12 @@ class MergeTest(fixtures.MappedTest):
             cls.tables.child,
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Parent,
             parent,
             properties={"children": relationship(Child, backref="parent")},
         )
-        mapper(Child, child)
+        cls.mapper_registry.map_imperatively(Child, child)
 
     @classmethod
     def insert_data(cls, connection):
@@ -85,13 +86,15 @@ class MergeTest(fixtures.MappedTest):
     def test_merge_no_load(self):
         Parent = self.classes.Parent
 
-        sess = sessionmaker()()
-        sess2 = sessionmaker()()
-        p1 = sess.query(Parent).get(1)
+        sess = fixture_session()
+        sess2 = fixture_session()
+        p1 = sess.get(Parent, 1)
         p1.children
 
         # down from 185 on this this is a small slice of a usually
         # bigger operation so using a small variance
+
+        sess2._legacy_transaction()  # autobegin
 
         @profiling.function_call_count(variance=0.20)
         def go1():
@@ -101,7 +104,9 @@ class MergeTest(fixtures.MappedTest):
 
         # third call, merge object already present. almost no calls.
 
-        @profiling.function_call_count(variance=0.20, warmup=1)
+        sess2._legacy_transaction()  # autobegin
+
+        @profiling.function_call_count(variance=0.10, warmup=1)
         def go2():
             return sess2.merge(p2, load=False)
 
@@ -110,14 +115,16 @@ class MergeTest(fixtures.MappedTest):
     def test_merge_load(self):
         Parent = self.classes.Parent
 
-        sess = sessionmaker()()
-        sess2 = sessionmaker()()
-        p1 = sess.query(Parent).get(1)
+        sess = fixture_session()
+        sess2 = fixture_session()
+        p1 = sess.get(Parent, 1)
         p1.children
 
         # preloading of collection took this down from 1728 to 1192
         # using sqlite3 the C extension took it back up to approx. 1257
         # (py2.6)
+
+        sess2._legacy_transaction()  # autobegin
 
         @profiling.function_call_count(variance=0.10)
         def go():
@@ -181,8 +188,10 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
             cls.tables.child,
         )
 
-        mapper(Parent, parent, properties={"child": relationship(Child)})
-        mapper(Child, child)
+        cls.mapper_registry.map_imperatively(
+            Parent, parent, properties={"child": relationship(Child)}
+        )
+        cls.mapper_registry.map_imperatively(Child, child)
 
     @classmethod
     def insert_data(cls, connection):
@@ -207,7 +216,7 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
     def test_many_to_one_load_no_identity(self):
         Parent = self.classes.Parent
 
-        sess = Session()
+        sess = fixture_session()
         parents = sess.query(Parent).all()
 
         @profiling.function_call_count(variance=0.2)
@@ -220,7 +229,7 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
     def test_many_to_one_load_identity(self):
         Parent, Child = self.classes.Parent, self.classes.Child
 
-        sess = Session()
+        sess = fixture_session()
         parents = sess.query(Parent).all()
         children = sess.query(Child).all()
         children  # strong reference
@@ -233,7 +242,7 @@ class LoadManyToOneFromIdentityTest(fixtures.MappedTest):
         go()
 
 
-class MergeBackrefsTest(fixtures.MappedTest):
+class MergeBackrefsTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -276,7 +285,7 @@ class MergeBackrefsTest(fixtures.MappedTest):
     def setup_mappers(cls):
         A, B, C, D = cls.classes.A, cls.classes.B, cls.classes.C, cls.classes.D
         a, b, c, d = cls.tables.a, cls.tables.b, cls.tables.c, cls.tables.d
-        mapper(
+        cls.mapper_registry.map_imperatively(
             A,
             a,
             properties={
@@ -285,9 +294,9 @@ class MergeBackrefsTest(fixtures.MappedTest):
                 "ds": relationship(D, backref="a"),
             },
         )
-        mapper(B, b)
-        mapper(C, c)
-        mapper(D, d)
+        cls.mapper_registry.map_imperatively(B, b)
+        cls.mapper_registry.map_imperatively(C, c)
+        cls.mapper_registry.map_imperatively(D, d)
 
     @classmethod
     def insert_data(cls, connection):
@@ -314,7 +323,7 @@ class MergeBackrefsTest(fixtures.MappedTest):
             self.classes.C,
             self.classes.D,
         )
-        s = Session()
+        s = fixture_session()
         for a in [
             A(
                 id=i,
@@ -327,7 +336,7 @@ class MergeBackrefsTest(fixtures.MappedTest):
             s.merge(a)
 
 
-class DeferOptionsTest(fixtures.MappedTest):
+class DeferOptionsTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -353,7 +362,7 @@ class DeferOptionsTest(fixtures.MappedTest):
     def setup_mappers(cls):
         A = cls.classes.A
         a = cls.tables.a
-        mapper(A, a)
+        cls.mapper_registry.map_imperatively(A, a)
 
     @classmethod
     def insert_data(cls, connection):
@@ -377,7 +386,7 @@ class DeferOptionsTest(fixtures.MappedTest):
     def test_baseline(self):
         # as of [ticket:2778], this is at 39025
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         s.query(A).all()
 
     @profiling.function_call_count(variance=0.10)
@@ -385,13 +394,13 @@ class DeferOptionsTest(fixtures.MappedTest):
         # with [ticket:2778], this goes from 50805 to 32817,
         # as it should be fewer function calls than the baseline
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         s.query(A).options(
             *[defer(letter) for letter in ["x", "y", "z", "p", "q", "r"]]
         ).all()
 
 
-class AttributeOverheadTest(fixtures.MappedTest):
+class AttributeOverheadTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -433,12 +442,12 @@ class AttributeOverheadTest(fixtures.MappedTest):
             cls.tables.child,
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Parent,
             parent,
             properties={"children": relationship(Child, backref="parent")},
         )
-        mapper(Child, child)
+        cls.mapper_registry.map_imperatively(Child, child)
 
     def test_attribute_set(self):
         Parent, Child = self.classes.Parent, self.classes.Child
@@ -470,7 +479,7 @@ class AttributeOverheadTest(fixtures.MappedTest):
         go()
 
 
-class SessionTest(fixtures.MappedTest):
+class SessionTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -512,12 +521,12 @@ class SessionTest(fixtures.MappedTest):
             cls.tables.child,
         )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Parent,
             parent,
             properties={"children": relationship(Child, backref="parent")},
         )
-        mapper(Child, child)
+        cls.mapper_registry.map_imperatively(Child, child)
 
     def test_expire_lots(self):
         Parent, Child = self.classes.Parent, self.classes.Child
@@ -525,7 +534,7 @@ class SessionTest(fixtures.MappedTest):
             Parent(children=[Child() for j in range(10)]) for i in range(10)
         ]
 
-        sess = Session()
+        sess = fixture_session()
         sess.add_all(obj)
         sess.flush()
 
@@ -536,7 +545,7 @@ class SessionTest(fixtures.MappedTest):
         go()
 
 
-class QueryTest(fixtures.MappedTest):
+class QueryTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -563,11 +572,11 @@ class QueryTest(fixtures.MappedTest):
         Parent = cls.classes.Parent
         parent = cls.tables.parent
 
-        mapper(Parent, parent)
+        cls.mapper_registry.map_imperatively(Parent, parent)
 
     def _fixture(self):
         Parent = self.classes.Parent
-        sess = Session()
+        sess = fixture_session()
         sess.add_all(
             [
                 Parent(data1="d1", data2="d2", data3="d3", data4="d4")
@@ -580,7 +589,11 @@ class QueryTest(fixtures.MappedTest):
     def test_query_cols(self):
         Parent = self.classes.Parent
         self._fixture()
-        sess = Session()
+        sess = fixture_session()
+
+        # warm up cache
+        for attr in [Parent.data1, Parent.data2, Parent.data3, Parent.data4]:
+            attr.__clause_element__()
 
         @profiling.function_call_count()
         def go():
@@ -594,11 +607,14 @@ class QueryTest(fixtures.MappedTest):
         go()
 
 
-class SelectInEagerLoadTest(fixtures.MappedTest):
-    """basic test for selectin() loading, which uses a baked query.
+class SelectInEagerLoadTest(NoCache, fixtures.MappedTest):
+    """basic test for selectin() loading, which uses a lambda query.
 
-    if the baked query starts spoiling due to some bug in cache keys,
-    this callcount blows up.
+    For the previous "baked query" version of this, statement caching
+    was still taking effect as the selectinloader used its own baked
+    query cache.  in 1.4 we align the loader caches with the global
+    "cache_size" (tenatitively) so the callcount has gone up to accommodate
+    for 3x the compilations.
 
     """
 
@@ -653,9 +669,13 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
         A, B, C = cls.classes("A", "B", "C")
         a, b, c = cls.tables("a", "b", "c")
 
-        mapper(A, a, properties={"bs": relationship(B)})
-        mapper(B, b, properties={"cs": relationship(C)})
-        mapper(C, c)
+        cls.mapper_registry.map_imperatively(
+            A, a, properties={"bs": relationship(B)}
+        )
+        cls.mapper_registry.map_imperatively(
+            B, b, properties={"cs": relationship(C)}
+        )
+        cls.mapper_registry.map_imperatively(C, c)
 
     @classmethod
     def insert_data(cls, connection):
@@ -667,11 +687,15 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
     def test_round_trip_results(self):
         A, B, C = self.classes("A", "B", "C")
 
-        sess = Session()
+        sess = fixture_session()
 
         q = sess.query(A).options(selectinload(A.bs).selectinload(B.cs))
 
-        @profiling.function_call_count()
+        # note this value went up when we removed query._attributes;
+        # this is because the test was previously making use of the same
+        # loader option state repeatedly without rebuilding it.
+
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
                 obj = q.all()
@@ -681,7 +705,7 @@ class SelectInEagerLoadTest(fixtures.MappedTest):
         go()
 
 
-class JoinedEagerLoadTest(fixtures.MappedTest):
+class JoinedEagerLoadTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -780,13 +804,21 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
         A, B, C, D, E, F, G = cls.classes("A", "B", "C", "D", "E", "F", "G")
         a, b, c, d, e, f, g = cls.tables("a", "b", "c", "d", "e", "f", "g")
 
-        mapper(A, a, properties={"bs": relationship(B), "es": relationship(E)})
-        mapper(B, b, properties={"cs": relationship(C)})
-        mapper(C, c, properties={"ds": relationship(D)})
-        mapper(D, d)
-        mapper(E, e, properties={"fs": relationship(F), "gs": relationship(G)})
-        mapper(F, f)
-        mapper(G, g)
+        cls.mapper_registry.map_imperatively(
+            A, a, properties={"bs": relationship(B), "es": relationship(E)}
+        )
+        cls.mapper_registry.map_imperatively(
+            B, b, properties={"cs": relationship(C)}
+        )
+        cls.mapper_registry.map_imperatively(
+            C, c, properties={"ds": relationship(D)}
+        )
+        cls.mapper_registry.map_imperatively(D, d)
+        cls.mapper_registry.map_imperatively(
+            E, e, properties={"fs": relationship(F), "gs": relationship(G)}
+        )
+        cls.mapper_registry.map_imperatively(F, f)
+        cls.mapper_registry.map_imperatively(G, g)
 
     @classmethod
     def insert_data(cls, connection):
@@ -803,7 +835,7 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
     def test_build_query(self):
         A, B, C, D, E, F, G = self.classes("A", "B", "C", "D", "E", "F", "G")
 
-        sess = Session()
+        sess = fixture_session()
 
         @profiling.function_call_count()
         def go():
@@ -820,7 +852,7 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
     def test_fetch_results(self):
         A, B, C, D, E, F, G = self.classes("A", "B", "C", "D", "E", "F", "G")
 
-        sess = Session()
+        sess = Session(testing.db)
 
         q = sess.query(A).options(
             joinedload(A.bs).joinedload(B.cs).joinedload(C.ds),
@@ -828,22 +860,51 @@ class JoinedEagerLoadTest(fixtures.MappedTest):
             defaultload(A.es).joinedload(E.gs),
         )
 
-        context = q._compile_context()
-        attributes = dict(context.attributes)
+        compile_state = q._compile_state()
 
-        @profiling.function_call_count()
+        from sqlalchemy.orm.context import ORMCompileState
+
+        @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                # make sure these get reset each time
-                context.attributes = attributes.copy()
-                obj = q._execute_and_instances(context)
-                list(obj)
+                # NOTE: this test was broken in
+                # 77f1b7d236dba6b1c859bb428ef32d118ec372e6 because we started
+                # clearing out the attributes after the first iteration.   make
+                # sure the attributes are there every time.
+                assert compile_state.attributes
+                exec_opts = {}
+                bind_arguments = {}
+                ORMCompileState.orm_pre_session_exec(
+                    sess,
+                    compile_state.select_statement,
+                    {},
+                    exec_opts,
+                    bind_arguments,
+                    is_reentrant_invoke=False,
+                )
+
+                r = sess.connection().execute(
+                    compile_state.statement,
+                    execution_options=exec_opts,
+                    bind_arguments=bind_arguments,
+                )
+
+                r.context.compiled.compile_state = compile_state
+                obj = ORMCompileState.orm_setup_cursor_result(
+                    sess,
+                    compile_state.statement,
+                    {},
+                    exec_opts,
+                    {},
+                    r,
+                )
+                list(obj.unique())
                 sess.close()
 
         go()
 
 
-class JoinConditionTest(fixtures.DeclarativeMappedTest):
+class JoinConditionTest(NoCache, fixtures.DeclarativeMappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -906,6 +967,21 @@ class JoinConditionTest(fixtures.DeclarativeMappedTest):
 
         go()
 
+    def test_a_to_b_aliased_select_join(self):
+        A, B = self.classes("A", "B")
+
+        b1 = aliased(B)
+
+        stmt = select(A)
+
+        @profiling.function_call_count(times=50, warmup=1)
+        def go():
+            # should not do any adaption or aliasing, this is just getting
+            # the args.  See #6550 where we also fixed this.
+            stmt.join(A.b.of_type(b1))
+
+        go()
+
     def test_a_to_d(self):
         A, D = self.classes("A", "D")
 
@@ -932,7 +1008,7 @@ class JoinConditionTest(fixtures.DeclarativeMappedTest):
         go()
 
 
-class BranchedOptionTest(fixtures.MappedTest):
+class BranchedOptionTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -1031,8 +1107,10 @@ class BranchedOptionTest(fixtures.MappedTest):
         A, B, C, D, E, F, G = cls.classes("A", "B", "C", "D", "E", "F", "G")
         a, b, c, d, e, f, g = cls.tables("a", "b", "c", "d", "e", "f", "g")
 
-        mapper(A, a, properties={"bs": relationship(B), "gs": relationship(G)})
-        mapper(
+        cls.mapper_registry.map_imperatively(
+            A, a, properties={"bs": relationship(B), "gs": relationship(G)}
+        )
+        cls.mapper_registry.map_imperatively(
             B,
             b,
             properties={
@@ -1042,53 +1120,13 @@ class BranchedOptionTest(fixtures.MappedTest):
                 "fs": relationship(F),
             },
         )
-        mapper(C, c)
-        mapper(D, d)
-        mapper(E, e)
-        mapper(F, f)
-        mapper(G, g)
+        cls.mapper_registry.map_imperatively(C, c)
+        cls.mapper_registry.map_imperatively(D, d)
+        cls.mapper_registry.map_imperatively(E, e)
+        cls.mapper_registry.map_imperatively(F, f)
+        cls.mapper_registry.map_imperatively(G, g)
 
         configure_mappers()
-
-    def test_generate_cache_key_unbound_branching(self):
-        A, B, C, D, E, F, G = self.classes("A", "B", "C", "D", "E", "F", "G")
-
-        base = joinedload(A.bs)
-        opts = [
-            base.joinedload(B.cs),
-            base.joinedload(B.ds),
-            base.joinedload(B.es),
-            base.joinedload(B.fs),
-        ]
-
-        cache_path = inspect(A)._path_registry
-
-        @profiling.function_call_count(warmup=1)
-        def go():
-            for opt in opts:
-                opt._generate_cache_key(cache_path)
-
-        go()
-
-    def test_generate_cache_key_bound_branching(self):
-        A, B, C, D, E, F, G = self.classes("A", "B", "C", "D", "E", "F", "G")
-
-        base = Load(A).joinedload(A.bs)
-        opts = [
-            base.joinedload(B.cs),
-            base.joinedload(B.ds),
-            base.joinedload(B.es),
-            base.joinedload(B.fs),
-        ]
-
-        cache_path = inspect(A)._path_registry
-
-        @profiling.function_call_count(warmup=1)
-        def go():
-            for opt in opts:
-                opt._generate_cache_key(cache_path)
-
-        go()
 
     def test_query_opts_unbound_branching(self):
         A, B, C, D, E, F, G = self.classes("A", "B", "C", "D", "E", "F", "G")
@@ -1101,11 +1139,19 @@ class BranchedOptionTest(fixtures.MappedTest):
             base.joinedload(B.fs),
         ]
 
-        q = Session().query(A)
+        q = fixture_session().query(A)
+
+        context = q._compile_state()
 
         @profiling.function_call_count(warmup=1)
         def go():
-            q.options(*opts)
+            q2 = q.options(opts)
+            context.query = q2
+            context.attributes = q2._attributes = {
+                "_unbound_load_dedupes": set()
+            }
+            for opt in q2._with_options:
+                opt.process_compile_state(context)
 
         go()
 
@@ -1120,16 +1166,24 @@ class BranchedOptionTest(fixtures.MappedTest):
             base.joinedload(B.fs),
         ]
 
-        q = Session().query(A)
+        q = fixture_session().query(A)
+
+        context = q._compile_state()
 
         @profiling.function_call_count(warmup=1)
         def go():
-            q.options(*opts)
+            q2 = q.options(opts)
+            context.query = q2
+            context.attributes = q2._attributes = {
+                "_unbound_load_dedupes": set()
+            }
+            for opt in q2._with_options:
+                opt.process_compile_state(context)
 
         go()
 
 
-class AnnotatedOverheadTest(fixtures.MappedTest):
+class AnnotatedOverheadTest(NoCache, fixtures.MappedTest):
     __requires__ = ("python_profiling_backend",)
 
     @classmethod
@@ -1153,7 +1207,7 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
         A = cls.classes.A
         a = cls.tables.a
 
-        mapper(A, a)
+        cls.mapper_registry.map_imperatively(A, a)
 
     @classmethod
     def insert_data(cls, connection):
@@ -1164,114 +1218,132 @@ class AnnotatedOverheadTest(fixtures.MappedTest):
 
     def test_no_bundle(self):
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
 
         q = s.query(A).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_no_entity_wo_annotations(self):
         A = self.classes.A
         a = self.tables.a
-        s = Session()
+        s = fixture_session()
 
         q = s.query(a.c.data).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_no_entity_w_annotations(self):
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         q = s.query(A.data).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_entity_w_annotations(self):
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         q = s.query(A, A.data).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_entity_wo_annotations(self):
         A = self.classes.A
         a = self.tables.a
-        s = Session()
+        s = fixture_session()
         q = s.query(A, a.c.data).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_no_bundle_wo_annotations(self):
         A = self.classes.A
         a = self.tables.a
-        s = Session()
+        s = fixture_session()
         q = s.query(a.c.data, A).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_no_bundle_w_annotations(self):
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         q = s.query(A.data, A).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_bundle_wo_annotation(self):
         A = self.classes.A
         a = self.tables.a
-        s = Session()
+        s = fixture_session()
         q = s.query(Bundle("ASdf", a.c.data), A).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()
 
     def test_bundle_w_annotation(self):
         A = self.classes.A
-        s = Session()
+        s = fixture_session()
         q = s.query(Bundle("ASdf", A.data), A).select_from(A)
 
         @profiling.function_call_count(warmup=1)
         def go():
             for i in range(100):
-                q.all()
+                # test counts assume objects remain in the session
+                # from previous run
+                r = q.all()  # noqa: F841
 
         go()

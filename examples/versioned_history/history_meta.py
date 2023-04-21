@@ -14,7 +14,7 @@ from sqlalchemy.orm import attributes
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import object_mapper
 from sqlalchemy.orm.exc import UnmappedColumnError
-from sqlalchemy.orm.properties import RelationshipProperty
+from sqlalchemy.orm.relationships import RelationshipProperty
 
 
 def col_references_table(col, table):
@@ -163,7 +163,8 @@ def _history_mapper(local_mapper):
 
     if not super_history_mapper:
         local_mapper.local_table.append_column(
-            Column("version", Integer, default=1, nullable=False)
+            Column("version", Integer, default=1, nullable=False),
+            replace_existing=True,
         )
         local_mapper.add_property(
             "version", local_mapper.local_table.c.version

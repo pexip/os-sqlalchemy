@@ -12,11 +12,26 @@ As with all SQLAlchemy dialects, all UPPERCASE types that are known to be
 valid with Oracle are importable from the top level dialect, whether
 they originate from :mod:`sqlalchemy.types` or from the local dialect::
 
-    from sqlalchemy.dialects.oracle import \
-                BFILE, BLOB, CHAR, CLOB, DATE, \
-                DOUBLE_PRECISION, FLOAT, INTERVAL, LONG, NCLOB, NCHAR, \
-                NUMBER, NVARCHAR, NVARCHAR2, RAW, TIMESTAMP, VARCHAR, \
-                VARCHAR2
+    from sqlalchemy.dialects.oracle import (
+        BFILE,
+        BLOB,
+        CHAR,
+        CLOB,
+        DATE,
+        DOUBLE_PRECISION,
+        FLOAT,
+        INTERVAL,
+        LONG,
+        NCLOB,
+        NCHAR,
+        NUMBER,
+        NVARCHAR,
+        NVARCHAR2,
+        RAW,
+        TIMESTAMP,
+        VARCHAR,
+        VARCHAR2,
+    )
 
 .. versionadded:: 1.2.19 Added :class:`_types.NCHAR` to the list of datatypes
    exported by the Oracle dialect.
@@ -55,13 +70,10 @@ construction arguments, are as follows:
 .. autoclass:: RAW
   :members: __init__
 
+.. _cx_oracle:
 
 cx_Oracle
 ---------
 
 .. automodule:: sqlalchemy.dialects.oracle.cx_oracle
 
-zxjdbc
-------
-
-.. automodule:: sqlalchemy.dialects.oracle.zxjdbc

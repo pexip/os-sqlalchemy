@@ -1,5 +1,8 @@
 import sqlalchemy as sa
+from sqlalchemy import Column
 from sqlalchemy import event
+from sqlalchemy import Integer
+from sqlalchemy import Table
 from sqlalchemy import util
 from sqlalchemy.ext import instrumentation
 from sqlalchemy.orm import attributes
@@ -16,6 +19,8 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing import ne_
 from sqlalchemy.testing.util import decorator
 
@@ -32,7 +37,7 @@ def modifies_instrumentation_finders(fn, *args, **kw):
 
 class _ExtBase(object):
     @classmethod
-    def teardown_class(cls):
+    def teardown_test_class(cls):
         instrumentation._reinstall_default_lookups()
 
 
@@ -87,9 +92,51 @@ class MyListLike(list):
 MyBaseClass, MyClass = None, None
 
 
+class DisposeTest(_ExtBase, fixtures.TestBase):
+    def test_unregister(self, registry):
+        class MyClassState(instrumentation.InstrumentationManager):
+            def manage(self, class_, manager):
+                setattr(class_, "xyz", manager)
+
+            def unregister(self, class_, manager):
+                delattr(class_, "xyz")
+
+            def manager_getter(self, class_):
+                def get(cls):
+                    return cls.xyz
+
+                return get
+
+        class MyClass(object):
+            __sa_instrumentation_manager__ = MyClassState
+
+        assert attributes.manager_of_class(MyClass) is None
+
+        t = Table(
+            "my_table",
+            registry.metadata,
+            Column("id", Integer, primary_key=True),
+        )
+
+        registry.map_imperatively(MyClass, t)
+
+        manager = attributes.manager_of_class(MyClass)
+        is_not(manager, None)
+        is_(manager, MyClass.xyz)
+
+        registry.configure()
+
+        registry.dispose()
+
+        manager = attributes.manager_of_class(MyClass)
+        is_(manager, None)
+
+        assert not hasattr(MyClass, "xyz")
+
+
 class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         global MyBaseClass, MyClass
 
         class MyBaseClass(object):
@@ -109,7 +156,7 @@ class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
             )
 
             # This proves SA can handle a class with non-string dict keys
-            if not util.pypy and not util.jython:
+            if util.cpython:
                 locals()[42] = 99  # Don't remove this line!
 
             def __init__(self, **kwargs):
@@ -143,7 +190,7 @@ class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
                 else:
                     del self._goofy_dict[key]
 
-    def teardown(self):
+    def teardown_test(self):
         clear_mappers()
 
     def test_instance_dict(self):
@@ -223,13 +270,13 @@ class UserDefinedExtensionTest(_ExtBase, fixtures.ORMTest):
 
             data = {"a": "this is a", "b": 12}
 
-            def loader(state, keys):
+            def loader(state, keys, passive):
                 for k in keys:
                     state.dict[k] = data[k]
                 return attributes.ATTR_WAS_SET
 
             manager = register_class(Foo)
-            manager.deferred_scalar_loader = loader
+            manager.expired_attribute_loader = loader
             attributes.register_attribute(
                 Foo, "a", uselist=False, useobject=False
             )

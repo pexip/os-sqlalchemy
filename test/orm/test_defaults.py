@@ -1,16 +1,16 @@
 import sqlalchemy as sa
 from sqlalchemy import Computed
 from sqlalchemy import event
+from sqlalchemy import Identity
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -152,7 +152,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
     def setup_mappers(cls):
         Default, dt = cls.classes.Default, cls.tables.dt
 
-        mapper(Default, dt)
+        cls.mapper_registry.map_imperatively(Default, dt)
 
     def test_insert(self):
         Default = self.classes.Default
@@ -164,7 +164,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
         eq_(d1.col3, None)
         eq_(d1.col4, None)
 
-        session = create_session()
+        session = fixture_session()
         session.add(d1)
         session.flush()
 
@@ -179,7 +179,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
 
         d1 = Default(id=1)
 
-        session = create_session()
+        session = fixture_session()
         session.add(d1)
         session.flush()
         d1.col1 = "set"
@@ -209,13 +209,15 @@ class ExcludedDefaultsTest(fixtures.MappedTest):
         class Foo(fixtures.BasicEntity):
             pass
 
-        mapper(Foo, dt, exclude_properties=("col1",))
+        self.mapper_registry.map_imperatively(
+            Foo, dt, exclude_properties=("col1",)
+        )
 
         f1 = Foo()
-        sess = create_session()
+        sess = fixture_session()
         sess.add(f1)
         sess.flush()
-        eq_(dt.select().execute().fetchall(), [(1, "hello")])
+        eq_(sess.connection().execute(dt.select()).fetchall(), [(1, "hello")])
 
 
 class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
@@ -247,10 +249,14 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
     def setup_mappers(cls):
         Thing = cls.classes.Thing
 
-        mapper(Thing, cls.tables.test, eager_defaults=True)
+        cls.mapper_registry.map_imperatively(
+            Thing, cls.tables.test, eager_defaults=True
+        )
 
         ThingNoEager = cls.classes.ThingNoEager
-        mapper(ThingNoEager, cls.tables.test, eager_defaults=False)
+        cls.mapper_registry.map_imperatively(
+            ThingNoEager, cls.tables.test, eager_defaults=False
+        )
 
     @testing.combinations(("eager", True), ("noneager", False), id_="ia")
     def test_insert_computed(self, eager):
@@ -259,7 +265,7 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
         else:
             Thing = self.classes.ThingNoEager
 
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1, foo=5), Thing(id=2, foo=10))
 
@@ -270,38 +276,57 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
             eq_(t1.bar, 5 + 42)
             eq_(t2.bar, 10 + 42)
 
-        if eager and testing.db.dialect.implicit_returning:
-            asserter.assert_(
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, %(foo)s) "
-                    "RETURNING test.bar",
-                    [{"foo": 5, "id": 1}],
-                    dialect="postgresql",
-                ),
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, %(foo)s) "
-                    "RETURNING test.bar",
-                    [{"foo": 10, "id": 2}],
-                    dialect="postgresql",
-                ),
+        asserter.assert_(
+            Conditional(
+                eager and testing.db.dialect.implicit_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 5, "id": 1}],
+                                dialect="postgresql",
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (id, foo) "
+                                "VALUES (%(id)s, %(foo)s) "
+                                "RETURNING test.bar",
+                                [{"foo": 10, "id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    )
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id, foo) VALUES (:id, :foo)",
+                        [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.bar AS test_bar FROM test "
+                        "WHERE test.id = :pk_1",
+                        [{"pk_1": 1}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test.bar AS test_bar FROM test "
+                        "WHERE test.id = :pk_1",
+                        [{"pk_1": 2}],
+                    ),
+                ],
             )
-        else:
-            asserter.assert_(
-                CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (:id, :foo)",
-                    [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
-                ),
-                CompiledSQL(
-                    "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 1}],
-                ),
-                CompiledSQL(
-                    "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 2}],
-                ),
-            )
+        )
 
     @testing.combinations(
         (
@@ -321,7 +346,7 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
         else:
             Thing = self.classes.ThingNoEager
 
-        s = Session()
+        s = fixture_session()
 
         t1, t2 = (Thing(id=1, foo=1), Thing(id=2, foo=2))
 
@@ -365,13 +390,13 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 1}],
+                    "WHERE test.id = :pk_1",
+                    [{"pk_1": 1}],
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 2}],
+                    "WHERE test.id = :pk_1",
+                    [{"pk_1": 2}],
                 ),
             )
         else:
@@ -382,12 +407,98 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 1}],
+                    "WHERE test.id = :pk_1",
+                    [{"pk_1": 1}],
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
-                    "WHERE test.id = :param_1",
-                    [{"param_1": 2}],
+                    "WHERE test.id = :pk_1",
+                    [{"pk_1": 2}],
                 ),
             )
+
+
+class IdentityDefaultsOnUpdateTest(fixtures.MappedTest):
+    """test that computed columns are recognized as server
+    oninsert/onupdate defaults."""
+
+    __backend__ = True
+    __requires__ = ("identity_columns",)
+    run_create_tables = "each"
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "test",
+            metadata,
+            Column("id", Integer, Identity(), primary_key=True),
+            Column("foo", Integer),
+        )
+
+    @classmethod
+    def setup_classes(cls):
+        class Thing(cls.Basic):
+            pass
+
+    @classmethod
+    def setup_mappers(cls):
+        Thing = cls.classes.Thing
+
+        cls.mapper_registry.map_imperatively(Thing, cls.tables.test)
+
+    def test_insert_identity(self):
+        Thing = self.classes.Thing
+
+        s = fixture_session()
+
+        t1, t2 = (Thing(foo=5), Thing(foo=10))
+
+        s.add_all([t1, t2])
+
+        with assert_engine(testing.db) as asserter:
+            s.flush()
+            eq_(t1.id, 1)
+            eq_(t2.id, 2)
+
+        asserter.assert_(
+            Conditional(
+                testing.db.dialect.implicit_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 5}, {"foo": 10}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 5}],
+                                dialect="postgresql",
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (foo) VALUES (%(foo)s) "
+                                "RETURNING test.id",
+                                [{"foo": 10}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    )
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (foo) VALUES (:foo)",
+                        [{"foo": 5}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO test (foo) VALUES (:foo)",
+                        [{"foo": 10}],
+                    ),
+                ],
+            )
+        )

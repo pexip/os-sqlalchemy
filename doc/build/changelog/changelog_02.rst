@@ -73,7 +73,7 @@
 
       lazy loads will not fire off for an object that does not have a
       database identity (why?
-      see http://www.sqlalchemy.org/trac/wiki/WhyDontForeignKeysLoadData)
+      see https://www.sqlalchemy.org/trac/wiki/WhyDontForeignKeysLoadData)
 
     .. change::
         :tags:
@@ -1057,7 +1057,11 @@
         :tickets:
 
       create_engine now takes only RFC-1738-style strings:
-      driver://user:password@host:port/database
+      ``driver://user:password@host:port/database``
+
+      **update** this format is generally but not exactly RFC-1738,
+      including that underscores, not dashes or periods, are accepted in the
+      "scheme" portion.
 
     .. change::
         :tags:
@@ -1184,4 +1188,4 @@
         :tickets:
 
       migration guide is available on the Wiki at
-      http://www.sqlalchemy.org/trac/wiki/02Migration
+      https://www.sqlalchemy.org/trac/wiki/02Migration

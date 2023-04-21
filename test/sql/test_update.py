@@ -1,4 +1,6 @@
-from sqlalchemy import and_
+import itertools
+import random
+
 from sqlalchemy import bindparam
 from sqlalchemy import column
 from sqlalchemy import exc
@@ -8,7 +10,6 @@ from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import literal
 from sqlalchemy import MetaData
-from sqlalchemy import or_
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import table
@@ -18,11 +19,14 @@ from sqlalchemy import update
 from sqlalchemy import util
 from sqlalchemy.dialects import mysql
 from sqlalchemy.engine import default
+from sqlalchemy.sql import operators
+from sqlalchemy.sql.elements import BooleanClauseList
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -111,8 +115,6 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_literal_binds(self):
         table1 = self.tables.mytable
 
-        table1 = self.tables.mytable
-
         stmt = (
             table1.update().values(name="jack").where(table1.c.name == "jill")
         )
@@ -123,17 +125,82 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             literal_binds=True,
         )
 
+    def test_update_custom_key_thing(self):
+        table1 = self.tables.mytable
+
+        class Thing(object):
+            def __clause_element__(self):
+                return table1.c.name
+
+        stmt = (
+            table1.update()
+            .values({Thing(): "jack"})
+            .where(table1.c.name == "jill")
+        )
+
+        self.assert_compile(
+            stmt,
+            "UPDATE mytable SET name='jack' WHERE mytable.name = 'jill'",
+            literal_binds=True,
+        )
+
+    def test_update_ordered_custom_key_thing(self):
+        table1 = self.tables.mytable
+
+        class Thing(object):
+            def __clause_element__(self):
+                return table1.c.name
+
+        stmt = (
+            table1.update()
+            .ordered_values((Thing(), "jack"))
+            .where(table1.c.name == "jill")
+        )
+
+        self.assert_compile(
+            stmt,
+            "UPDATE mytable SET name='jack' WHERE mytable.name = 'jill'",
+            literal_binds=True,
+        )
+
+    def test_update_broken_custom_key_thing(self):
+        table1 = self.tables.mytable
+
+        class Thing(object):
+            def __clause_element__(self):
+                return 5
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "SET/VALUES column expression or string key expected, got .*Thing",
+            table1.update().values,
+            {Thing(): "jack"},
+        )
+
+    def test_update_ordered_broken_custom_key_thing(self):
+        table1 = self.tables.mytable
+
+        class Thing(object):
+            def __clause_element__(self):
+                return 5
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "SET/VALUES column expression or string key expected, got .*Thing",
+            table1.update().ordered_values,
+            (Thing(), "jack"),
+        )
+
     def test_correlated_update_one(self):
         table1 = self.tables.mytable
 
         # test against a straight text subquery
-        u = update(
-            table1,
-            values={
+        u = update(table1).values(
+            {
                 table1.c.name: text(
                     "(select name from mytable where id=mytable.id)"
                 )
-            },
+            }
         )
         self.assert_compile(
             u,
@@ -145,11 +212,12 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         mt = table1.alias()
-        u = update(
-            table1,
-            values={
-                table1.c.name: select([mt.c.name], mt.c.myid == table1.c.myid)
-            },
+        u = update(table1).values(
+            {
+                table1.c.name: select(mt.c.name)
+                .where(mt.c.myid == table1.c.myid)
+                .scalar_subquery()
+            }
         )
         self.assert_compile(
             u,
@@ -163,8 +231,16 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table2 = self.tables.myothertable
 
         # test against a regular constructed subquery
-        s = select([table2], table2.c.otherid == table1.c.myid)
-        u = update(table1, table1.c.name == "jack", values={table1.c.name: s})
+        s = (
+            select(table2)
+            .where(table2.c.otherid == table1.c.myid)
+            .scalar_subquery()
+        )
+        u = (
+            update(table1)
+            .where(table1.c.name == "jack")
+            .values({table1.c.name: s})
+        )
         self.assert_compile(
             u,
             "UPDATE mytable SET name=(SELECT myothertable.otherid, "
@@ -178,8 +254,8 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table2 = self.tables.myothertable
 
         # test a non-correlated WHERE clause
-        s = select([table2.c.othername], table2.c.otherid == 7)
-        u = update(table1, table1.c.name == s)
+        s = select(table2.c.othername).where(table2.c.otherid == 7)
+        u = update(table1).where(table1.c.name == s.scalar_subquery())
         self.assert_compile(
             u,
             "UPDATE mytable SET myid=:myid, name=:name, "
@@ -193,8 +269,8 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table2 = self.tables.myothertable
 
         # test one that is actually correlated...
-        s = select([table2.c.othername], table2.c.otherid == table1.c.myid)
-        u = table1.update(table1.c.name == s)
+        s = select(table2.c.othername).where(table2.c.otherid == table1.c.myid)
+        u = table1.update().where(table1.c.name == s.scalar_subquery())
         self.assert_compile(
             u,
             "UPDATE mytable SET myid=:myid, name=:name, "
@@ -293,7 +369,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
     def test_labels_no_collision_index(self):
-        """test for [ticket:4911] """
+        """test for [ticket:4911]"""
 
         t = Table(
             "foo",
@@ -323,13 +399,20 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column(
                 "col2",
                 Integer,
-                onupdate=select([func.coalesce(func.max(foo.c.id))]),
+                onupdate=select(func.coalesce(func.max(foo.c.id))),
             ),
             Column("col3", String(30)),
         )
 
         self.assert_compile(
-            t.update(inline=True, values={"col3": "foo"}),
+            t.update().values({"col3": "foo"}),
+            "UPDATE test SET col1=foo(:foo_1), col2=(SELECT "
+            "coalesce(max(foo.id)) AS coalesce_1 FROM foo), "
+            "col3=:col3",
+        )
+
+        self.assert_compile(
+            t.update().inline().values({"col3": "foo"}),
             "UPDATE test SET col1=foo(:foo_1), col2=(SELECT "
             "coalesce(max(foo.id)) AS coalesce_1 FROM foo), "
             "col3=:col3",
@@ -339,7 +422,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(table1, table1.c.myid == 7),
+            update(table1).where(table1.c.myid == 7),
             "UPDATE mytable SET name=:name WHERE mytable.myid = :myid_1",
             params={table1.c.name: "fred"},
         )
@@ -359,7 +442,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(table1, table1.c.myid == 7),
+            update(table1).where(table1.c.myid == 7),
             "UPDATE mytable SET name=:name WHERE mytable.myid = :myid_1",
             params={"name": "fred"},
         )
@@ -368,7 +451,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(table1, values={table1.c.name: table1.c.myid}),
+            update(table1).values({table1.c.name: table1.c.myid}),
             "UPDATE mytable SET name=mytable.myid",
         )
 
@@ -376,10 +459,10 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(
-                table1,
-                whereclause=table1.c.name == bindparam("crit"),
-                values={table1.c.name: "hi"},
+            update(table1)
+            .where(table1.c.name == bindparam("crit"))
+            .values(
+                {table1.c.name: "hi"},
             ),
             "UPDATE mytable SET name=:name WHERE mytable.name = :crit",
             params={"crit": "notthere"},
@@ -390,10 +473,10 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(
-                table1,
-                table1.c.myid == 12,
-                values={table1.c.name: table1.c.myid},
+            update(table1)
+            .where(table1.c.myid == 12)
+            .values(
+                {table1.c.name: table1.c.myid},
             ),
             "UPDATE mytable "
             "SET name=mytable.myid, description=:description "
@@ -406,7 +489,9 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(table1, table1.c.myid == 12, values={table1.c.myid: 9}),
+            update(table1)
+            .where(table1.c.myid == 12)
+            .values({table1.c.myid: 9}),
             "UPDATE mytable "
             "SET myid=:myid, description=:description "
             "WHERE mytable.myid = :myid_1",
@@ -417,7 +502,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         self.assert_compile(
-            update(table1, table1.c.myid == 12),
+            update(table1).where(table1.c.myid == 12),
             "UPDATE mytable SET myid=:myid WHERE mytable.myid = :myid_1",
             params={"myid": 18},
             checkparams={"myid": 18, "myid_1": 12},
@@ -426,7 +511,11 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_9(self):
         table1 = self.tables.mytable
 
-        s = table1.update(table1.c.myid == 12, values={table1.c.name: "lala"})
+        s = (
+            table1.update()
+            .where(table1.c.myid == 12)
+            .values({table1.c.name: "lala"})
+        )
         c = s.compile(column_keys=["id", "name"])
         eq_(str(s), str(c))
 
@@ -436,7 +525,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         v1 = {table1.c.name: table1.c.myid}
         v2 = {table1.c.name: table1.c.name + "foo"}
         self.assert_compile(
-            update(table1, table1.c.myid == 12, values=v1).values(v2),
+            update(table1).where(table1.c.myid == 12).values(v1).values(v2),
             "UPDATE mytable "
             "SET "
             "name=(mytable.name || :name_1), "
@@ -454,15 +543,15 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         }
 
         self.assert_compile(
-            update(
-                table1,
+            update(table1)
+            .where(
                 (table1.c.myid == func.hoho(4))
                 & (
                     table1.c.name
                     == literal("foo") + table1.c.name + literal("lala")
-                ),
-                values=values,
-            ),
+                )
+            )
+            .values(values),
             "UPDATE mytable "
             "SET "
             "myid=do_stuff(mytable.myid, :param_1), "
@@ -505,7 +594,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             column_keys=["j"],
         )
 
-    def test_update_ordered_parameters_1(self):
+    def test_update_ordered_parameters_newstyle_1(self):
         table1 = self.tables.mytable
 
         # Confirm that we can pass values as list value pairs
@@ -515,16 +604,15 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             (table1.c.myid, func.do_stuff(table1.c.myid, literal("hoho"))),
         ]
         self.assert_compile(
-            update(
-                table1,
+            update(table1)
+            .where(
                 (table1.c.myid == func.hoho(4))
                 & (
                     table1.c.name
                     == literal("foo") + table1.c.name + literal("lala")
-                ),
-                preserve_parameter_order=True,
-                values=values,
-            ),
+                )
+            )
+            .ordered_values(*values),
             "UPDATE mytable "
             "SET "
             "name=(mytable.name || :name_1), "
@@ -534,7 +622,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "mytable.name = :param_2 || mytable.name || :param_3",
         )
 
-    def test_update_ordered_parameters_2(self):
+    def test_update_ordered_parameters_newstyle_2(self):
         table1 = self.tables.mytable
 
         # Confirm that we can pass values as list value pairs
@@ -545,15 +633,15 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             (table1.c.myid, func.do_stuff(table1.c.myid, literal("hoho"))),
         ]
         self.assert_compile(
-            update(
-                table1,
+            update(table1)
+            .where(
                 (table1.c.myid == func.hoho(4))
                 & (
                     table1.c.name
                     == literal("foo") + table1.c.name + literal("lala")
                 ),
-                preserve_parameter_order=True,
-            ).values(values),
+            )
+            .ordered_values(*values),
             "UPDATE mytable "
             "SET "
             "name=(mytable.name || :name_1), "
@@ -564,40 +652,43 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "mytable.name = :param_2 || mytable.name || :param_3",
         )
 
-    def test_update_ordered_parameters_fire_onupdate(self):
-        table = self.tables.update_w_default
-
-        values = [(table.c.y, table.c.x + 5), ("x", 10)]
-
-        self.assert_compile(
-            table.update(preserve_parameter_order=True).values(values),
-            "UPDATE update_w_default SET ycol=(update_w_default.x + :x_1), "
-            "x=:x, data=:data",
-        )
-
-    def test_update_ordered_parameters_override_onupdate(self):
-        table = self.tables.update_w_default
-
-        values = [
-            (table.c.y, table.c.x + 5),
-            (table.c.data, table.c.x + 10),
-            ("x", 10),
-        ]
-
-        self.assert_compile(
-            table.update(preserve_parameter_order=True).values(values),
-            "UPDATE update_w_default SET ycol=(update_w_default.x + :x_1), "
-            "data=(update_w_default.x + :x_2), x=:x",
-        )
-
-    def test_update_preserve_order_reqs_listtups(self):
+    def test_update_ordered_parameters_multiple(self):
         table1 = self.tables.mytable
-        testing.assert_raises_message(
-            ValueError,
-            r"When preserve_parameter_order is True, values\(\) "
-            r"only accepts a list of 2-tuples",
-            table1.update(preserve_parameter_order=True).values,
-            {"description": "foo", "name": "bar"},
+
+        stmt = update(table1)
+
+        stmt = stmt.ordered_values(("name", "somename"))
+
+        assert_raises_message(
+            exc.ArgumentError,
+            "This statement already has ordered values present",
+            stmt.ordered_values,
+            ("myid", 10),
+        )
+
+    def test_update_ordered_then_nonordered(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.update().ordered_values(("myid", 1), ("name", "d1"))
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "This statement already has ordered values present",
+            stmt.values,
+            {"myid": 2, "name": "d2"},
+        )
+
+    def test_update_no_multiple_parameters_allowed(self):
+        table1 = self.tables.mytable
+
+        stmt = table1.update().values(
+            [{"myid": 1, "name": "n1"}, {"myid": 2, "name": "n2"}]
+        )
+
+        assert_raises_message(
+            exc.InvalidRequestError,
+            "UPDATE construct does not support multiple parameter sets.",
+            stmt.compile,
         )
 
     def test_update_ordereddict(self):
@@ -613,15 +704,15 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
         self.assert_compile(
-            update(
-                table1,
+            update(table1)
+            .where(
                 (table1.c.myid == func.hoho(4))
                 & (
                     table1.c.name
                     == literal("foo") + table1.c.name + literal("lala")
                 ),
-                values=values,
-            ),
+            )
+            .values(values),
             "UPDATE mytable "
             "SET "
             "myid=do_stuff(mytable.myid, :param_1), "
@@ -634,12 +725,16 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_where_empty(self):
         table1 = self.tables.mytable
         self.assert_compile(
-            table1.update().where(and_()),
+            table1.update().where(
+                BooleanClauseList._construct_raw(operators.and_)
+            ),
             "UPDATE mytable SET myid=:myid, name=:name, "
             "description=:description",
         )
         self.assert_compile(
-            table1.update().where(or_()),
+            table1.update().where(
+                BooleanClauseList._construct_raw(operators.or_)
+            ),
             "UPDATE mytable SET myid=:myid, name=:name, "
             "description=:description",
         )
@@ -665,7 +760,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=mysql.dialect(),
         )
 
-    def test_update_to_expression(self):
+    def test_update_to_expression_one(self):
         """test update from an expression.
 
         this logic is triggered currently by a left side that doesn't
@@ -681,6 +776,136 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "UPDATE mytable SET foo(myid)=:param_1",
         )
 
+    @testing.fixture
+    def randomized_param_order_update(self):
+        from sqlalchemy.sql.dml import UpdateDMLState
+
+        super_process_ordered_values = UpdateDMLState._process_ordered_values
+
+        # this fixture is needed for Python 3.6 and above to work around
+        # dictionaries being insert-ordered.  in python 2.7 the previous
+        # logic fails pretty easily without this fixture.
+        def _process_ordered_values(self, statement):
+            super_process_ordered_values(self, statement)
+
+            tuples = list(self._dict_parameters.items())
+            random.shuffle(tuples)
+            self._dict_parameters = dict(tuples)
+
+        dialect = default.StrCompileDialect()
+        dialect.paramstyle = "qmark"
+        dialect.positional = True
+
+        with mock.patch.object(
+            UpdateDMLState, "_process_ordered_values", _process_ordered_values
+        ):
+            yield
+
+    def random_update_order_parameters():
+        from sqlalchemy import ARRAY
+
+        t = table(
+            "foo",
+            column("data1", ARRAY(Integer)),
+            column("data2", ARRAY(Integer)),
+            column("data3", ARRAY(Integer)),
+            column("data4", ARRAY(Integer)),
+        )
+
+        idx_to_value = [
+            (t.c.data1, 5, 7),
+            (t.c.data2, 10, 18),
+            (t.c.data3, 8, 4),
+            (t.c.data4, 12, 14),
+        ]
+
+        def combinations():
+            while True:
+                random.shuffle(idx_to_value)
+                yield list(idx_to_value)
+
+        return testing.combinations(
+            *[
+                (t, combination)
+                for i, combination in zip(range(10), combinations())
+            ],
+            argnames="t, idx_to_value"
+        )
+
+    @random_update_order_parameters()
+    def test_update_to_expression_two(
+        self, randomized_param_order_update, t, idx_to_value
+    ):
+        """test update from an expression.
+
+        this logic is triggered currently by a left side that doesn't
+        have a key.  The current supported use case is updating the index
+        of a PostgreSQL ARRAY type.
+
+        """
+
+        dialect = default.StrCompileDialect()
+        dialect.paramstyle = "qmark"
+        dialect.positional = True
+
+        stmt = t.update().ordered_values(
+            *[(col[idx], val) for col, idx, val in idx_to_value]
+        )
+
+        self.assert_compile(
+            stmt,
+            "UPDATE foo SET %s"
+            % (
+                ", ".join(
+                    "%s[?]=?" % col.key for col, idx, val in idx_to_value
+                )
+            ),
+            dialect=dialect,
+            checkpositional=tuple(
+                itertools.chain.from_iterable(
+                    (idx, val) for col, idx, val in idx_to_value
+                )
+            ),
+        )
+
+    def test_update_to_expression_three(self):
+        # this test is from test_defaults but exercises a particular
+        # parameter ordering issue
+        metadata = MetaData()
+
+        q = Table(
+            "q",
+            metadata,
+            Column("x", Integer, default=2),
+            Column("y", Integer, onupdate=5),
+            Column("z", Integer),
+        )
+
+        p = Table(
+            "p",
+            metadata,
+            Column("s", Integer),
+            Column("t", Integer),
+            Column("u", Integer, onupdate=1),
+        )
+
+        cte = (
+            q.update().where(q.c.z == 1).values(x=7).returning(q.c.z).cte("c")
+        )
+        stmt = select(p.c.s, cte.c.z).where(p.c.s == cte.c.z)
+
+        dialect = default.StrCompileDialect()
+        dialect.paramstyle = "qmark"
+        dialect.positional = True
+
+        self.assert_compile(
+            stmt,
+            "WITH c AS (UPDATE q SET x=?, y=? WHERE q.z = ? RETURNING q.z) "
+            "SELECT p.s, c.z FROM p, c WHERE p.s = c.z",
+            checkpositional=(7, None, 1),
+            dialect=dialect,
+        )
+
     def test_update_bound_ordering(self):
         """test that bound parameters between the UPDATE and FROM clauses
         order correctly in different SQL compilation scenarios.
@@ -688,7 +913,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         """
         table1 = self.tables.mytable
         table2 = self.tables.myothertable
-        sel = select([table2]).where(table2.c.otherid == 5).alias()
+        sel = select(table2).where(table2.c.otherid == 5).alias()
         upd = (
             table1.update()
             .where(table1.c.name == sel.c.othername)
@@ -736,9 +961,9 @@ class UpdateFromCompileTest(
         # against the alias, but we name the table-bound column
         # in values.   The behavior here isn't really defined
         self.assert_compile(
-            update(talias1, talias1.c.myid == 7).values(
-                {table1.c.name: "fred"}
-            ),
+            update(talias1)
+            .where(talias1.c.myid == 7)
+            .values({table1.c.name: "fred"}),
             "UPDATE mytable AS t1 "
             "SET name=:name "
             "WHERE t1.myid = :myid_1",
@@ -753,9 +978,9 @@ class UpdateFromCompileTest(
         # which is causing the "table1.c.name" param to be handled
         # as an "extra table", hence we see the full table name rendered.
         self.assert_compile(
-            update(talias1, table1.c.myid == 7).values(
-                {table1.c.name: "fred"}
-            ),
+            update(talias1)
+            .where(table1.c.myid == 7)
+            .values({table1.c.name: "fred"}),
             "UPDATE mytable AS t1 "
             "SET name=:mytable_name "
             "FROM mytable "
@@ -768,9 +993,9 @@ class UpdateFromCompileTest(
         talias1 = table1.alias("t1")
 
         self.assert_compile(
-            update(talias1, table1.c.myid == 7).values(
-                {table1.c.name: "fred"}
-            ),
+            update(talias1)
+            .where(table1.c.myid == 7)
+            .values({table1.c.name: "fred"}),
             "UPDATE mytable AS t1, mytable SET mytable.name=%s "
             "WHERE mytable.myid = %s",
             checkparams={"mytable_name": "fred", "myid_1": 7},
@@ -939,9 +1164,13 @@ class UpdateFromCompileTest(
 
         checkparams = {"email_address_1": "e1", "id_1": 7, "name": "newname"}
 
-        cols = [addresses.c.id, addresses.c.user_id, addresses.c.email_address]
-
-        subq = select(cols).where(addresses.c.id == 7).alias()
+        subq = (
+            select(
+                addresses.c.id, addresses.c.user_id, addresses.c.email_address
+            )
+            .where(addresses.c.id == 7)
+            .alias()
+        )
         self.assert_compile(
             users.update()
             .values(name="newname")
@@ -1034,10 +1263,10 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
     __backend__ = True
 
     @testing.requires.update_from
-    def test_exec_two_table(self):
+    def test_exec_two_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
-        testing.db.execute(
+        connection.execute(
             addresses.update()
             .values(email_address=users.c.name)
             .where(users.c.id == addresses.c.user_id)
@@ -1051,14 +1280,14 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "x", "ed"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
     @testing.requires.update_from
-    def test_exec_two_table_plus_alias(self):
+    def test_exec_two_table_plus_alias(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
         a1 = addresses.alias()
-        testing.db.execute(
+        connection.execute(
             addresses.update()
             .values(email_address=users.c.name)
             .where(users.c.id == a1.c.user_id)
@@ -1073,15 +1302,15 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "x", "ed"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
     @testing.requires.update_from
-    def test_exec_three_table(self):
+    def test_exec_three_table(self, connection):
         users = self.tables.users
         addresses = self.tables.addresses
         dingalings = self.tables.dingalings
 
-        testing.db.execute(
+        connection.execute(
             addresses.update()
             .values(email_address=users.c.name)
             .where(users.c.id == addresses.c.user_id)
@@ -1097,15 +1326,15 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "x", "ed@lala.com"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_exec_multitable(self):
+    @testing.requires.multi_table_update
+    def test_exec_multitable(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
         values = {addresses.c.email_address: "updated", users.c.name: "ed2"}
 
-        testing.db.execute(
+        connection.execute(
             addresses.update()
             .values(values)
             .where(users.c.id == addresses.c.user_id)
@@ -1119,18 +1348,18 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "x", "updated"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
         expected = [(7, "jack"), (8, "ed2"), (9, "fred"), (10, "chuck")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_exec_join_multitable(self):
+    @testing.requires.multi_table_update
+    def test_exec_join_multitable(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
         values = {addresses.c.email_address: "updated", users.c.name: "ed2"}
 
-        testing.db.execute(
+        connection.execute(
             update(users.join(addresses))
             .values(values)
             .where(users.c.name == "ed")
@@ -1143,18 +1372,18 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "x", "updated"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
         expected = [(7, "jack"), (8, "ed2"), (9, "fred"), (10, "chuck")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_exec_multitable_same_name(self):
+    @testing.requires.multi_table_update
+    def test_exec_multitable_same_name(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
         values = {addresses.c.name: "ad_ed2", users.c.name: "ed2"}
 
-        testing.db.execute(
+        connection.execute(
             addresses.update()
             .values(values)
             .where(users.c.id == addresses.c.user_id)
@@ -1168,18 +1397,18 @@ class UpdateFromRoundTripTest(_UpdateFromTestBase, fixtures.TablesTest):
             (4, 8, "ad_ed2", "ed@lala.com"),
             (5, 9, "x", "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
         expected = [(7, "jack"), (8, "ed2"), (9, "fred"), (10, "chuck")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    def _assert_addresses(self, addresses, expected):
+    def _assert_addresses(self, connection, addresses, expected):
         stmt = addresses.select().order_by(addresses.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)
 
-    def _assert_users(self, users, expected):
+    def _assert_users(self, connection, users, expected):
         stmt = users.select().order_by(users.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)
 
 
 class UpdateFromMultiTableUpdateDefaultsTest(
@@ -1242,13 +1471,13 @@ class UpdateFromMultiTableUpdateDefaultsTest(
             ),
         )
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_defaults_second_table(self):
+    @testing.requires.multi_table_update
+    def test_defaults_second_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
         values = {addresses.c.email_address: "updated", users.c.name: "ed2"}
 
-        ret = testing.db.execute(
+        ret = connection.execute(
             addresses.update()
             .values(values)
             .where(users.c.id == addresses.c.user_id)
@@ -1262,18 +1491,18 @@ class UpdateFromMultiTableUpdateDefaultsTest(
             (3, 8, "updated"),
             (4, 9, "fred@fred.com"),
         ]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
         expected = [(8, "ed2", "im the update"), (9, "fred", "value")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_defaults_second_table_same_name(self):
+    @testing.requires.multi_table_update
+    def test_defaults_second_table_same_name(self, connection):
         users, foobar = self.tables.users, self.tables.foobar
 
         values = {foobar.c.data: foobar.c.data + "a", users.c.name: "ed2"}
 
-        ret = testing.db.execute(
+        ret = connection.execute(
             users.update()
             .values(values)
             .where(users.c.id == foobar.c.user_id)
@@ -1290,16 +1519,16 @@ class UpdateFromMultiTableUpdateDefaultsTest(
             (3, 8, "d2a", "im the other update"),
             (4, 9, "d3", None),
         ]
-        self._assert_foobar(foobar, expected)
+        self._assert_foobar(connection, foobar, expected)
 
         expected = [(8, "ed2", "im the update"), (9, "fred", "value")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    @testing.only_on("mysql", "Multi table update")
-    def test_no_defaults_second_table(self):
+    @testing.requires.multi_table_update
+    def test_no_defaults_second_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
 
-        ret = testing.db.execute(
+        ret = connection.execute(
             addresses.update()
             .values({"email_address": users.c.name})
             .where(users.c.id == addresses.c.user_id)
@@ -1309,20 +1538,20 @@ class UpdateFromMultiTableUpdateDefaultsTest(
         eq_(ret.prefetch_cols(), [])
 
         expected = [(2, 8, "ed"), (3, 8, "ed"), (4, 9, "fred@fred.com")]
-        self._assert_addresses(addresses, expected)
+        self._assert_addresses(connection, addresses, expected)
 
         # users table not actually updated, so no onupdate
         expected = [(8, "ed", "value"), (9, "fred", "value")]
-        self._assert_users(users, expected)
+        self._assert_users(connection, users, expected)
 
-    def _assert_foobar(self, foobar, expected):
+    def _assert_foobar(self, connection, foobar, expected):
         stmt = foobar.select().order_by(foobar.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)
 
-    def _assert_addresses(self, addresses, expected):
+    def _assert_addresses(self, connection, addresses, expected):
         stmt = addresses.select().order_by(addresses.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)
 
-    def _assert_users(self, users, expected):
+    def _assert_users(self, connection, users, expected):
         stmt = users.select().order_by(users.c.id)
-        eq_(testing.db.execute(stmt).fetchall(), expected)
+        eq_(connection.execute(stmt).fetchall(), expected)

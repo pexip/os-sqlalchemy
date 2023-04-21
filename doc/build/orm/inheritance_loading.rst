@@ -74,18 +74,18 @@ statement for the above would be:
 
     query.all()
     {opensql}
-    SELECT employee.id AS employee_id,
+    SELECT
+        employee.id AS employee_id,
         engineer.id AS engineer_id,
         manager.id AS manager_id,
         employee.name AS employee_name,
         employee.type AS employee_type,
         engineer.engineer_info AS engineer_engineer_info,
         manager.manager_data AS manager_manager_data
-    FROM employee
-        LEFT OUTER JOIN engineer
-        ON employee.id = engineer.id
-        LEFT OUTER JOIN manager
-        ON employee.id = manager.id
+    FROM
+        employee
+        LEFT OUTER JOIN engineer ON employee.id = engineer.id
+        LEFT OUTER JOIN manager ON employee.id = manager.id
     []
 
 Where above, the additional tables / columns for "engineer" and "manager" are
@@ -104,7 +104,22 @@ subclasses:
     entity = with_polymorphic(Employee, [Engineer, Manager])
 
     # include columns for all mapped subclasses
-    entity = with_polymorphic(Employee, '*')
+    entity = with_polymorphic(Employee, "*")
+
+.. tip::
+
+    It's important to note that :func:`_orm.with_polymorphic` only affects the
+    **columns that are included in fetched rows**, and not the **types of
+    objects returned**. A call to ``with_polymorphic(Employee, [Manager])``
+    will refer to rows that contain all types of ``Employee`` objects,
+    including not only ``Manager`` objects, but also ``Engineer`` objects as
+    these are subclasses of ``Employee``, as well as ``Employee`` instances if
+    these are present in the database. The effect of using
+    ``with_polymorphic(Employee, [Manager])`` would only provide the behavior
+    that additional columns specific to ``Manager`` will be eagerly loaded in
+    result rows, and as described below in
+    :ref:`with_polymorphic_subclass_attributes` also be available for use
+    within the WHERE clause of the SELECT statement.
 
 Using aliasing with with_polymorphic
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -120,18 +135,15 @@ with the same name:
 
 .. sourcecode:: python+sql
 
-    engineer_employee = with_polymorphic(
-        Employee, [Engineer], aliased=True)
-    manager_employee = with_polymorphic(
-        Employee, [Manager], aliased=True)
+    engineer_employee = with_polymorphic(Employee, [Engineer], aliased=True)
+    manager_employee = with_polymorphic(Employee, [Manager], aliased=True)
 
-    q = s.query(engineer_employee, manager_employee).\
-        join(
-            manager_employee,
-            and_(
-                engineer_employee.id > manager_employee.id,
-                engineer_employee.name == manager_employee.name
-            )
+    q = s.query(engineer_employee, manager_employee).join(
+        manager_employee,
+        and_(
+            engineer_employee.id > manager_employee.id,
+            engineer_employee.name == manager_employee.name,
+        ),
     )
     q.all()
     {opensql}
@@ -180,18 +192,15 @@ is necessary:
 
 .. sourcecode:: python+sql
 
-    engineer_employee = with_polymorphic(
-        Employee, [Engineer], flat=True)
-    manager_employee = with_polymorphic(
-        Employee, [Manager], flat=True)
+    engineer_employee = with_polymorphic(Employee, [Engineer], flat=True)
+    manager_employee = with_polymorphic(Employee, [Manager], flat=True)
 
-    q = s.query(engineer_employee, manager_employee).\
-        join(
-            manager_employee,
-            and_(
-                engineer_employee.id > manager_employee.id,
-                engineer_employee.name == manager_employee.name
-            )
+    q = s.query(engineer_employee, manager_employee).join(
+        manager_employee,
+        and_(
+            engineer_employee.id > manager_employee.id,
+            engineer_employee.name == manager_employee.name,
+        ),
     )
     q.all()
     {opensql}
@@ -229,6 +238,8 @@ modern database versions now support this syntax.
     of :paramref:`.with_polymorphic` with **joined table inheritance** and when
     the :paramref:`.with_polymorphic.selectable` argument is **not** used.
 
+.. _with_polymorphic_subclass_attributes:
+
 Referring to Specific Subclass Attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -243,11 +254,36 @@ specific to ``Engineer`` as well as ``Manager`` in terms of ``eng_plus_manager``
 
     eng_plus_manager = with_polymorphic(Employee, [Engineer, Manager])
     query = session.query(eng_plus_manager).filter(
-                    or_(
-                        eng_plus_manager.Engineer.engineer_info=='x',
-                        eng_plus_manager.Manager.manager_data=='y'
-                    )
-                )
+        or_(
+            eng_plus_manager.Engineer.engineer_info == "x",
+            eng_plus_manager.Manager.manager_data == "y",
+        )
+    )
+
+A query as above would generate SQL resembling the following:
+
+.. sourcecode:: python+sql
+
+    query.all()
+    {opensql}
+    SELECT
+        employee.id AS employee_id,
+        engineer.id AS engineer_id,
+        manager.id AS manager_id,
+        employee.name AS employee_name,
+        employee.type AS employee_type,
+        engineer.engineer_info AS engineer_engineer_info,
+        manager.manager_data AS manager_manager_data
+    FROM
+        employee
+        LEFT OUTER JOIN engineer ON employee.id = engineer.id
+        LEFT OUTER JOIN manager ON employee.id = manager.id
+    WHERE
+      engineer.engineer_info=? OR
+      manager.manager_data=?
+    ['x', 'y']
+
+
 
 .. _with_polymorphic_mapper_config:
 
@@ -265,15 +301,15 @@ default.  We can add the parameter to our ``Employee`` mapping
 first introduced at :ref:`joined_inheritance`::
 
     class Employee(Base):
-        __tablename__ = 'employee'
+        __tablename__ = "employee"
         id = Column(Integer, primary_key=True)
         name = Column(String(50))
         type = Column(String(50))
 
         __mapper_args__ = {
-            'polymorphic_identity':'employee',
-            'polymorphic_on':type,
-            'with_polymorphic': '*'
+            "polymorphic_identity": "employee",
+            "polymorphic_on": type,
+            "with_polymorphic": "*",
         }
 
 Above is a common setting for :paramref:`.mapper.with_polymorphic`,
@@ -297,22 +333,17 @@ that they should individually participate in polymorphic loading by
 default using the :paramref:`.mapper.polymorphic_load` parameter::
 
     class Engineer(Employee):
-        __tablename__ = 'engineer'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "engineer"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         engineer_info = Column(String(50))
-        __mapper_args__ = {
-            'polymorphic_identity':'engineer',
-            'polymorphic_load': 'inline'
-        }
+        __mapper_args__ = {"polymorphic_identity": "engineer", "polymorphic_load": "inline"}
+
 
     class Manager(Employee):
-        __tablename__ = 'manager'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "manager"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         manager_data = Column(String(50))
-        __mapper_args__ = {
-            'polymorphic_identity':'manager',
-            'polymorphic_load': 'inline'
-        }
+        __mapper_args__ = {"polymorphic_identity": "manager", "polymorphic_load": "inline"}
 
 Setting the :paramref:`.mapper.polymorphic_load` parameter to the value
 ``"inline"`` means that the ``Engineer`` and ``Manager`` classes above
@@ -332,14 +363,9 @@ that entity, so that the entity (and its subclasses) can be referred to
 directly, rather than using an alias object.  For simple cases it might be
 considered to be more succinct::
 
-    session.query(Employee).\
-        with_polymorphic([Engineer, Manager]).\
-        filter(
-            or_(
-                Engineer.engineer_info=='w',
-                Manager.manager_data=='q'
-            )
-        )
+    session.query(Employee).with_polymorphic([Engineer, Manager]).filter(
+        or_(Engineer.engineer_info == "w", Manager.manager_data == "q")
+    )
 
 The :meth:`_query.Query.with_polymorphic` method has a more complicated job
 than the :func:`_orm.with_polymorphic` function, as it needs to correctly
@@ -403,36 +429,34 @@ by default by specifying the :paramref:`.mapper.polymorphic_load` parameter,
 using the value ``"selectin"`` on a per-subclass basis::
 
     class Employee(Base):
-        __tablename__ = 'employee'
+        __tablename__ = "employee"
         id = Column(Integer, primary_key=True)
         name = Column(String(50))
         type = Column(String(50))
 
-        __mapper_args__ = {
-            'polymorphic_identity': 'employee',
-            'polymorphic_on': type
-        }
+        __mapper_args__ = {"polymorphic_identity": "employee", "polymorphic_on": type}
+
 
     class Engineer(Employee):
-        __tablename__ = 'engineer'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "engineer"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         engineer_name = Column(String(30))
 
         __mapper_args__ = {
-            'polymorphic_load': 'selectin',
-            'polymorphic_identity': 'engineer',
+            "polymorphic_load": "selectin",
+            "polymorphic_identity": "engineer",
         }
 
+
     class Manager(Employee):
-        __tablename__ = 'manager'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "manager"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         manager_name = Column(String(30))
 
         __mapper_args__ = {
-            'polymorphic_load': 'selectin',
-            'polymorphic_identity': 'manager',
+            "polymorphic_load": "selectin",
+            "polymorphic_identity": "manager",
         }
-
 
 Unlike when using :func:`_orm.with_polymorphic`, when using the
 :func:`_orm.selectin_polymorphic` style of loading, we do **not** have the
@@ -449,8 +473,7 @@ loading via the :func:`_orm.joinedload` function::
     from sqlalchemy.orm import selectin_polymorphic
 
     query = session.query(Employee).options(
-        selectin_polymorphic(Employee, [Manager, Engineer]),
-        joinedload(Manager.paperwork)
+        selectin_polymorphic(Employee, [Manager, Engineer]), joinedload(Manager.paperwork)
     )
 
 Using the query above, we get three SELECT statements emitted, however
@@ -499,24 +522,22 @@ a load of ``Manager`` also fully loads ``VicePresident`` subtypes at the same ti
 
     # use "Employee" example from the enclosing section
 
+
     class Manager(Employee):
-        __tablename__ = 'manager'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "manager"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         manager_name = Column(String(30))
 
         __mapper_args__ = {
-            'polymorphic_load': 'selectin',
-            'polymorphic_identity': 'manager',
+            "polymorphic_load": "selectin",
+            "polymorphic_identity": "manager",
         }
+
 
     class VicePresident(Manager):
         vp_info = Column(String(30))
 
-        __mapper_args__ = {
-            "polymorphic_load": "inline",
-            "polymorphic_identity": "vp"
-        }
-
+        __mapper_args__ = {"polymorphic_load": "inline", "polymorphic_identity": "vp"}
 
 Above, we add a ``vp_info`` column to the ``manager`` table, local to the
 ``VicePresident`` subclass.   This subclass is linked to the polymorphic
@@ -550,8 +571,7 @@ set up, we could get the same result as follows::
 
     manager_poly = with_polymorphic(Manager, [VicePresident])
 
-    s.query(Employee).options(
-        selectin_polymorphic(Employee, [manager_poly])).all()
+    s.query(Employee).options(selectin_polymorphic(Employee, [manager_poly])).all()
 
 .. _inheritance_of_type:
 
@@ -577,33 +597,35 @@ with a ``Company`` object. We'll add a ``company_id`` column to the
 .. sourcecode:: python
 
     class Company(Base):
-        __tablename__ = 'company'
+        __tablename__ = "company"
         id = Column(Integer, primary_key=True)
         name = Column(String(50))
-        employees = relationship("Employee",
-                        backref='company')
+        employees = relationship("Employee", backref="company")
+
 
     class Employee(Base):
-        __tablename__ = 'employee'
+        __tablename__ = "employee"
         id = Column(Integer, primary_key=True)
         type = Column(String(20))
-        company_id = Column(Integer, ForeignKey('company.id'))
+        company_id = Column(Integer, ForeignKey("company.id"))
         __mapper_args__ = {
-            'polymorphic_on':type,
-            'polymorphic_identity':'employee',
+            "polymorphic_on": type,
+            "polymorphic_identity": "employee",
         }
 
+
     class Engineer(Employee):
-        __tablename__ = 'engineer'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "engineer"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         engineer_info = Column(String(50))
-        __mapper_args__ = {'polymorphic_identity':'engineer'}
+        __mapper_args__ = {"polymorphic_identity": "engineer"}
+
 
     class Manager(Employee):
-        __tablename__ = 'manager'
-        id = Column(Integer, ForeignKey('employee.id'), primary_key=True)
+        __tablename__ = "manager"
+        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
         manager_data = Column(String(50))
-        __mapper_args__ = {'polymorphic_identity':'manager'}
+        __mapper_args__ = {"polymorphic_identity": "manager"}
 
 When querying from ``Company`` onto the ``Employee`` relationship, the
 :meth:`_query.Query.join` method as well as operators like :meth:`.PropComparator.any`
@@ -614,34 +636,29 @@ against the ``Engineer`` class, we can tell those methods to join or subquery
 against the set of columns representing the subclass using the
 :meth:`~.orm.interfaces.PropComparator.of_type` operator::
 
-    session.query(Company).\
-        join(Company.employees.of_type(Engineer)).\
-        filter(Engineer.engineer_info=='someinfo')
+    session.query(Company).join(Company.employees.of_type(Engineer)).filter(
+        Engineer.engineer_info == "someinfo"
+    )
 
 Similarly, to join from ``Company`` to the polymorphic entity that includes both
 ``Engineer`` and ``Manager`` columns::
 
-    manager_and_engineer = with_polymorphic(
-                                Employee, [Manager, Engineer])
+    manager_and_engineer = with_polymorphic(Employee, [Manager, Engineer])
 
-    session.query(Company).\
-        join(Company.employees.of_type(manager_and_engineer)).\
-        filter(
-            or_(
-                manager_and_engineer.Engineer.engineer_info == 'someinfo',
-                manager_and_engineer.Manager.manager_data == 'somedata'
-            )
+    session.query(Company).join(Company.employees.of_type(manager_and_engineer)).filter(
+        or_(
+            manager_and_engineer.Engineer.engineer_info == "someinfo",
+            manager_and_engineer.Manager.manager_data == "somedata",
         )
+    )
 
 The :meth:`.PropComparator.any` and :meth:`.PropComparator.has` operators also
 can be used with :func:`~sqlalchemy.orm.interfaces.PropComparator.of_type`,
 such as when the embedded criterion is in terms of a subclass::
 
-    session.query(Company).\
-            filter(
-                Company.employees.of_type(Engineer).
-                    any(Engineer.engineer_info=='someinfo')
-                ).all()
+    session.query(Company).filter(
+        Company.employees.of_type(Engineer).any(Engineer.engineer_info == "someinfo")
+    ).all()
 
 .. _eagerloading_polymorphic_subtypes:
 
@@ -666,16 +683,11 @@ can be used to combine eager loading and :func:`_orm.with_polymorphic`,
 so that all sub-attributes of all referenced subtypes
 can be loaded::
 
-    manager_and_engineer = with_polymorphic(
-                                Employee, [Manager, Engineer],
-                                flat=True)
+    manager_and_engineer = with_polymorphic(Employee, [Manager, Engineer], flat=True)
 
-    session.query(Company).\
-        options(
-            joinedload(
-                Company.employees.of_type(manager_and_engineer)
-            )
-        )
+    session.query(Company).options(
+        joinedload(Company.employees.of_type(manager_and_engineer))
+    )
 
 .. note::
 
@@ -824,9 +836,7 @@ In our example from :ref:`single_inheritance`, the ``Manager`` mapping for examp
     class Manager(Employee):
         manager_data = Column(String(50))
 
-        __mapper_args__ = {
-            'polymorphic_identity':'manager'
-        }
+        __mapper_args__ = {"polymorphic_identity": "manager"}
 
 Above, there would be no ``Employee.manager_data``
 attribute, even though the ``employee`` table has a ``manager_data`` column.
@@ -872,13 +882,10 @@ inheritance in the case of single inheritance; it allows both for eager loading
 of subclass attributes as well as specification of subclasses in a query,
 just without the overhead of using OUTER JOIN::
 
-    employee_poly = with_polymorphic(Employee, '*')
+    employee_poly = with_polymorphic(Employee, "*")
 
     q = session.query(employee_poly).filter(
-        or_(
-            employee_poly.name == 'a',
-            employee_poly.Manager.manager_data == 'b'
-        )
+        or_(employee_poly.name == "a", employee_poly.Manager.manager_data == "b")
     )
 
 Above, our query remains against a single table however we can refer to the

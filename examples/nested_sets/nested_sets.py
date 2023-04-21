@@ -1,6 +1,6 @@
 """Celko's "Nested Sets" Tree Structure.
 
-http://www.intelligententerprise.com/001020/celko.jhtml
+https://www.intelligententerprise.com/001020/celko.jhtml
 
 """
 
@@ -46,7 +46,7 @@ def before_insert(mapper, connection, instance):
     else:
         personnel = mapper.mapped_table
         right_most_sibling = connection.scalar(
-            select([personnel.c.rgt]).where(
+            select(personnel.c.rgt).where(
                 personnel.c.emp == instance.parent.emp
             )
         )

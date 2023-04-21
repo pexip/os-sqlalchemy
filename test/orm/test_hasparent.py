@@ -1,17 +1,14 @@
 """test the current state of the hasparent() flag."""
-
-
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import testing
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
-from sqlalchemy.orm import Session
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.testing.util import gc_collect
@@ -27,6 +24,10 @@ class ParentRemovalTest(fixtures.MappedTest):
     """
 
     run_inserts = None
+
+    # trying to push GC to do a better job
+    run_setup_classes = "each"
+    run_setup_mappers = "each"
 
     @classmethod
     def define_tables(cls, metadata):
@@ -63,8 +64,10 @@ class ParentRemovalTest(fixtures.MappedTest):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(cls.classes.Address, cls.tables.addresses)
-        mapper(
+        cls.mapper_registry.map_imperatively(
+            cls.classes.Address, cls.tables.addresses
+        )
+        cls.mapper_registry.map_imperatively(
             cls.classes.User,
             cls.tables.users,
             properties={
@@ -83,7 +86,7 @@ class ParentRemovalTest(fixtures.MappedTest):
     def _fixture(self):
         User, Address = self.classes.User, self.classes.Address
 
-        s = Session()
+        s = fixture_session()
 
         u1 = User()
         a1 = Address()
@@ -173,11 +176,23 @@ class ParentRemovalTest(fixtures.MappedTest):
         """
         User = self.classes.User
         s, u1, a1 = self._fixture()
+        gc_collect()
 
         u2 = User(addresses=[a1])  # noqa
 
         s.expire(a1)
         u1.addresses.remove(a1)
+
+        u2_is = u2._sa_instance_state
+        del u2
+
+        for i in range(5):
+            gc_collect()
+        # heisenberg the GC a little bit, since #7823 caused a lot more
+        # GC when mappings are set up, larger test suite started failing
+        # on this being gc'ed
+        o = u2_is.obj()
+        assert o is None
 
         # controversy here.  The action is
         # to expire one object, not the other, and remove;
@@ -192,13 +207,23 @@ class ParentRemovalTest(fixtures.MappedTest):
     def test_stale_state_negative(self):
         User = self.classes.User
         s, u1, a1 = self._fixture()
+        gc_collect()
 
         u2 = User(addresses=[a1])
         s.add(u2)
         s.flush()
         s._expunge_states([attributes.instance_state(u2)])
+
+        u2_is = u2._sa_instance_state
         del u2
-        gc_collect()
+
+        for i in range(5):
+            gc_collect()
+        # heisenberg the GC a little bit, since #7823 caused a lot more
+        # GC when mappings are set up, larger test suite started failing
+        # on this being gc'ed
+        o = u2_is.obj()
+        assert o is None
 
         assert_raises_message(
             orm_exc.StaleDataError,

@@ -1,0 +1,6 @@
+Tests: unittests
+Depends:
+ python3-all,
+ python3-greenlet,
+ python3-pytest,
+Restrictions: allow-stderr

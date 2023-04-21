@@ -7,11 +7,10 @@ from sqlalchemy import Integer
 from sqlalchemy import LargeBinary
 from sqlalchemy import String
 from sqlalchemy.orm import backref
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import deferred
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -136,20 +135,22 @@ class InheritTest(fixtures.MappedTest):
             pass
 
     def test_one(self):
-        product_mapper = mapper(
+        product_mapper = self.mapper_registry.map_imperatively(
             Product,
             products_table,
             polymorphic_on=products_table.c.product_type,
             polymorphic_identity="product",
         )
 
-        mapper(Detail, inherits=product_mapper, polymorphic_identity="detail")
+        self.mapper_registry.map_imperatively(
+            Detail, inherits=product_mapper, polymorphic_identity="detail"
+        )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Assembly, inherits=product_mapper, polymorphic_identity="assembly"
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             SpecLine,
             specification_table,
             properties=dict(
@@ -174,7 +175,7 @@ class InheritTest(fixtures.MappedTest):
             ),
         )
 
-        session = create_session()
+        session = fixture_session()
 
         a1 = Assembly(name="a1")
 
@@ -199,16 +200,18 @@ class InheritTest(fixtures.MappedTest):
         )
 
     def test_two(self):
-        product_mapper = mapper(
+        product_mapper = self.mapper_registry.map_imperatively(
             Product,
             products_table,
             polymorphic_on=products_table.c.product_type,
             polymorphic_identity="product",
         )
 
-        mapper(Detail, inherits=product_mapper, polymorphic_identity="detail")
+        self.mapper_registry.map_imperatively(
+            Detail, inherits=product_mapper, polymorphic_identity="detail"
+        )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             SpecLine,
             specification_table,
             properties=dict(
@@ -223,7 +226,7 @@ class InheritTest(fixtures.MappedTest):
             ),
         )
 
-        session = create_session()
+        session = fixture_session()
 
         s = SpecLine(follower=Product(name="p1"))
         s2 = SpecLine(follower=Detail(name="d1"))
@@ -241,18 +244,20 @@ class InheritTest(fixtures.MappedTest):
         )
 
     def test_three(self):
-        product_mapper = mapper(
+        product_mapper = self.mapper_registry.map_imperatively(
             Product,
             products_table,
             polymorphic_on=products_table.c.product_type,
             polymorphic_identity="product",
         )
-        mapper(Detail, inherits=product_mapper, polymorphic_identity="detail")
-        mapper(
+        self.mapper_registry.map_imperatively(
+            Detail, inherits=product_mapper, polymorphic_identity="detail"
+        )
+        self.mapper_registry.map_imperatively(
             Assembly, inherits=product_mapper, polymorphic_identity="assembly"
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             SpecLine,
             specification_table,
             properties=dict(
@@ -279,7 +284,7 @@ class InheritTest(fixtures.MappedTest):
             ),
         )
 
-        document_mapper = mapper(
+        document_mapper = self.mapper_registry.map_imperatively(
             Document,
             documents_table,
             polymorphic_on=documents_table.c.document_type,
@@ -294,13 +299,13 @@ class InheritTest(fixtures.MappedTest):
                 ),
             ),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             RasterDocument,
             inherits=document_mapper,
             polymorphic_identity="raster_document",
         )
 
-        session = create_session()
+        session = fixture_session()
 
         a1 = Assembly(name="a1")
         a1.specification.append(SpecLine(follower=Detail(name="d1")))
@@ -327,18 +332,20 @@ class InheritTest(fixtures.MappedTest):
         corresponding to an inheriting mapper but not the base mapper,
         is created."""
 
-        product_mapper = mapper(
+        product_mapper = self.mapper_registry.map_imperatively(
             Product,
             products_table,
             polymorphic_on=products_table.c.product_type,
             polymorphic_identity="product",
         )
-        mapper(Detail, inherits=product_mapper, polymorphic_identity="detail")
-        mapper(
+        self.mapper_registry.map_imperatively(
+            Detail, inherits=product_mapper, polymorphic_identity="detail"
+        )
+        self.mapper_registry.map_imperatively(
             Assembly, inherits=product_mapper, polymorphic_identity="assembly"
         )
 
-        document_mapper = mapper(
+        document_mapper = self.mapper_registry.map_imperatively(
             Document,
             documents_table,
             polymorphic_on=documents_table.c.document_type,
@@ -353,13 +360,13 @@ class InheritTest(fixtures.MappedTest):
                 ),
             ),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             RasterDocument,
             inherits=document_mapper,
             polymorphic_identity="raster_document",
         )
 
-        session = create_session()
+        session = fixture_session()
 
         a1 = Assembly(name="a1")
         a1.documents.append(RasterDocument("doc2"))
@@ -387,7 +394,7 @@ class InheritTest(fixtures.MappedTest):
     def test_five(self):
         """tests the late compilation of mappers"""
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             SpecLine,
             specification_table,
             properties=dict(
@@ -412,7 +419,7 @@ class InheritTest(fixtures.MappedTest):
             ),
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Product,
             products_table,
             polymorphic_on=products_table.c.product_type,
@@ -427,9 +434,11 @@ class InheritTest(fixtures.MappedTest):
             },
         )
 
-        mapper(Detail, inherits=Product, polymorphic_identity="detail")
+        self.mapper_registry.map_imperatively(
+            Detail, inherits=Product, polymorphic_identity="detail"
+        )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Document,
             documents_table,
             polymorphic_on=documents_table.c.document_type,
@@ -440,15 +449,17 @@ class InheritTest(fixtures.MappedTest):
             ),
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             RasterDocument,
             inherits=Document,
             polymorphic_identity="raster_document",
         )
 
-        mapper(Assembly, inherits=Product, polymorphic_identity="assembly")
+        self.mapper_registry.map_imperatively(
+            Assembly, inherits=Product, polymorphic_identity="assembly"
+        )
 
-        session = create_session()
+        session = fixture_session()
 
         a1 = Assembly(name="a1")
         a1.specification.append(SpecLine(follower=Detail(name="d1")))

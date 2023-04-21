@@ -1,15 +1,20 @@
 # postgresql/ext.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2023 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
 
 from .array import ARRAY
+from ... import util
+from ...sql import coercions
 from ...sql import elements
 from ...sql import expression
 from ...sql import functions
+from ...sql import roles
+from ...sql import schema
 from ...sql.schema import ColumnCollectionConstraint
+from ...sql.visitors import InternalTraversal
 
 
 class aggregate_order_by(expression.ColumnElement):
@@ -19,7 +24,7 @@ class aggregate_order_by(expression.ColumnElement):
 
         from sqlalchemy.dialects.postgresql import aggregate_order_by
         expr = func.array_agg(aggregate_order_by(table.c.a, table.c.b.desc()))
-        stmt = select([expr])
+        stmt = select(expr)
 
     would represent the expression::
 
@@ -31,7 +36,7 @@ class aggregate_order_by(expression.ColumnElement):
             table.c.a,
             aggregate_order_by(literal_column("','"), table.c.a)
         )
-        stmt = select([expr])
+        stmt = select(expr)
 
     Would represent::
 
@@ -49,17 +54,27 @@ class aggregate_order_by(expression.ColumnElement):
 
     __visit_name__ = "aggregate_order_by"
 
+    stringify_dialect = "postgresql"
+    _traverse_internals = [
+        ("target", InternalTraversal.dp_clauseelement),
+        ("type", InternalTraversal.dp_type),
+        ("order_by", InternalTraversal.dp_clauseelement),
+    ]
+
     def __init__(self, target, *order_by):
-        self.target = elements._literal_as_binds(target)
+        self.target = coercions.expect(roles.ExpressionElementRole, target)
+        self.type = self.target.type
 
         _lob = len(order_by)
         if _lob == 0:
             raise TypeError("at least one ORDER BY element is required")
         elif _lob == 1:
-            self.order_by = elements._literal_as_binds(order_by[0])
+            self.order_by = coercions.expect(
+                roles.ExpressionElementRole, order_by[0]
+            )
         else:
             self.order_by = elements.ClauseList(
-                *order_by, _literal_as_text=elements._literal_as_binds
+                *order_by, _literal_as_text_role=roles.ExpressionElementRole
             )
 
     def self_group(self, against=None):
@@ -80,16 +95,19 @@ class aggregate_order_by(expression.ColumnElement):
 class ExcludeConstraint(ColumnCollectionConstraint):
     """A table-level EXCLUDE constraint.
 
-    Defines an EXCLUDE constraint as described in the `postgres
+    Defines an EXCLUDE constraint as described in the `PostgreSQL
     documentation`__.
 
-    __ http://www.postgresql.org/docs/9.0/static/sql-createtable.html#SQL-CREATETABLE-EXCLUDE
+    __ https://www.postgresql.org/docs/current/static/sql-createtable.html#SQL-CREATETABLE-EXCLUDE
 
     """  # noqa
 
     __visit_name__ = "exclude_constraint"
 
     where = None
+    inherit_cache = False
+
+    create_drop_stringify_dialect = "postgresql"
 
     @elements._document_text_coercion(
         "where",
@@ -185,7 +203,10 @@ class ExcludeConstraint(ColumnCollectionConstraint):
         expressions, operators = zip(*elements)
 
         for (expr, column, strname, add_element), operator in zip(
-            self._extract_col_expression_collection(expressions), operators
+            coercions.expect_col_expression_collection(
+                roles.DDLConstraintColumnRole, expressions
+            ),
+            operators,
         ):
             if add_element is not None:
                 columns.append(add_element)
@@ -195,8 +216,6 @@ class ExcludeConstraint(ColumnCollectionConstraint):
             if name is not None:
                 # backwards compat
                 self.operators[name] = operator
-
-            expr = expression._literal_as_column(expr)
 
             render_exprs.append((expr, name, operator))
 
@@ -212,14 +231,32 @@ class ExcludeConstraint(ColumnCollectionConstraint):
         self.using = kw.get("using", "gist")
         where = kw.get("where")
         if where is not None:
-            self.where = expression._literal_as_text(
-                where, allow_coercion_to_text=True
-            )
+            self.where = coercions.expect(roles.StatementOptionRole, where)
 
         self.ops = kw.get("ops", {})
 
-    def copy(self, **kw):
-        elements = [(col, self.operators[col]) for col in self.columns.keys()]
+    def _set_parent(self, table, **kw):
+        super(ExcludeConstraint, self)._set_parent(table)
+
+        self._render_exprs = [
+            (
+                expr if isinstance(expr, elements.ClauseElement) else colexpr,
+                name,
+                operator,
+            )
+            for (expr, name, operator), colexpr in util.zip_longest(
+                self._render_exprs, self.columns
+            )
+        ]
+
+    def _copy(self, target_table=None, **kw):
+        elements = [
+            (
+                schema._copy_expression(expr, self.parent, target_table),
+                self.operators[expr.name],
+            )
+            for expr in self.columns
+        ]
         c = self.__class__(
             *elements,
             name=self.name,

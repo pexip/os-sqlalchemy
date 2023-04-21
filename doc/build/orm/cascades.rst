@@ -22,7 +22,7 @@ Cascade behavior is configured using the
 :func:`~sqlalchemy.orm.relationship`::
 
     class Order(Base):
-        __tablename__ = 'order'
+        __tablename__ = "order"
 
         items = relationship("Item", cascade="all, delete-orphan")
         customer = relationship("User", cascade="save-update")
@@ -32,11 +32,11 @@ To set cascades on a backref, the same flag can be used with the
 its arguments back into :func:`~sqlalchemy.orm.relationship`::
 
     class Item(Base):
-        __tablename__ = 'item'
+        __tablename__ = "item"
 
-        order = relationship("Order",
-                        backref=backref("items", cascade="all, delete-orphan")
-                    )
+        order = relationship(
+            "Order", backref=backref("items", cascade="all, delete-orphan")
+        )
 
 .. sidebar:: The Origins of Cascade
 
@@ -56,6 +56,13 @@ is a synonym for ``save-update, merge, refresh-expire, expunge, delete``,
 and using it in conjunction with ``delete-orphan`` indicates that the child
 object should follow along with its parent in all cases, and be deleted once
 it is no longer associated with that parent.
+
+.. warning:: The ``all`` cascade option implies the
+   :ref:`cascade_refresh_expire`
+   cascade setting which may not be desirable when using the
+   :ref:`asyncio_toplevel` extension, as it will expire related objects
+   more aggressively than is typically appropriate in an explicit IO context.
+   See the notes at :ref:`asyncio_orm_avoid_lazyloads` for further background.
 
 The list of available values which can be specified for
 the :paramref:`_orm.relationship.cascade` parameter are described in the following subsections.
@@ -89,9 +96,9 @@ object, ``address3`` to the ``user1.addresses`` collection, it
 becomes part of the state of that :class:`.Session`::
 
     >>> address3 = Address()
-    >>> user1.append(address3)
+    >>> user1.addresses.append(address3)
     >>> address3 in sess
-    >>> True
+    True
 
 A ``save-update`` cascade can exhibit surprising behavior when removing an item from
 a collection or de-associating an object from a scalar attribute. In some cases, the
@@ -102,10 +109,10 @@ and added to another::
 
     >>> user1 = sess1.query(User).filter_by(id=1).first()
     >>> address1 = user1.addresses[0]
-    >>> sess1.close()   # user1, address1 no longer associated with sess1
+    >>> sess1.close()  # user1, address1 no longer associated with sess1
     >>> user1.addresses.remove(address1)  # address1 no longer associated with user1
     >>> sess2 = Session()
-    >>> sess2.add(user1)   # ... but it still gets added to the new session,
+    >>> sess2.add(user1)  # ... but it still gets added to the new session,
     >>> address1 in sess2  # because it's still "pending" for flush
     True
 
@@ -219,23 +226,27 @@ The following example adapts that of :ref:`relationships_many_to_many` to
 illustrate the ``cascade="all, delete"`` setting on **one** side of the
 association::
 
-    association_table = Table('association', Base.metadata,
-        Column('left_id', Integer, ForeignKey('left.id')),
-        Column('right_id', Integer, ForeignKey('right.id'))
+    association_table = Table(
+        "association",
+        Base.metadata,
+        Column("left_id", Integer, ForeignKey("left.id")),
+        Column("right_id", Integer, ForeignKey("right.id")),
     )
 
+
     class Parent(Base):
-        __tablename__ = 'left'
+        __tablename__ = "left"
         id = Column(Integer, primary_key=True)
         children = relationship(
             "Child",
             secondary=association_table,
             back_populates="parents",
-            cascade="all, delete"
+            cascade="all, delete",
         )
 
+
     class Child(Base):
-        __tablename__ = 'right'
+        __tablename__ = "right"
         id = Column(Integer, primary_key=True)
         parents = relationship(
             "Parent",
@@ -255,7 +266,7 @@ rules it will also delete all related ``Child`` rows.
     relationships, then the cascade action would continue cascading through all
     ``Parent`` and ``Child`` objects, loading each ``children`` and ``parents``
     collection encountered and deleting everything that's connected.   It is
-    typically not desireable for "delete" cascade to be configured
+    typically not desirable for "delete" cascade to be configured
     bidirectionally.
 
 .. seealso::
@@ -285,7 +296,7 @@ level constraints will handle the task of actually modifying the data in the
 database, the ORM will still be able to appropriately track the state of
 locally present objects that may be affected.
 
-There is then an additional option on :func:`_orm.relationship` which which
+There is then an additional option on :func:`_orm.relationship` which
 indicates the degree to which the ORM should try to run DELETE/UPDATE
 operations on related rows itself, vs. how much it should rely upon expecting
 the database-side FOREIGN KEY constraint cascade to handle the task; this is
@@ -298,18 +309,20 @@ on the relevant ``FOREIGN KEY`` constraint as well::
 
 
     class Parent(Base):
-        __tablename__ = 'parent'
+        __tablename__ = "parent"
         id = Column(Integer, primary_key=True)
         children = relationship(
-            "Child", back_populates="parent",
+            "Child",
+            back_populates="parent",
             cascade="all, delete",
-            passive_deletes=True
+            passive_deletes=True,
         )
 
+
     class Child(Base):
-        __tablename__ = 'child'
+        __tablename__ = "child"
         id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer, ForeignKey('parent.id', ondelete="CASCADE"))
+        parent_id = Column(Integer, ForeignKey("parent.id", ondelete="CASCADE"))
         parent = relationship("Parent", back_populates="children")
 
 The behavior of the above configuration when a parent row is deleted
@@ -448,13 +461,16 @@ on the parent->child side of the relationship, and we can then configure
 ``passive_deletes=True`` on the **other** side of the bidirectional
 relationship as illustrated below::
 
-    association_table = Table('association', Base.metadata,
-        Column('left_id', Integer, ForeignKey('left.id', ondelete="CASCADE")),
-        Column('right_id', Integer, ForeignKey('right.id', ondelete="CASCADE"))
+    association_table = Table(
+        "association",
+        Base.metadata,
+        Column("left_id", Integer, ForeignKey("left.id", ondelete="CASCADE")),
+        Column("right_id", Integer, ForeignKey("right.id", ondelete="CASCADE")),
     )
 
+
     class Parent(Base):
-        __tablename__ = 'left'
+        __tablename__ = "left"
         id = Column(Integer, primary_key=True)
         children = relationship(
             "Child",
@@ -463,14 +479,15 @@ relationship as illustrated below::
             cascade="all, delete",
         )
 
+
     class Child(Base):
-        __tablename__ = 'right'
+        __tablename__ = "right"
         id = Column(Integer, primary_key=True)
         parents = relationship(
             "Parent",
             secondary=association_table,
             back_populates="children",
-            passive_deletes=True
+            passive_deletes=True,
         )
 
 Using the above configuration, the deletion of a ``Parent`` object proceeds
@@ -553,18 +570,27 @@ expunge
 from the :class:`.Session` using :meth:`.Session.expunge`, the
 operation should be propagated down to referred objects.
 
+.. _back_populates_cascade:
+
 .. _backref_cascade:
 
 Controlling Cascade on Backrefs
 -------------------------------
 
-The :ref:`cascade_save_update` cascade by default takes place on attribute change events
-emitted from backrefs.  This is probably a confusing statement more
-easily described through demonstration; it means that, given a mapping such as this::
+.. note:: This section applies to a behavior that is removed in SQLAlchemy 2.0.
+   By setting the :paramref:`_orm.Session.future` flag on a given
+   :class:`_orm.Session`, the 2.0 behavior will be achieved which is
+   essentially that the :paramref:`_orm.relationship.cascade_backrefs` flag is
+   ignored.   See the section :ref:`change_5150` for notes.
 
-    mapper(Order, order_table, properties={
-        'items' : relationship(Item, backref='order')
-    })
+In :term:`1.x style` ORM usage, the :ref:`cascade_save_update` cascade by
+default takes place on attribute change events emitted from backrefs.  This is
+probably a confusing statement more easily described through demonstration; it
+means that, given a mapping such as this::
+
+    mapper_registry.map_imperatively(
+        Order, order_table, properties={"items": relationship(Item, backref="order")}
+    )
 
 If an ``Order`` is already in the session, and is assigned to the ``order``
 attribute of an ``Item``, the backref appends the ``Item`` to the ``items``
@@ -585,10 +611,11 @@ place::
 
 This behavior can be disabled using the :paramref:`_orm.relationship.cascade_backrefs` flag::
 
-    mapper(Order, order_table, properties={
-        'items' : relationship(Item, backref='order',
-                                    cascade_backrefs=False)
-    })
+    mapper_registry.map_imperatively(
+        Order,
+        order_table,
+        properties={"items": relationship(Item, backref="order", cascade_backrefs=False)},
+    )
 
 So above, the assignment of ``i1.order = o1`` will append ``i1`` to the ``items``
 collection of ``o1``, but will not add ``i1`` to the session.   You can, of
@@ -596,3 +623,122 @@ course, :meth:`~.Session.add` ``i1`` to the session at a later point.   This
 option may be helpful for situations where an object needs to be kept out of a
 session until it's construction is completed, but still needs to be given
 associations to objects which are already persistent in the target session.
+
+When relationships are created by the :paramref:`_orm.relationship.backref`
+parameter on :func:`_orm.relationship`, the :paramref:`_orm.cascade_backrefs`
+parameter may be set to ``False`` on the backref side by using the
+:func:`_orm.backref` function instead of a string. For example, the above relationship
+could be declared::
+
+    mapper_registry.map_imperatively(
+        Order,
+        order_table,
+        properties={
+            "items": relationship(
+                Item,
+                backref=backref("order", cascade_backrefs=False),
+                cascade_backrefs=False,
+            )
+        },
+    )
+
+This sets the ``cascade_backrefs=False`` behavior on both relationships.
+
+.. _session_deleting_from_collections:
+
+Notes on Delete - Deleting Objects Referenced from Collections and Scalar Relationships
+----------------------------------------------------------------------------------------
+
+The ORM in general never modifies the contents of a collection or scalar
+relationship during the flush process.  This means, if your class has a
+:func:`_orm.relationship` that refers to a collection of objects, or a reference
+to a single object such as many-to-one, the contents of this attribute will
+not be modified when the flush process occurs.  Instead, it is expected
+that the :class:`.Session` would eventually be expired, either through the expire-on-commit behavior of
+:meth:`.Session.commit` or through explicit use of :meth:`.Session.expire`.
+At that point, any referenced object or collection associated with that
+:class:`.Session` will be cleared and will re-load itself upon next access.
+
+A common confusion that arises regarding this behavior involves the use of the
+:meth:`~.Session.delete` method.   When :meth:`.Session.delete` is invoked upon
+an object and the :class:`.Session` is flushed, the row is deleted from the
+database.  Rows that refer to the target row via  foreign key, assuming they
+are tracked using a :func:`_orm.relationship` between the two mapped object types,
+will also see their foreign key attributes UPDATED to null, or if delete
+cascade is set up, the related rows will be deleted as well. However, even
+though rows related to the deleted object might be themselves modified as well,
+**no changes occur to relationship-bound collections or object references on
+the objects** involved in the operation within the scope of the flush
+itself.   This means if the object was a
+member of a related collection, it will still be present on the Python side
+until that collection is expired.  Similarly, if the object were
+referenced via many-to-one or one-to-one from another object, that reference
+will remain present on that object until the object is expired as well.
+
+Below, we illustrate that after an ``Address`` object is marked
+for deletion, it's still present in the collection associated with the
+parent ``User``, even after a flush::
+
+    >>> address = user.addresses[1]
+    >>> session.delete(address)
+    >>> session.flush()
+    >>> address in user.addresses
+    True
+
+When the above session is committed, all attributes are expired.  The next
+access of ``user.addresses`` will re-load the collection, revealing the
+desired state::
+
+    >>> session.commit()
+    >>> address in user.addresses
+    False
+
+There is a recipe for intercepting :meth:`.Session.delete` and invoking this
+expiration automatically; see `ExpireRelationshipOnFKChange <https://www.sqlalchemy.org/trac/wiki/UsageRecipes/ExpireRelationshipOnFKChange>`_ for this.  However, the usual practice of
+deleting items within collections is to forego the usage of
+:meth:`~.Session.delete` directly, and instead use cascade behavior to
+automatically invoke the deletion as a result of removing the object from the
+parent collection.  The ``delete-orphan`` cascade accomplishes this, as
+illustrated in the example below::
+
+    class User(Base):
+        __tablename__ = "user"
+
+        # ...
+
+        addresses = relationship("Address", cascade="all, delete-orphan")
+
+
+    # ...
+
+    del user.addresses[1]
+    session.flush()
+
+Where above, upon removing the ``Address`` object from the ``User.addresses``
+collection, the ``delete-orphan`` cascade has the effect of marking the ``Address``
+object for deletion in the same way as passing it to :meth:`~.Session.delete`.
+
+The ``delete-orphan`` cascade can also be applied to a many-to-one
+or one-to-one relationship, so that when an object is de-associated from its
+parent, it is also automatically marked for deletion.   Using ``delete-orphan``
+cascade on a many-to-one or one-to-one requires an additional flag
+:paramref:`_orm.relationship.single_parent` which invokes an assertion
+that this related object is not to shared with any other parent simultaneously::
+
+    class User(Base):
+        # ...
+
+        preference = relationship(
+            "Preference", cascade="all, delete-orphan", single_parent=True
+        )
+
+Above, if a hypothetical ``Preference`` object is removed from a ``User``,
+it will be deleted on flush::
+
+    some_user.preference = None
+    session.flush()  # will delete the Preference object
+
+.. seealso::
+
+    :ref:`unitofwork_cascades` for detail on cascades.
+

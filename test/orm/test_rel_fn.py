@@ -17,16 +17,18 @@ from sqlalchemy.orm import remote
 from sqlalchemy.orm.interfaces import MANYTOONE
 from sqlalchemy.orm.interfaces import ONETOMANY
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
+from sqlalchemy.testing.assertions import expect_raises_message
 
 
 class _JoinFixtures(object):
     @classmethod
-    def setup_class(cls):
+    def setup_test_class(cls):
         m = MetaData()
         cls.left = Table(
             "lft",
@@ -470,7 +472,7 @@ class _JoinFixtures(object):
             self.left,
             self.right,
             primaryjoin=self.left.c.id == func.foo(self.right.c.lid),
-            consider_as_foreign_keys=[self.right.c.lid],
+            consider_as_foreign_keys={self.right.c.lid},
             **kw
         )
 
@@ -480,10 +482,10 @@ class _JoinFixtures(object):
             self.composite_multi_ref,
             self.composite_target,
             self.composite_multi_ref,
-            consider_as_foreign_keys=[
+            consider_as_foreign_keys={
                 self.composite_multi_ref.c.uid2,
                 self.composite_multi_ref.c.oid,
-            ],
+            },
             **kw
         )
 
@@ -573,7 +575,7 @@ class _JoinFixtures(object):
         )
 
     def _assert_non_simple_warning(self, fn):
-        assert_raises_message(
+        assert_warns_message(
             exc.SAWarning,
             "Non-simple column elements in "
             "primary join condition for property "
@@ -818,9 +820,12 @@ class ColumnCollectionsTest(
         self._join_fixture_o2m_composite_selfref_func_remote_side()
 
     def test_determine_local_remote_pairs_o2m_overlap_func_warning(self):
-        self._assert_non_simple_warning(
-            self._join_fixture_m2o_sub_to_joined_sub_func
-        )
+        with expect_raises_message(
+            exc.ArgumentError, "Could not locate any relevant"
+        ):
+            self._assert_non_simple_warning(
+                self._join_fixture_m2o_sub_to_joined_sub_func
+            )
 
     def test_determine_local_remote_pairs_o2m_composite_selfref_func_annotated(
         self,
@@ -1099,10 +1104,10 @@ class DetermineJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
             self.m2mleft,
             self.m2mright,
             secondary=self.m2msecondary_ambig_fks,
-            consider_as_foreign_keys=[
+            consider_as_foreign_keys={
                 self.m2msecondary_ambig_fks.c.lid1,
                 self.m2msecondary_ambig_fks.c.rid1,
-            ],
+            },
         )
 
     def test_determine_join_w_fks_ambig_m2m(self):
@@ -1120,14 +1125,14 @@ class AdaptedJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
     def test_join_targets_o2m_selfref(self):
         joincond = self._join_fixture_o2m_selfref()
-        left = select([joincond.parent_persist_selectable]).alias("pj")
+        left = select(joincond.parent_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             left, joincond.child_persist_selectable, True
         )
         self.assert_compile(pj, "pj.id = selfref.sid")
         self.assert_compile(pj, "pj.id = selfref.sid")
 
-        right = select([joincond.child_persist_selectable]).alias("pj")
+        right = select(joincond.child_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             joincond.parent_persist_selectable, right, True
         )
@@ -1146,7 +1151,7 @@ class AdaptedJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
     def test_join_targets_o2m_left_aliased(self):
         joincond = self._join_fixture_o2m()
-        left = select([joincond.parent_persist_selectable]).alias("pj")
+        left = select(joincond.parent_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             left, joincond.child_persist_selectable, True
         )
@@ -1155,7 +1160,7 @@ class AdaptedJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
     def test_join_targets_o2m_right_aliased(self):
         joincond = self._join_fixture_o2m()
-        right = select([joincond.child_persist_selectable]).alias("pj")
+        right = select(joincond.child_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             joincond.parent_persist_selectable, right, True
         )
@@ -1164,7 +1169,7 @@ class AdaptedJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
     def test_join_targets_o2m_composite_selfref(self):
         joincond = self._join_fixture_o2m_composite_selfref()
-        right = select([joincond.child_persist_selectable]).alias("pj")
+        right = select(joincond.child_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             joincond.parent_persist_selectable, right, True
         )
@@ -1176,7 +1181,7 @@ class AdaptedJoinTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
     def test_join_targets_m2o_composite_selfref(self):
         joincond = self._join_fixture_m2o_composite_selfref()
-        right = select([joincond.child_persist_selectable]).alias("pj")
+        right = select(joincond.child_persist_selectable).alias("pj")
         pj, sj, sec, adapter, ds = joincond.join_targets(
             joincond.parent_persist_selectable, right, True
         )
@@ -1239,7 +1244,7 @@ class LazyClauseTest(_JoinFixtures, fixtures.TestBase, AssertsCompiledSQL):
 
 class DeannotateCorrectlyTest(fixtures.TestBase):
     def test_pj_deannotates(self):
-        from sqlalchemy.ext.declarative import declarative_base
+        from sqlalchemy.orm import declarative_base
 
         Base = declarative_base()
 

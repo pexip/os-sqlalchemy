@@ -1,3 +1,4 @@
+from sqlalchemy import and_
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import inspect
@@ -8,22 +9,32 @@ from sqlalchemy import null
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import true
+from sqlalchemy import util
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Bundle
-from sqlalchemy.orm import class_mapper
-from sqlalchemy.orm import create_session
+from sqlalchemy.orm import column_property
+from sqlalchemy.orm import join as orm_join
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm import with_polymorphic
+from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
+
+
+def _aliased_join_warning(arg):
+    return testing.expect_warnings(
+        "An alias is being generated automatically against joined entity "
+        "mapped class %s due to overlapping tables" % (arg,)
+    )
 
 
 class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
@@ -75,9 +86,22 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
         class JuniorEngineer(Engineer):
             pass
 
+        class Report(cls.Comparable):
+            pass
+
     @classmethod
     def setup_mappers(cls):
-        Employee, Manager, JuniorEngineer, employees, Engineer = (
+        (
+            Report,
+            reports,
+            Employee,
+            Manager,
+            JuniorEngineer,
+            employees,
+            Engineer,
+        ) = (
+            cls.classes.Report,
+            cls.tables.reports,
             cls.classes.Employee,
             cls.classes.Manager,
             cls.classes.JuniorEngineer,
@@ -85,10 +109,24 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             cls.classes.Engineer,
         )
 
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Manager, inherits=Employee, polymorphic_identity="manager")
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
-        mapper(
+        cls.mapper_registry.map_imperatively(
+            Report, reports, properties={"employee": relationship(Employee)}
+        )
+        cls.mapper_registry.map_imperatively(
+            Employee,
+            employees,
+            polymorphic_on=employees.c.type,
+            properties={
+                "reports": relationship(Report, back_populates="employee")
+            },
+        )
+        cls.mapper_registry.map_imperatively(
+            Manager, inherits=Employee, polymorphic_identity="manager"
+        )
+        cls.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
+        cls.mapper_registry.map_imperatively(
             JuniorEngineer,
             inherits=Engineer,
             polymorphic_identity="juniorengineer",
@@ -101,7 +139,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             self.classes.Engineer,
         )
 
-        session = create_session()
+        session = fixture_session()
 
         m1 = Manager(name="Tom", manager_data="knows how to manage things")
         e1 = Engineer(name="Kurt", engineer_info="knows how to hack")
@@ -137,35 +175,60 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
         assert row.name == "Kurt"
         assert row.employee_id == e1.employee_id
 
+    def test_discrim_bound_param_cloned_ok(self):
+        """Test #6824"""
+        Manager = self.classes.Manager
+
+        subq1 = select(Manager.employee_id).label("foo")
+        subq2 = select(Manager.employee_id).label("bar")
+        self.assert_compile(
+            select(subq1, subq2),
+            "SELECT (SELECT employees.employee_id FROM employees "
+            "WHERE employees.type IN (__[POSTCOMPILE_type_1])) AS foo, "
+            "(SELECT employees.employee_id FROM employees "
+            "WHERE employees.type IN (__[POSTCOMPILE_type_1])) AS bar",
+        )
+
     def test_multi_qualification(self):
         Manager, Engineer = (self.classes.Manager, self.classes.Engineer)
 
         session, m1, e1, e2 = self._fixture_one()
 
         ealias = aliased(Engineer)
-        eq_(session.query(Manager, ealias).all(), [(m1, e1), (m1, e2)])
+        eq_(
+            session.query(Manager, ealias).join(ealias, true()).all(),
+            [(m1, e1), (m1, e2)],
+        )
 
         eq_(session.query(Manager.name).all(), [("Tom",)])
 
         eq_(
-            session.query(Manager.name, ealias.name).all(),
+            session.query(Manager.name, ealias.name)
+            .join(ealias, true())
+            .all(),
             [("Tom", "Kurt"), ("Tom", "Ed")],
         )
 
         eq_(
-            session.query(
-                func.upper(Manager.name), func.upper(ealias.name)
-            ).all(),
+            session.query(func.upper(Manager.name), func.upper(ealias.name))
+            .join(ealias, true())
+            .all(),
             [("TOM", "KURT"), ("TOM", "ED")],
         )
 
         eq_(
-            session.query(Manager).add_entity(ealias).all(),
+            session.query(Manager)
+            .add_entity(ealias)
+            .join(ealias, true())
+            .all(),
             [(m1, e1), (m1, e2)],
         )
 
         eq_(
-            session.query(Manager.name).add_column(ealias.name).all(),
+            session.query(Manager.name)
+            .add_columns(ealias.name)
+            .join(ealias, true())
+            .all(),
             [("Tom", "Kurt"), ("Tom", "Ed")],
         )
 
@@ -244,12 +307,54 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             [e2id],
         )
 
-    def test_from_self(self):
+    def test_from_self_legacy(self):
         Engineer = self.classes.Engineer
 
-        sess = create_session()
+        sess = fixture_session()
+        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
+            self.assert_compile(
+                sess.query(Engineer).from_self(),
+                "SELECT anon_1.employees_employee_id AS "
+                "anon_1_employees_employee_id, "
+                "anon_1.employees_name AS "
+                "anon_1_employees_name, "
+                "anon_1.employees_manager_data AS "
+                "anon_1_employees_manager_data, "
+                "anon_1.employees_engineer_info AS "
+                "anon_1_employees_engineer_info, "
+                "anon_1.employees_type AS "
+                "anon_1_employees_type FROM (SELECT "
+                "employees.employee_id AS "
+                "employees_employee_id, employees.name AS "
+                "employees_name, employees.manager_data AS "
+                "employees_manager_data, "
+                "employees.engineer_info AS "
+                "employees_engineer_info, employees.type "
+                "AS employees_type FROM employees WHERE "
+                "employees.type IN (__[POSTCOMPILE_type_1])) AS "
+                "anon_1",
+                use_default_dialect=True,
+            )
+
+    def test_from_subq(self):
+        Engineer = self.classes.Engineer
+
+        stmt = select(Engineer)
+        subq = aliased(
+            Engineer,
+            stmt.set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL).subquery(),
+        )
+
+        # so here we have an extra "WHERE type in ()", because
+        # both the inner and the outer queries have the Engineer entity.
+        # this is expected at the moment but it would be nice if
+        # _enable_single_crit or something similar could propagate here.
+        # legacy from_self() takes care of this because it applies
+        # _enable_single_crit at that moment.
+
+        stmt = select(subq).set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
         self.assert_compile(
-            sess.query(Engineer).from_self(),
+            stmt,
             "SELECT anon_1.employees_employee_id AS "
             "anon_1_employees_employee_id, "
             "anon_1.employees_name AS "
@@ -267,34 +372,190 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             "employees.engineer_info AS "
             "employees_engineer_info, employees.type "
             "AS employees_type FROM employees WHERE "
-            "employees.type IN (:type_1, :type_2)) AS "
-            "anon_1",
+            "employees.type IN (__[POSTCOMPILE_type_1])) AS "
+            "anon_1 WHERE anon_1.employees_type IN (__[POSTCOMPILE_type_2])",
             use_default_dialect=True,
         )
 
     def test_select_from_aliased_w_subclass(self):
         Engineer = self.classes.Engineer
 
-        sess = create_session()
+        sess = fixture_session()
 
         a1 = aliased(Engineer)
         self.assert_compile(
             sess.query(a1.employee_id).select_from(a1),
             "SELECT employees_1.employee_id AS employees_1_employee_id "
             "FROM employees AS employees_1 WHERE employees_1.type "
-            "IN (:type_1, :type_2)",
+            "IN (__[POSTCOMPILE_type_1])",
         )
 
         self.assert_compile(
             sess.query(literal("1")).select_from(a1),
-            "SELECT :param_1 AS param_1 FROM employees AS employees_1 "
-            "WHERE employees_1.type IN (:type_1, :type_2)",
+            "SELECT :param_1 AS anon_1 FROM employees AS employees_1 "
+            "WHERE employees_1.type IN (__[POSTCOMPILE_type_1])",
+        )
+
+    @testing.combinations(
+        (
+            lambda Engineer, Report: select(Report)
+            .select_from(Engineer)
+            .join(Engineer.reports),
+        ),
+        (
+            lambda Engineer, Report: select(Report).select_from(
+                orm_join(Engineer, Report, Engineer.reports)
+            ),
+        ),
+        (
+            lambda Engineer, Report: select(Report).join_from(
+                Engineer, Report, Engineer.reports
+            ),
+        ),
+        argnames="stmt_fn",
+    )
+    @testing.combinations(True, False, argnames="alias_engineer")
+    def test_select_from_w_join_left(self, stmt_fn, alias_engineer):
+        """test #8721"""
+
+        Engineer = self.classes.Engineer
+        Report = self.classes.Report
+
+        if alias_engineer:
+            Engineer = aliased(Engineer)
+        stmt = testing.resolve_lambda(
+            stmt_fn, Engineer=Engineer, Report=Report
+        )
+
+        if alias_engineer:
+            self.assert_compile(
+                stmt,
+                "SELECT reports.report_id, reports.employee_id, reports.name "
+                "FROM employees AS employees_1 JOIN reports "
+                "ON employees_1.employee_id = reports.employee_id "
+                "WHERE employees_1.type IN (__[POSTCOMPILE_type_1])",
+            )
+        else:
+            self.assert_compile(
+                stmt,
+                "SELECT reports.report_id, reports.employee_id, reports.name "
+                "FROM employees JOIN reports ON employees.employee_id = "
+                "reports.employee_id "
+                "WHERE employees.type IN (__[POSTCOMPILE_type_1])",
+            )
+
+    @testing.combinations(
+        (
+            lambda Engineer, Report: select(
+                Report.report_id, Engineer.employee_id
+            )
+            .select_from(Engineer)
+            .join(Engineer.reports),
+        ),
+        (
+            lambda Engineer, Report: select(
+                Report.report_id, Engineer.employee_id
+            ).select_from(orm_join(Engineer, Report, Engineer.reports)),
+        ),
+        (
+            lambda Engineer, Report: select(
+                Report.report_id, Engineer.employee_id
+            ).join_from(Engineer, Report, Engineer.reports),
+        ),
+    )
+    def test_select_from_w_join_left_including_entity(self, stmt_fn):
+        """test #8721"""
+
+        Engineer = self.classes.Engineer
+        Report = self.classes.Report
+        stmt = testing.resolve_lambda(
+            stmt_fn, Engineer=Engineer, Report=Report
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT reports.report_id, employees.employee_id "
+            "FROM employees JOIN reports ON employees.employee_id = "
+            "reports.employee_id "
+            "WHERE employees.type IN (__[POSTCOMPILE_type_1])",
+        )
+
+    @testing.combinations(
+        (
+            lambda Engineer, Report: select(Report).join(
+                Report.employee.of_type(Engineer)
+            ),
+        ),
+        (
+            lambda Engineer, Report: select(Report).select_from(
+                orm_join(Report, Engineer, Report.employee.of_type(Engineer))
+            )
+        ),
+        (
+            lambda Engineer, Report: select(Report).join_from(
+                Report, Engineer, Report.employee.of_type(Engineer)
+            ),
+        ),
+    )
+    def test_select_from_w_join_right(self, stmt_fn):
+        """test #8721"""
+
+        Engineer = self.classes.Engineer
+        Report = self.classes.Report
+        stmt = testing.resolve_lambda(
+            stmt_fn, Engineer=Engineer, Report=Report
+        )
+
+        self.assert_compile(
+            stmt,
+            "SELECT reports.report_id, reports.employee_id, reports.name "
+            "FROM reports JOIN employees ON employees.employee_id = "
+            "reports.employee_id AND employees.type "
+            "IN (__[POSTCOMPILE_type_1])",
+        )
+
+    def test_from_statement_select(self):
+        Engineer = self.classes.Engineer
+
+        stmt = select(Engineer)
+
+        q = select(Engineer).from_statement(stmt)
+
+        self.assert_compile(
+            q,
+            "SELECT employees.employee_id, employees.name, "
+            "employees.manager_data, employees.engineer_info, "
+            "employees.type FROM employees WHERE employees.type "
+            "IN (__[POSTCOMPILE_type_1])",
+        )
+
+    def test_from_statement_update(self):
+        """test #6591"""
+
+        Engineer = self.classes.Engineer
+
+        from sqlalchemy import update
+
+        stmt = (
+            update(Engineer)
+            .values(engineer_info="bar")
+            .returning(Engineer.employee_id)
+        )
+
+        q = select(Engineer).from_statement(stmt)
+
+        self.assert_compile(
+            q,
+            "UPDATE employees SET engineer_info=:engineer_info "
+            "WHERE employees.type IN (__[POSTCOMPILE_type_1]) "
+            "RETURNING employees.employee_id",
+            dialect="default_enhanced",
         )
 
     def test_union_modifiers(self):
         Engineer, Manager = self.classes("Engineer", "Manager")
 
-        sess = create_session()
+        sess = fixture_session()
         q1 = sess.query(Engineer).filter(Engineer.engineer_info == "foo")
         q2 = sess.query(Manager).filter(Manager.manager_data == "bar")
 
@@ -311,7 +572,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             "employees.engineer_info AS employees_engineer_info, "
             "employees.type AS employees_type FROM employees "
             "WHERE employees.engineer_info = :engineer_info_1 "
-            "AND employees.type IN (:type_1, :type_2) "
+            "AND employees.type IN (__[POSTCOMPILE_type_1]) "
             "%(token)s "
             "SELECT employees.employee_id AS employees_employee_id, "
             "employees.name AS employees_name, "
@@ -319,7 +580,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             "employees.engineer_info AS employees_engineer_info, "
             "employees.type AS employees_type FROM employees "
             "WHERE employees.manager_data = :manager_data_1 "
-            "AND employees.type IN (:type_3)) AS anon_1"
+            "AND employees.type IN (__[POSTCOMPILE_type_2])) AS anon_1"
         )
 
         for meth, token in [
@@ -334,32 +595,50 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
                 meth(q2),
                 assert_sql % {"token": token},
                 checkparams={
-                    "manager_data_1": "bar",
-                    "type_2": "juniorengineer",
-                    "type_3": "manager",
                     "engineer_info_1": "foo",
-                    "type_1": "engineer",
+                    "type_1": ["engineer", "juniorengineer"],
+                    "manager_data_1": "bar",
+                    "type_2": ["manager"],
                 },
             )
+
+    def test_having(self):
+
+        Engineer, Manager = self.classes("Engineer", "Manager")
+
+        sess = fixture_session()
+
+        self.assert_compile(
+            sess.query(Engineer)
+            .group_by(Engineer.employee_id)
+            .having(Engineer.name == "js"),
+            "SELECT employees.employee_id AS employees_employee_id, "
+            "employees.name AS employees_name, employees.manager_data "
+            "AS employees_manager_data, employees.engineer_info "
+            "AS employees_engineer_info, employees.type AS employees_type "
+            "FROM employees WHERE employees.type IN (__[POSTCOMPILE_type_1]) "
+            "GROUP BY employees.employee_id HAVING employees.name = :name_1",
+        )
 
     def test_from_self_count(self):
         Engineer = self.classes.Engineer
 
-        sess = create_session()
+        sess = fixture_session()
         col = func.count(literal_column("*"))
-        self.assert_compile(
-            sess.query(Engineer.employee_id).from_self(col),
-            "SELECT count(*) AS count_1 "
-            "FROM (SELECT employees.employee_id AS employees_employee_id "
-            "FROM employees "
-            "WHERE employees.type IN (:type_1, :type_2)) AS anon_1",
-            use_default_dialect=True,
-        )
+        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
+            self.assert_compile(
+                sess.query(Engineer.employee_id).from_self(col),
+                "SELECT count(*) AS count_1 "
+                "FROM (SELECT employees.employee_id AS employees_employee_id "
+                "FROM employees "
+                "WHERE employees.type IN (__[POSTCOMPILE_type_1])) AS anon_1",
+                use_default_dialect=True,
+            )
 
     def test_select_from_count(self):
         Manager, Engineer = (self.classes.Manager, self.classes.Engineer)
 
-        sess = create_session()
+        sess = fixture_session()
         m1 = Manager(name="Tom", manager_data="data1")
         e1 = Engineer(name="Kurt", engineer_info="knows how to hack")
         sess.add_all([m1, e1])
@@ -375,7 +654,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             self.classes.Engineer,
         )
 
-        sess = create_session()
+        sess = fixture_session()
         m1 = Manager(name="Tom", manager_data="data1")
         m2 = Manager(name="Tom2", manager_data="data2")
         e1 = Engineer(name="Kurt", engineer_info="knows how to hack")
@@ -383,11 +662,79 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
         sess.add_all([m1, m2, e1, e2])
         sess.flush()
 
+        ma = aliased(
+            Manager,
+            employees.select()
+            .where(employees.c.type == "manager")
+            .order_by(employees.c.employee_id)
+            .limit(10)
+            .subquery(),
+        )
         eq_(
-            sess.query(Manager)
-            .select_from(employees.select().limit(10))
-            .all(),
+            sess.query(ma).all(),
             [m1, m2],
+        )
+
+    def test_select_from_subquery_with_composed_union(self):
+        Report, reports, Manager, JuniorEngineer, employees, Engineer = (
+            self.classes.Report,
+            self.tables.reports,
+            self.classes.Manager,
+            self.classes.JuniorEngineer,
+            self.tables.employees,
+            self.classes.Engineer,
+        )
+
+        sess = fixture_session()
+        r1, r2, r3, r4 = (
+            Report(name="r1"),
+            Report(name="r2"),
+            Report(name="r3"),
+            Report(name="r4"),
+        )
+        m1 = Manager(name="manager1", manager_data="data1", reports=[r1])
+        m2 = Manager(name="manager2", manager_data="data2", reports=[r2])
+        e1 = Engineer(name="engineer1", engineer_info="einfo1", reports=[r3])
+        e2 = JuniorEngineer(
+            name="engineer2", engineer_info="einfo2", reports=[r4]
+        )
+        sess.add_all([m1, m2, e1, e2])
+        sess.flush()
+
+        stmt = select(reports, employees).select_from(
+            reports.outerjoin(
+                employees,
+                and_(
+                    employees.c.employee_id == reports.c.employee_id,
+                    employees.c.type == "manager",
+                ),
+            )
+        )
+
+        subq = stmt.subquery()
+
+        ra = aliased(Report, subq)
+
+        # this test previously used select_entity_from().  the standard
+        # conversion to use aliased() neds to be adjusted to be against
+        # Employee, not Manger, otherwise the ORM will add the manager single
+        # inh criteria to the outside which will break the outer join
+        ma = aliased(Employee, subq)
+
+        eq_(
+            sess.query(ra, ma).order_by(ra.name).all(),
+            [(r1, m1), (r2, m2), (r3, None), (r4, None)],
+        )
+
+        # however if someone really wants to run that SELECT statement and
+        # get back these two entities, they can use from_statement() more
+        # directly.  in 1.4 we don't even need tablename label style for the
+        # select(), automatic disambiguation works great
+        eq_(
+            sess.query(Report, Manager)
+            .from_statement(stmt.order_by(reports.c.name))
+            .all(),
+            [(r1, m1), (r2, m2), (r3, None), (r4, None)],
         )
 
     def test_count(self):
@@ -396,7 +743,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
         Manager = self.classes.Manager
         Engineer = self.classes.Engineer
 
-        sess = create_session()
+        sess = fixture_session()
         m1 = Manager(name="Tom", manager_data="data1")
         m2 = Manager(name="Tom2", manager_data="data2")
         e1 = Engineer(name="Kurt", engineer_info="data3")
@@ -414,7 +761,7 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
     def test_exists_standalone(self):
         Engineer = self.classes.Engineer
 
-        sess = create_session()
+        sess = fixture_session()
 
         self.assert_compile(
             sess.query(
@@ -422,26 +769,17 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
             ),
             "SELECT EXISTS (SELECT 1 FROM employees WHERE "
             "employees.name = :name_1 AND employees.type "
-            "IN (:type_1, :type_2)) AS anon_1",
+            "IN (__[POSTCOMPILE_type_1])) AS anon_1",
         )
 
     def test_type_filtering(self):
-        Employee, Manager, reports, Engineer = (
-            self.classes.Employee,
+        Report, Manager, Engineer = (
+            self.classes.Report,
             self.classes.Manager,
-            self.tables.reports,
             self.classes.Engineer,
         )
 
-        class Report(fixtures.ComparableEntity):
-            pass
-
-        mapper(
-            Report,
-            reports,
-            properties={"employee": relationship(Employee, backref="reports")},
-        )
-        sess = create_session()
+        sess = fixture_session()
 
         m1 = Manager(name="Tom", manager_data="data1")
         r1 = Report(employee=m1)
@@ -457,22 +795,13 @@ class SingleInheritanceTest(testing.AssertsCompiledSQL, fixtures.MappedTest):
         )
 
     def test_type_joins(self):
-        Employee, Manager, reports, Engineer = (
-            self.classes.Employee,
+        Report, Manager, Engineer = (
+            self.classes.Report,
             self.classes.Manager,
-            self.tables.reports,
             self.classes.Engineer,
         )
 
-        class Report(fixtures.ComparableEntity):
-            pass
-
-        mapper(
-            Report,
-            reports,
-            properties={"employee": relationship(Employee, backref="reports")},
-        )
-        sess = create_session()
+        sess = fixture_session()
 
         m1 = Manager(name="Tom", manager_data="data1")
         r1 = Report(employee=m1)
@@ -511,6 +840,30 @@ class RelationshipFromSingleTest(
         )
 
     @classmethod
+    def setup_mappers(cls):
+        employee, employee_stuff, Employee, Stuff, Manager = (
+            cls.tables.employee,
+            cls.tables.employee_stuff,
+            cls.classes.Employee,
+            cls.classes.Stuff,
+            cls.classes.Manager,
+        )
+
+        cls.mapper_registry.map_imperatively(
+            Employee,
+            employee,
+            polymorphic_on=employee.c.type,
+            polymorphic_identity="employee",
+        )
+        cls.mapper_registry.map_imperatively(
+            Manager,
+            inherits=Employee,
+            polymorphic_identity="manager",
+            properties={"stuff": relationship(Stuff)},
+        )
+        cls.mapper_registry.map_imperatively(Stuff, employee_stuff)
+
+    @classmethod
     def setup_classes(cls):
         class Employee(cls.Comparable):
             pass
@@ -521,55 +874,52 @@ class RelationshipFromSingleTest(
         class Stuff(cls.Comparable):
             pass
 
+    @classmethod
+    def insert_data(cls, connection):
+        Employee, Stuff, Manager = cls.classes("Employee", "Stuff", "Manager")
+        s = Session(connection)
+
+        s.add_all(
+            [
+                Employee(
+                    name="e1", stuff=[Stuff(name="es1"), Stuff(name="es2")]
+                ),
+                Manager(
+                    name="m1", stuff=[Stuff(name="ms1"), Stuff(name="ms2")]
+                ),
+            ]
+        )
+        s.commit()
+
     def test_subquery_load(self):
-        employee, employee_stuff, Employee, Stuff, Manager = (
-            self.tables.employee,
-            self.tables.employee_stuff,
-            self.classes.Employee,
-            self.classes.Stuff,
-            self.classes.Manager,
-        )
+        Employee, Stuff, Manager = self.classes("Employee", "Stuff", "Manager")
 
-        mapper(
-            Employee,
-            employee,
-            polymorphic_on=employee.c.type,
-            polymorphic_identity="employee",
-        )
-        mapper(
-            Manager,
-            inherits=Employee,
-            polymorphic_identity="manager",
-            properties={"stuff": relationship(Stuff)},
-        )
-        mapper(Stuff, employee_stuff)
+        sess = fixture_session()
 
-        sess = create_session()
-        context = (
-            sess.query(Manager)
-            .options(subqueryload("stuff"))
-            ._compile_context()
-        )
-        subq = context.attributes[
-            (
-                "subquery",
-                (class_mapper(Manager), class_mapper(Manager).attrs.stuff),
-            )
-        ]
+        with self.sql_execution_asserter(testing.db) as asserter:
+            sess.query(Manager).options(subqueryload(Manager.stuff)).all()
 
-        self.assert_compile(
-            subq,
-            "SELECT employee_stuff.id AS "
-            "employee_stuff_id, employee_stuff.employee"
-            "_id AS employee_stuff_employee_id, "
-            "employee_stuff.name AS "
-            "employee_stuff_name, anon_1.employee_id "
-            "AS anon_1_employee_id FROM (SELECT "
-            "employee.id AS employee_id FROM employee "
-            "WHERE employee.type IN (:type_1)) AS anon_1 "
-            "JOIN employee_stuff ON anon_1.employee_id "
-            "= employee_stuff.employee_id",
-            use_default_dialect=True,
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT employee.id AS employee_id, employee.name AS "
+                "employee_name, employee.type AS employee_type "
+                "FROM employee WHERE employee.type IN "
+                "(__[POSTCOMPILE_type_1])",
+                params=[{"type_1": ["manager"]}],
+            ),
+            CompiledSQL(
+                "SELECT employee_stuff.id AS "
+                "employee_stuff_id, employee_stuff.employee"
+                "_id AS employee_stuff_employee_id, "
+                "employee_stuff.name AS "
+                "employee_stuff_name, anon_1.employee_id "
+                "AS anon_1_employee_id FROM (SELECT "
+                "employee.id AS employee_id FROM employee "
+                "WHERE employee.type IN (__[POSTCOMPILE_type_1])) AS anon_1 "
+                "JOIN employee_stuff ON anon_1.employee_id "
+                "= employee_stuff.employee_id",
+                params=[{"type_1": ["manager"]}],
+            ),
         )
 
 
@@ -644,22 +994,28 @@ class RelationshipToSingleTest(
             self.classes.Engineer,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={
                 "employees": relationship(Employee, backref="company")
             },
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Manager, inherits=Employee, polymorphic_identity="manager")
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
-        mapper(
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Manager, inherits=Employee, polymorphic_identity="manager"
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
+        self.mapper_registry.map_imperatively(
             JuniorEngineer,
             inherits=Engineer,
             polymorphic_identity="juniorengineer",
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
 
         c1 = Company(name="c1")
         c2 = Company(name="c2")
@@ -687,34 +1043,6 @@ class RelationshipToSingleTest(
             [Company(name="c1")],
         )
 
-    def test_of_type_aliased_fromjoinpoint(self):
-        Company, Employee, Engineer = (
-            self.classes.Company,
-            self.classes.Employee,
-            self.classes.Engineer,
-        )
-        companies, employees = self.tables.companies, self.tables.employees
-
-        mapper(
-            Company, companies, properties={"employee": relationship(Employee)}
-        )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
-
-        sess = create_session()
-        self.assert_compile(
-            sess.query(Company).outerjoin(
-                Company.employee.of_type(Engineer),
-                aliased=True,
-                from_joinpoint=True,
-            ),
-            "SELECT companies.company_id AS companies_company_id, "
-            "companies.name AS companies_name FROM companies "
-            "LEFT OUTER JOIN employees AS employees_1 ON "
-            "companies.company_id = employees_1.company_id "
-            "AND employees_1.type IN (:type_1)",
-        )
-
     def test_join_explicit_onclause_no_discriminator(self):
         # test issue #3462
         Company, Employee, Engineer = (
@@ -724,15 +1052,15 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"employees": relationship(Employee)},
         )
-        mapper(Employee, employees)
-        mapper(Engineer, inherits=Employee)
+        self.mapper_registry.map_imperatively(Employee, employees)
+        self.mapper_registry.map_imperatively(Engineer, inherits=Employee)
 
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, Engineer.name).join(
                 Engineer, Company.company_id == Engineer.company_id
@@ -752,22 +1080,27 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
-            sess.query(Company, Engineer.name).outerjoin("engineers"),
+            sess.query(Company, Engineer.name).outerjoin(Company.engineers),
             "SELECT companies.company_id AS companies_company_id, "
             "companies.name AS companies_name, "
             "employees.name AS employees_name "
             "FROM companies LEFT OUTER JOIN employees ON companies.company_id "
-            "= employees.company_id AND employees.type IN (:type_1)",
+            "= employees.company_id "
+            "AND employees.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_outer_join_prop_alias(self):
@@ -778,16 +1111,20 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
         eng_alias = aliased(Engineer)
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, eng_alias.name).outerjoin(
                 eng_alias, Company.engineers
@@ -796,7 +1133,8 @@ class RelationshipToSingleTest(
             "companies.name AS companies_name, employees_1.name AS "
             "employees_1_name FROM companies LEFT OUTER "
             "JOIN employees AS employees_1 ON companies.company_id "
-            "= employees_1.company_id AND employees_1.type IN (:type_1)",
+            "= employees_1.company_id "
+            "AND employees_1.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_outer_join_literal_onclause(self):
@@ -807,15 +1145,19 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, Engineer).outerjoin(
                 Engineer, Company.company_id == Engineer.company_id
@@ -830,7 +1172,7 @@ class RelationshipToSingleTest(
             "employees.company_id AS employees_company_id FROM companies "
             "LEFT OUTER JOIN employees ON "
             "companies.company_id = employees.company_id "
-            "AND employees.type IN (:type_1)",
+            "AND employees.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_outer_join_literal_onclause_alias(self):
@@ -841,16 +1183,20 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
         eng_alias = aliased(Engineer)
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, eng_alias).outerjoin(
                 eng_alias, Company.company_id == eng_alias.company_id
@@ -865,7 +1211,7 @@ class RelationshipToSingleTest(
             "employees_1.company_id AS employees_1_company_id "
             "FROM companies LEFT OUTER JOIN employees AS employees_1 ON "
             "companies.company_id = employees_1.company_id "
-            "AND employees_1.type IN (:type_1)",
+            "AND employees_1.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_outer_join_no_onclause(self):
@@ -876,15 +1222,19 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, Engineer).outerjoin(Engineer),
             "SELECT companies.company_id AS companies_company_id, "
@@ -897,7 +1247,7 @@ class RelationshipToSingleTest(
             "employees.company_id AS employees_company_id "
             "FROM companies LEFT OUTER JOIN employees ON "
             "companies.company_id = employees.company_id "
-            "AND employees.type IN (:type_1)",
+            "AND employees.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_outer_join_no_onclause_alias(self):
@@ -908,16 +1258,20 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={"engineers": relationship(Engineer)},
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
         eng_alias = aliased(Engineer)
-        sess = create_session()
+        sess = fixture_session()
         self.assert_compile(
             sess.query(Company, eng_alias).outerjoin(eng_alias),
             "SELECT companies.company_id AS companies_company_id, "
@@ -930,7 +1284,7 @@ class RelationshipToSingleTest(
             "employees_1.company_id AS employees_1_company_id "
             "FROM companies LEFT OUTER JOIN employees AS employees_1 ON "
             "companies.company_id = employees_1.company_id "
-            "AND employees_1.type IN (:type_1)",
+            "AND employees_1.type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_correlated_column_select(self):
@@ -941,22 +1295,24 @@ class RelationshipToSingleTest(
         )
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(Company, companies)
-        mapper(
+        self.mapper_registry.map_imperatively(Company, companies)
+        self.mapper_registry.map_imperatively(
             Employee,
             employees,
             polymorphic_on=employees.c.type,
             properties={"company": relationship(Company)},
         )
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         engineer_count = (
             sess.query(func.count(Engineer.employee_id))
             .select_from(Engineer)
             .filter(Engineer.company_id == Company.company_id)
             .correlate(Company)
-            .as_scalar()
+            .scalar_subquery()
         )
 
         self.assert_compile(
@@ -964,7 +1320,8 @@ class RelationshipToSingleTest(
             "SELECT companies.company_id AS companies_company_id, "
             "(SELECT count(employees.employee_id) AS count_1 "
             "FROM employees WHERE employees.company_id = "
-            "companies.company_id AND employees.type IN (:type_1)) AS anon_1 "
+            "companies.company_id "
+            "AND employees.type IN (__[POSTCOMPILE_type_1])) AS anon_1 "
             "FROM companies",
         )
 
@@ -980,18 +1337,24 @@ class RelationshipToSingleTest(
 
         companies, employees = self.tables.companies, self.tables.employees
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={
                 "employees": relationship(Employee, backref="company")
             },
         )
-        mapper(Employee, employees, polymorphic_on=employees.c.type)
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
-        mapper(Manager, inherits=Employee, polymorphic_identity="manager")
+        self.mapper_registry.map_imperatively(
+            Employee, employees, polymorphic_on=employees.c.type
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
+        self.mapper_registry.map_imperatively(
+            Manager, inherits=Employee, polymorphic_identity="manager"
+        )
 
-        s = create_session()
+        s = fixture_session()
 
         q1 = (
             s.query(Engineer)
@@ -1040,8 +1403,8 @@ class RelationshipToSingleTest(
                 "ON companies.company_id = employees.company_id "
                 "JOIN employees "
                 "ON companies.company_id = employees.company_id "
-                "AND employees.type IN (:type_1) "
-                "WHERE employees.type IN (:type_2)",
+                "AND employees.type IN (__[POSTCOMPILE_type_1]) "
+                "WHERE employees.type IN (__[POSTCOMPILE_type_2])",
             )
 
     def test_relationship_to_subclass(self):
@@ -1063,25 +1426,31 @@ class RelationshipToSingleTest(
             self.classes.Engineer,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
-            properties={"engineers": relationship(Engineer)},
+            properties={
+                "engineers": relationship(Engineer, back_populates="company")
+            },
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Employee,
             employees,
             polymorphic_on=employees.c.type,
             properties={"company": relationship(Company)},
         )
-        mapper(Manager, inherits=Employee, polymorphic_identity="manager")
-        mapper(Engineer, inherits=Employee, polymorphic_identity="engineer")
-        mapper(
+        self.mapper_registry.map_imperatively(
+            Manager, inherits=Employee, polymorphic_identity="manager"
+        )
+        self.mapper_registry.map_imperatively(
+            Engineer, inherits=Employee, polymorphic_identity="engineer"
+        )
+        self.mapper_registry.map_imperatively(
             JuniorEngineer,
             inherits=Engineer,
             polymorphic_identity="juniorengineer",
         )
-        sess = sessionmaker()()
+        sess = fixture_session()
 
         c1 = Company(name="c1")
         c2 = Company(name="c2")
@@ -1111,7 +1480,7 @@ class RelationshipToSingleTest(
         sess.expunge_all()
         eq_(
             sess.query(Company)
-            .options(joinedload("engineers"))
+            .options(joinedload(Company.engineers))
             .order_by(Company.name)
             .all(),
             [
@@ -1228,7 +1597,7 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
 
     @classmethod
     def setup_mappers(cls):
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.Parent,
             cls.tables.parent,
             properties={
@@ -1242,17 +1611,17 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
                 ),
             },
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.Child,
             cls.tables.child,
             polymorphic_on=cls.tables.child.c.discriminator,
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.SubChild1,
             inherits=cls.classes.Child,
             polymorphic_identity="sub1",
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             cls.classes.SubChild2,
             inherits=cls.classes.Child,
             polymorphic_identity="sub2",
@@ -1278,7 +1647,7 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
         Parent = self.classes.Parent
         SubChild1 = self.classes.SubChild1
 
-        s = Session()
+        s = fixture_session()
 
         p1 = s.query(Parent).options(joinedload(Parent.s1)).all()[0]
         eq_(p1.__dict__["s1"], SubChild1(name="sc1_1"))
@@ -1288,7 +1657,7 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
         Child = self.classes.Child
         SubChild1 = self.classes.SubChild1
 
-        s = Session()
+        s = fixture_session()
 
         p1, c1 = s.query(Parent, Child).outerjoin(Parent.s1).all()[0]
         eq_(c1, SubChild1(name="sc1_1"))
@@ -1297,7 +1666,7 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
         Parent = self.classes.Parent
         Child = self.classes.Child
 
-        s = Session()
+        s = fixture_session()
 
         self.assert_compile(
             s.query(Parent, Child).outerjoin(Parent.s1),
@@ -1306,14 +1675,14 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
             "child.name AS child_name "
             "FROM parent LEFT OUTER JOIN (m2m AS m2m_1 "
             "JOIN child ON child.id = m2m_1.child_id "
-            "AND child.discriminator IN (:discriminator_1)) "
+            "AND child.discriminator IN (__[POSTCOMPILE_discriminator_1])) "
             "ON parent.id = m2m_1.parent_id",
         )
 
     def test_assert_joinedload_sql(self):
         Parent = self.classes.Parent
 
-        s = Session()
+        s = fixture_session()
 
         self.assert_compile(
             s.query(Parent).options(joinedload(Parent.s1)),
@@ -1323,7 +1692,8 @@ class ManyToManyToSingleTest(fixtures.MappedTest, AssertsCompiledSQL):
             "FROM parent LEFT OUTER JOIN "
             "(m2m AS m2m_1 JOIN child AS child_1 "
             "ON child_1.id = m2m_1.child_id AND child_1.discriminator "
-            "IN (:discriminator_1)) ON parent.id = m2m_1.parent_id",
+            "IN (__[POSTCOMPILE_discriminator_1])) "
+            "ON parent.id = m2m_1.parent_id",
         )
 
 
@@ -1368,21 +1738,23 @@ class SingleOnJoinedTest(fixtures.MappedTest):
         class Manager(Employee):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Person,
             persons_table,
             polymorphic_on=persons_table.c.type,
             polymorphic_identity="person",
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Employee,
             employees_table,
             inherits=Person,
             polymorphic_identity="engineer",
         )
-        mapper(Manager, inherits=Employee, polymorphic_identity="manager")
+        self.mapper_registry.map_imperatively(
+            Manager, inherits=Employee, polymorphic_identity="manager"
+        )
 
-        sess = create_session()
+        sess = fixture_session()
         sess.add(Person(name="p1"))
         sess.add(Employee(name="e1", employee_data="ed1"))
         sess.add(Manager(name="m1", employee_data="ed2", manager_data="md1"))
@@ -1415,11 +1787,9 @@ class SingleOnJoinedTest(fixtures.MappedTest):
         sess.expunge_all()
 
         def go():
+            wp = with_polymorphic(Person, "*")
             eq_(
-                sess.query(Person)
-                .with_polymorphic("*")
-                .order_by(Person.person_id)
-                .all(),
+                sess.query(wp).order_by(wp.person_id).all(),
                 [
                     Person(name="p1"),
                     Employee(name="e1", employee_data="ed1"),
@@ -1475,30 +1845,26 @@ class SingleFromPolySelectableTest(
 
         poly = (
             select(
-                [
+                employee.c.id,
+                employee.c.type,
+                employee.c.name,
+                manager.c.manager_data,
+                null().label("engineer_info"),
+                null().label("manager_id"),
+            )
+            .select_from(employee.join(manager))
+            .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
+            .union_all(
+                select(
                     employee.c.id,
                     employee.c.type,
                     employee.c.name,
-                    manager.c.manager_data,
-                    null().label("engineer_info"),
-                    null().label("manager_id"),
-                ]
-            )
-            .select_from(employee.join(manager))
-            .apply_labels()
-            .union_all(
-                select(
-                    [
-                        employee.c.id,
-                        employee.c.type,
-                        employee.c.name,
-                        null().label("manager_data"),
-                        engineer.c.engineer_info,
-                        engineer.c.manager_id,
-                    ]
+                    null().label("manager_data"),
+                    engineer.c.engineer_info,
+                    engineer.c.manager_id,
                 )
                 .select_from(employee.join(engineer))
-                .apply_labels()
+                .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
             )
             .alias()
         )
@@ -1511,7 +1877,7 @@ class SingleFromPolySelectableTest(
             [self.classes.Boss, self.classes.Manager, self.classes.Engineer],
             self._with_poly_fixture(),
         )
-        s = Session()
+        s = fixture_session()
         q = s.query(poly.Boss)
         self.assert_compile(
             q,
@@ -1535,7 +1901,7 @@ class SingleFromPolySelectableTest(
             "engineer.manager_id AS engineer_manager_id "
             "FROM employee JOIN engineer ON employee.id = engineer.id) "
             "AS anon_1 "
-            "WHERE anon_1.employee_type IN (:type_1)",
+            "WHERE anon_1.employee_type IN (__[POSTCOMPILE_type_1])",
         )
 
     def test_query_wpoly_single_inh_subclass(self):
@@ -1543,8 +1909,10 @@ class SingleFromPolySelectableTest(
 
         poly = self._with_poly_fixture()
 
-        s = Session()
-        q = s.query(Boss).with_polymorphic(Boss, poly)
+        s = fixture_session()
+
+        wp = with_polymorphic(Boss, [], poly)
+        q = s.query(wp)
         self.assert_compile(
             q,
             "SELECT anon_1.employee_id AS anon_1_employee_id, "
@@ -1562,27 +1930,35 @@ class SingleFromPolySelectableTest(
             "engineer.engineer_info AS engineer_engineer_info, "
             "engineer.manager_id AS engineer_manager_id "
             "FROM employee JOIN engineer ON employee.id = engineer.id) "
-            "AS anon_1 WHERE anon_1.employee_type IN (:type_1)",
+            "AS anon_1 WHERE anon_1.employee_type IN (__[POSTCOMPILE_type_1])",
         )
 
-    def test_single_inh_subclass_join_joined_inh_subclass(self):
+    @testing.combinations((True,), (False,), argnames="autoalias")
+    def test_single_inh_subclass_join_joined_inh_subclass(self, autoalias):
         Boss, Engineer = self.classes("Boss", "Engineer")
-        s = Session()
+        s = fixture_session()
 
-        q = s.query(Boss).join(Engineer, Engineer.manager_id == Boss.id)
+        if autoalias:
+            q = s.query(Boss).join(Engineer, Engineer.manager_id == Boss.id)
+        else:
+            e1 = aliased(Engineer, flat=True)
+            q = s.query(Boss).join(e1, e1.manager_id == Boss.id)
 
-        self.assert_compile(
-            q,
-            "SELECT manager.id AS manager_id, employee.id AS employee_id, "
-            "employee.name AS employee_name, "
-            "employee.type AS employee_type, "
-            "manager.manager_data AS manager_manager_data "
-            "FROM employee JOIN manager ON employee.id = manager.id "
-            "JOIN (employee AS employee_1 JOIN engineer AS engineer_1 "
-            "ON employee_1.id = engineer_1.id) "
-            "ON engineer_1.manager_id = manager.id "
-            "WHERE employee.type IN (:type_1)",
-        )
+        with _aliased_join_warning(
+            "Engineer->engineer"
+        ) if autoalias else util.nullcontext():
+            self.assert_compile(
+                q,
+                "SELECT manager.id AS manager_id, employee.id AS employee_id, "
+                "employee.name AS employee_name, "
+                "employee.type AS employee_type, "
+                "manager.manager_data AS manager_manager_data "
+                "FROM employee JOIN manager ON employee.id = manager.id "
+                "JOIN (employee AS employee_1 JOIN engineer AS engineer_1 "
+                "ON employee_1.id = engineer_1.id) "
+                "ON engineer_1.manager_id = manager.id "
+                "WHERE employee.type IN (__[POSTCOMPILE_type_1])",
+            )
 
     def test_single_inh_subclass_join_wpoly_joined_inh_subclass(self):
         Boss = self.classes.Boss
@@ -1592,7 +1968,7 @@ class SingleFromPolySelectableTest(
             self._with_poly_fixture(),
         )
 
-        s = Session()
+        s = fixture_session()
 
         q = s.query(Boss).join(
             poly.Engineer, poly.Engineer.manager_id == Boss.id
@@ -1618,28 +1994,38 @@ class SingleFromPolySelectableTest(
             "FROM employee "
             "JOIN engineer ON employee.id = engineer.id) AS anon_1 "
             "ON anon_1.manager_id = manager.id "
-            "WHERE employee.type IN (:type_1)",
+            "WHERE employee.type IN (__[POSTCOMPILE_type_1])",
         )
 
-    def test_joined_inh_subclass_join_single_inh_subclass(self):
+    @testing.combinations((True,), (False,), argnames="autoalias")
+    def test_joined_inh_subclass_join_single_inh_subclass(self, autoalias):
         Engineer = self.classes.Engineer
         Boss = self.classes.Boss
-        s = Session()
+        s = fixture_session()
 
-        q = s.query(Engineer).join(Boss, Engineer.manager_id == Boss.id)
+        if autoalias:
+            q = s.query(Engineer).join(Boss, Engineer.manager_id == Boss.id)
+        else:
+            b1 = aliased(Boss, flat=True)
+            q = s.query(Engineer).join(b1, Engineer.manager_id == b1.id)
 
-        self.assert_compile(
-            q,
-            "SELECT engineer.id AS engineer_id, employee.id AS employee_id, "
-            "employee.name AS employee_name, employee.type AS employee_type, "
-            "engineer.engineer_info AS engineer_engineer_info, "
-            "engineer.manager_id AS engineer_manager_id "
-            "FROM employee JOIN engineer ON employee.id = engineer.id "
-            "JOIN (employee AS employee_1 JOIN manager AS manager_1 "
-            "ON employee_1.id = manager_1.id) "
-            "ON engineer.manager_id = manager_1.id "
-            "AND employee_1.type IN (:type_1)",
-        )
+        with _aliased_join_warning(
+            "Boss->manager"
+        ) if autoalias else util.nullcontext():
+            self.assert_compile(
+                q,
+                "SELECT engineer.id AS engineer_id, "
+                "employee.id AS employee_id, "
+                "employee.name AS employee_name, "
+                "employee.type AS employee_type, "
+                "engineer.engineer_info AS engineer_engineer_info, "
+                "engineer.manager_id AS engineer_manager_id "
+                "FROM employee JOIN engineer ON employee.id = engineer.id "
+                "JOIN (employee AS employee_1 JOIN manager AS manager_1 "
+                "ON employee_1.id = manager_1.id) "
+                "ON engineer.manager_id = manager_1.id "
+                "AND employee_1.type IN (__[POSTCOMPILE_type_1])",
+            )
 
 
 class EagerDefaultEvalTest(fixtures.DeclarativeMappedTest):
@@ -1674,7 +2060,7 @@ class EagerDefaultEvalTest(fixtures.DeclarativeMappedTest):
 
         foo = Foo()
 
-        session = Session()
+        session = fixture_session()
         session.add(foo)
         session.flush()
 
@@ -1687,7 +2073,7 @@ class EagerDefaultEvalTest(fixtures.DeclarativeMappedTest):
     def test_persist_bar(self):
         Bar = self.classes.Bar
         bar = Bar()
-        session = Session()
+        session = fixture_session()
         session.add(bar)
         session.flush()
 
@@ -1712,4 +2098,36 @@ class EagerDefaultEvalTestPolymorphic(EagerDefaultEvalTest):
     def setup_classes(cls):
         super(EagerDefaultEvalTestPolymorphic, cls).setup_classes(
             with_polymorphic="*"
+        )
+
+
+class ColExprTest(AssertsCompiledSQL, fixtures.TestBase):
+    def test_discrim_on_column_prop(self, registry):
+        Base = registry.generate_base()
+
+        class Employee(Base):
+            __tablename__ = "employee"
+            id = Column(Integer, primary_key=True)
+            type = Column(String(20))
+
+            __mapper_args__ = {
+                "polymorphic_on": "type",
+                "polymorphic_identity": "employee",
+            }
+
+        class Engineer(Employee):
+            __mapper_args__ = {"polymorphic_identity": "engineer"}
+
+        class Company(Base):
+            __tablename__ = "company"
+            id = Column(Integer, primary_key=True)
+
+            max_engineer_id = column_property(
+                select(func.max(Engineer.id)).scalar_subquery()
+            )
+
+        self.assert_compile(
+            select(Company.max_engineer_id),
+            "SELECT (SELECT max(employee.id) AS max_1 FROM employee "
+            "WHERE employee.type IN (__[POSTCOMPILE_type_1])) AS anon_1",
         )

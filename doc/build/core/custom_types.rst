@@ -24,6 +24,7 @@ can be associated with any type::
     from sqlalchemy.ext.compiler import compiles
     from sqlalchemy.types import BINARY
 
+
     @compiles(BINARY, "sqlite")
     def compile_binary_sqlite(type_, compiler, **kw):
         return "BLOB"
@@ -67,6 +68,7 @@ to and/or from the database is required.
 .. autoclass:: TypeDecorator
    :members:
 
+   .. autoattribute:: cache_ok
 
 TypeDecorator Recipes
 ---------------------
@@ -92,6 +94,7 @@ which coerces as needed::
 
     from sqlalchemy.types import TypeDecorator, Unicode
 
+
     class CoerceUTF8(TypeDecorator):
         """Safely coerce Python bytestrings to Unicode
         before passing off to the database."""
@@ -100,7 +103,7 @@ which coerces as needed::
 
         def process_bind_param(self, value, dialect):
             if isinstance(value, str):
-                value = value.decode('utf-8')
+                value = value.decode("utf-8")
             return value
 
 Rounding Numerics
@@ -112,6 +115,7 @@ many decimal places.   Here's a recipe that rounds them down::
     from sqlalchemy.types import TypeDecorator, Numeric
     from decimal import Decimal
 
+
     class SafeNumeric(TypeDecorator):
         """Adds quantization to Numeric."""
 
@@ -119,12 +123,11 @@ many decimal places.   Here's a recipe that rounds them down::
 
         def __init__(self, *arg, **kw):
             TypeDecorator.__init__(self, *arg, **kw)
-            self.quantize_int = - self.impl.scale
+            self.quantize_int = -self.impl.scale
             self.quantize = Decimal(10) ** self.quantize_int
 
         def process_bind_param(self, value, dialect):
-            if isinstance(value, Decimal) and \
-                value.as_tuple()[2] < self.quantize_int:
+            if isinstance(value, Decimal) and value.as_tuple()[2] < self.quantize_int:
                 value = value.quantize(self.quantize)
             return value
 
@@ -146,23 +149,22 @@ denormalize::
 
     import datetime
 
+
     class TZDateTime(TypeDecorator):
         impl = DateTime
+        cache_ok = True
 
         def process_bind_param(self, value, dialect):
             if value is not None:
                 if not value.tzinfo:
                     raise TypeError("tzinfo is required")
-                value = value.astimezone(datetime.timezone.utc).replace(
-                    tzinfo=None
-                )
+                value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             return value
 
         def process_result_value(self, value, dialect):
             if value is not None:
                 value = value.replace(tzinfo=datetime.timezone.utc)
             return value
-
 
 .. _custom_guid_type:
 
@@ -178,6 +180,7 @@ binary in CHAR(16) if desired::
     from sqlalchemy.dialects.postgresql import UUID
     import uuid
 
+
     class GUID(TypeDecorator):
         """Platform-independent GUID type.
 
@@ -185,10 +188,12 @@ binary in CHAR(16) if desired::
         CHAR(32), storing as stringified hex values.
 
         """
+
         impl = CHAR
+        cache_ok = True
 
         def load_dialect_impl(self, dialect):
-            if dialect.name == 'postgresql':
+            if dialect.name == "postgresql":
                 return dialect.type_descriptor(UUID())
             else:
                 return dialect.type_descriptor(CHAR(32))
@@ -196,7 +201,7 @@ binary in CHAR(16) if desired::
         def process_bind_param(self, value, dialect):
             if value is None:
                 return value
-            elif dialect.name == 'postgresql':
+            elif dialect.name == "postgresql":
                 return str(value)
             else:
                 if not isinstance(value, uuid.UUID):
@@ -233,6 +238,8 @@ to/from JSON.   Can be modified to use Python's builtin json encoder::
 
         impl = VARCHAR
 
+        cache_ok = True
+
         def process_bind_param(self, value, dialect):
             if value is not None:
                 value = json.dumps(value)
@@ -264,11 +271,11 @@ dictionary-oriented JSON structure, we can apply this as::
 
     json_type = MutableDict.as_mutable(JSONEncodedDict)
 
+
     class MyClass(Base):
         #  ...
 
         json_data = Column(json_type)
-
 
 .. seealso::
 
@@ -290,8 +297,7 @@ get at this with a type like ``JSONEncodedDict``, we need to
 
     from sqlalchemy import type_coerce, String
 
-    stmt = select([my_table]).where(
-        type_coerce(my_table.c.json_data, String).like('%foo%'))
+    stmt = select(my_table).where(type_coerce(my_table.c.json_data, String).like("%foo%"))
 
 :class:`.TypeDecorator` provides a built-in system for working up type
 translations like these based on operators.  If we wanted to frequently use the
@@ -302,12 +308,15 @@ method::
     from sqlalchemy.sql import operators
     from sqlalchemy import String
 
+
     class JSONEncodedDict(TypeDecorator):
 
         impl = VARCHAR
 
+        cache_ok = True
+
         def coerce_compared_value(self, op, value):
-            if op in (operators.like_op, operators.notlike_op):
+            if op in (operators.like_op, operators.not_like_op):
                 return String()
             else:
                 return self
@@ -360,6 +369,7 @@ in conjunction with :data:`~.sqlalchemy.sql.expression.func`::
     from sqlalchemy import func
     from sqlalchemy.types import UserDefinedType
 
+
     class Geometry(UserDefinedType):
         def get_col_spec(self):
             return "GEOMETRY"
@@ -373,13 +383,18 @@ in conjunction with :data:`~.sqlalchemy.sql.expression.func`::
 We can apply the ``Geometry`` type into :class:`_schema.Table` metadata
 and use it in a :func:`_expression.select` construct::
 
-    geometry = Table('geometry', metadata,
-                  Column('geom_id', Integer, primary_key=True),
-                  Column('geom_data', Geometry)
-                )
+    geometry = Table(
+        "geometry",
+        metadata,
+        Column("geom_id", Integer, primary_key=True),
+        Column("geom_data", Geometry),
+    )
 
-    print(select([geometry]).where(
-      geometry.c.geom_data == 'LINESTRING(189412 252431,189631 259122)'))
+    print(
+        select(geometry).where(
+            geometry.c.geom_data == "LINESTRING(189412 252431,189631 259122)"
+        )
+    )
 
 The resulting SQL embeds both functions as appropriate.   ``ST_AsText``
 is applied to the columns clause so that the return value is run through
@@ -396,7 +411,7 @@ with the labeling of the wrapped expression.   Such as, if we rendered
 a :func:`_expression.select` against a :func:`.label` of our expression, the string
 label is moved to the outside of the wrapped expression::
 
-    print(select([geometry.c.geom_data.label('my_data')]))
+    print(select(geometry.c.geom_data.label("my_data")))
 
 Output::
 
@@ -408,16 +423,29 @@ Another example is we decorate
 PostgreSQL ``pgcrypto`` extension to encrypt/decrypt values
 transparently::
 
-    from sqlalchemy import create_engine, String, select, func, \
-            MetaData, Table, Column, type_coerce, TypeDecorator
+    from sqlalchemy import (
+        create_engine,
+        String,
+        select,
+        func,
+        MetaData,
+        Table,
+        Column,
+        type_coerce,
+        TypeDecorator,
+    )
 
     from sqlalchemy.dialects.postgresql import BYTEA
+
 
     class PGPString(TypeDecorator):
         impl = BYTEA
 
+        cache_ok = True
+
         def __init__(self, passphrase):
             super(PGPString, self).__init__()
+
             self.passphrase = passphrase
 
         def bind_expression(self, bindvalue):
@@ -430,24 +458,24 @@ transparently::
         def column_expression(self, col):
             return func.pgp_sym_decrypt(col, self.passphrase)
 
-    metadata = MetaData()
-    message = Table('message', metadata,
-                    Column('username', String(50)),
-                    Column('message',
-                        PGPString("this is my passphrase")),
-                )
+
+    metadata_obj = MetaData()
+    message = Table(
+        "message",
+        metadata_obj,
+        Column("username", String(50)),
+        Column("message", PGPString("this is my passphrase")),
+    )
 
     engine = create_engine("postgresql://scott:tiger@localhost/test", echo=True)
     with engine.begin() as conn:
-        metadata.create_all(conn)
+        metadata_obj.create_all(conn)
 
-        conn.execute(message.insert(), username="some user",
-                                    message="this is my message")
+        conn.execute(message.insert(), username="some user", message="this is my message")
 
-        print(conn.scalar(
-                select([message.c.message]).\
-                    where(message.c.username == "some user")
-            ))
+        print(
+            conn.scalar(select(message.c.message).where(message.c.username == "some user"))
+        )
 
 The ``pgp_sym_encrypt`` and ``pgp_sym_decrypt`` functions are applied
 to the INSERT and SELECT statements::
@@ -482,15 +510,38 @@ explicit methods on column expressions, such as
 :meth:`.ColumnOperators.in_` (``table.c.value.in_(['x', 'y'])``) and :meth:`.ColumnOperators.like`
 (``table.c.value.like('%ed%')``).
 
-The Core expression constructs in all cases consult the type of the expression in order to determine
-the behavior of existing operators, as well as to locate additional operators that aren't part of
-the built-in set.   The :class:`.TypeEngine` base class defines a root "comparison" implementation
-:class:`.TypeEngine.Comparator`, and many specific types provide their own sub-implementations of this
-class.   User-defined :class:`.TypeEngine.Comparator` implementations can be built directly into a
-simple subclass of a particular type in order to override or define new operations.  Below,
-we create a :class:`.Integer` subclass which overrides the :meth:`.ColumnOperators.__add__` operator::
+When the need arises for a SQL operator that isn't directly supported by the
+already supplied methods above, the most expedient way to produce this operator is
+to use the :meth:`_sql.Operators.op` method on any SQL expression object; this method
+is given a string representing the SQL operator to render, and the return value
+is a Python callable that accepts any arbitrary right-hand side expression::
+
+    >>> from sqlalchemy import column
+    >>> expr = column("x").op(">>")(column("y"))
+    >>> print(expr)
+    x >> y
+
+When making use of custom SQL types, there is also a means of implementing
+custom operators as above that are automatically present upon any column
+expression that makes use of that column type, without the need to directly
+call :meth:`_sql.Operators.op` each time the operator is to be used.
+
+To achieve this, a SQL
+expression construct consults the :class:`_types.TypeEngine` object associated
+with the construct in order to determine the behavior of the built-in
+operators as well as to look for new methods that may have been invoked.
+:class:`.TypeEngine` defines a
+"comparison" object implemented by the :class:`.TypeEngine.Comparator` class to provide the base
+behavior for SQL operators, and many specific types provide their own
+sub-implementations of this class. User-defined :class:`.TypeEngine.Comparator`
+implementations can be built directly into a simple subclass of a particular
+type in order to override or define new operations. Below, we create a
+:class:`.Integer` subclass which overrides the :meth:`.ColumnOperators.__add__`
+operator, which in turn uses :meth:`_sql.Operators.op` to produce the custom
+SQL itself::
 
     from sqlalchemy import Integer
+
 
     class MyInt(Integer):
         class comparator_factory(Integer.Comparator):
@@ -510,29 +561,26 @@ Usage::
 
 The implementation for :meth:`.ColumnOperators.__add__` is consulted
 by an owning SQL expression, by instantiating the :class:`.TypeEngine.Comparator` with
-itself as the ``expr`` attribute.   The mechanics of the expression
-system are such that operations continue recursively until an
-expression object produces a new SQL expression construct. Above, we
-could just as well have said ``self.expr.op("goofy")(other)`` instead
-of ``self.op("goofy")(other)``.
+itself as the ``expr`` attribute.  This attribute may be used when the
+implementation needs to refer to the originating :class:`_sql.ColumnElement`
+object directly::
 
-When using :meth:`.Operators.op` for comparison operations that return a
-boolean result, the :paramref:`.Operators.op.is_comparison` flag should be
-set to ``True``::
+    from sqlalchemy import Integer
+
 
     class MyInt(Integer):
         class comparator_factory(Integer.Comparator):
-            def is_frobnozzled(self, other):
-                return self.op("--is_frobnozzled->", is_comparison=True)(other)
+            def __add__(self, other):
+                return func.special_addition(self.expr, other)
 
 New methods added to a :class:`.TypeEngine.Comparator` are exposed on an
-owning SQL expression
-using a ``__getattr__`` scheme, which exposes methods added to
-:class:`.TypeEngine.Comparator` onto the owning :class:`_expression.ColumnElement`.
-For example, to add a ``log()`` function
+owning SQL expression object using a dynamic lookup scheme, which exposes methods added to
+:class:`.TypeEngine.Comparator` onto the owning :class:`_expression.ColumnElement`
+expression construct.  For example, to add a ``log()`` function
 to integers::
 
     from sqlalchemy import Integer, func
+
 
     class MyInt(Integer):
         class comparator_factory(Integer.Comparator):
@@ -544,6 +592,15 @@ Using the above type::
     >>> print(sometable.c.data.log(5))
     log(:log_1, :log_2)
 
+When using :meth:`.Operators.op` for comparison operations that return a
+boolean result, the :paramref:`.Operators.op.is_comparison` flag should be
+set to ``True``::
+
+    class MyInt(Integer):
+        class comparator_factory(Integer.Comparator):
+            def is_frobnozzled(self, other):
+                return self.op("--is_frobnozzled->", is_comparison=True)(other)
+
 Unary operations
 are also possible.  For example, to add an implementation of the
 PostgreSQL factorial operator, we combine the :class:`.UnaryExpression` construct
@@ -553,17 +610,18 @@ along with a :class:`.custom_op` to produce the factorial expression::
     from sqlalchemy.sql.expression import UnaryExpression
     from sqlalchemy.sql import operators
 
+
     class MyInteger(Integer):
         class comparator_factory(Integer.Comparator):
             def factorial(self):
-                return UnaryExpression(self.expr,
-                            modifier=operators.custom_op("!"),
-                            type_=MyInteger)
+                return UnaryExpression(
+                    self.expr, modifier=operators.custom_op("!"), type_=MyInteger
+                )
 
 Using the above type::
 
     >>> from sqlalchemy.sql import column
-    >>> print(column('x', MyInteger).factorial())
+    >>> print(column("x", MyInteger).factorial())
     x !
 
 .. seealso::
@@ -585,6 +643,7 @@ is needed, use :class:`.TypeDecorator` instead.
 .. autoclass:: UserDefinedType
    :members:
 
+   .. autoattribute:: cache_ok
 
 .. _custom_and_decorated_types_reflection:
 
@@ -614,8 +673,10 @@ datatype. For example::
 
     >>> from sqlalchemy import Table, Column, MetaData, create_engine, PickleType, Integer
     >>> metadata = MetaData()
-    >>> my_table = Table("my_table", metadata, Column('id', Integer), Column("data", PickleType))
-    >>> engine = create_engine("sqlite://", echo='debug')
+    >>> my_table = Table(
+    ...     "my_table", metadata, Column("id", Integer), Column("data", PickleType)
+    ... )
+    >>> engine = create_engine("sqlite://", echo="debug")
     >>> my_table.create(engine)
     INFO sqlalchemy.engine.base.Engine
     CREATE TABLE my_table (
@@ -666,7 +727,9 @@ use reflection in combination with explicit :class:`_schema.Column` objects for 
 columns for which we want to use a custom or decorated datatype::
 
     >>> metadata_three = MetaData()
-    >>> my_reflected_table = Table("my_table", metadata_three, Column("data", PickleType), autoload_with=engine)
+    >>> my_reflected_table = Table(
+    ...     "my_table", metadata_three, Column("data", PickleType), autoload_with=engine
+    ... )
 
 The ``my_reflected_table`` object above is reflected, and will load the
 definition of the "id" column from the SQLite database.  But for the "data"
@@ -688,6 +751,7 @@ for example we knew that we wanted all :class:`.BLOB` datatypes to in fact be
     from sqlalchemy import event
     from sqlalchemy import PickleType
     from sqlalchemy import Table
+
 
     @event.listens_for(Table, "column_reflect")
     def _setup_pickletype(inspector, table, column_info):

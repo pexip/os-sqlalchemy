@@ -1,18 +1,22 @@
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey
+from sqlalchemy import func
 from sqlalchemy import Integer
+from sqlalchemy import null
+from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import union_all
 from sqlalchemy import util
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm import attributes
 from sqlalchemy.orm import contains_eager
-from sqlalchemy.orm import create_session
 from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import defer
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import Load
 from sqlalchemy.orm import load_only
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import query_expression
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
@@ -27,7 +31,9 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
+from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
 from .inheritance._poly_fixtures import _Polymorphic
 from .inheritance._poly_fixtures import Boss
@@ -42,7 +48,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         Order, orders = self.classes.Order, self.tables.orders
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
@@ -51,7 +57,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         o = Order()
         self.assert_(o.description is None)
 
-        q = create_session().query(Order).order_by(Order.id)
+        q = fixture_session().query(Order).order_by(Order.id)
 
         def go():
             result = q.all()
@@ -71,8 +77,8 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                 ),
                 (
                     "SELECT orders.description AS orders_description "
-                    "FROM orders WHERE orders.id = :param_1",
-                    {"param_1": 3},
+                    "FROM orders WHERE orders.id = :pk_1",
+                    {"pk_1": 3},
                 ),
             ],
         )
@@ -82,10 +88,12 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         Order, orders = self.classes.Order, self.tables.orders
 
-        mapper(Order, orders, properties={"id": deferred(orders.c.id)})
+        self.mapper_registry.map_imperatively(
+            Order, orders, properties={"id": deferred(orders.c.id)}
+        )
 
         # right now, it's not that graceful :)
-        q = create_session().query(Order)
+        q = fixture_session().query(Order)
         assert_raises_message(
             sa.exc.NoSuchColumnError, "Could not locate", q.first
         )
@@ -95,13 +103,13 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         Order, orders = self.classes.Order, self.tables.orders
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o = Order()
         sess.add(o)
         o.id = 7
@@ -114,7 +122,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_synonym_group_bug(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -123,20 +131,20 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             },
         )
 
-        sess = create_session()
-        o1 = sess.query(Order).get(1)
+        sess = fixture_session()
+        o1 = sess.get(Order, 1)
         eq_(o1.description, "order 1")
 
     def test_unsaved_2(self):
         Order, orders = self.classes.Order, self.tables.orders
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o = Order()
         sess.add(o)
 
@@ -150,7 +158,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=dict(
@@ -159,7 +167,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o = Order()
         sess.add(o)
         o.id = 7
@@ -172,7 +180,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_unsaved_group_2(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=dict(
@@ -181,7 +189,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o = Order()
         sess.add(o)
 
@@ -193,14 +201,14 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_save(self):
         Order, orders = self.classes.Order, self.tables.orders
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
-        o2 = sess.query(Order).get(2)
+        sess = fixture_session()
+        o2 = sess.get(Order, 2)
         o2.isopen = 1
         sess.flush()
 
@@ -209,7 +217,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -228,7 +236,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).order_by(Order.id)
 
         def go():
@@ -251,8 +259,8 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                     "orders.address_id AS orders_address_id, "
                     "orders.description AS orders_description, "
                     "orders.isopen AS orders_isopen "
-                    "FROM orders WHERE orders.id = :param_1",
-                    {"param_1": 3},
+                    "FROM orders WHERE orders.id = :pk_1",
+                    {"pk_1": 3},
                 ),
             ],
         )
@@ -273,7 +281,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -282,8 +290,8 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                 "opened": deferred(orders.c.isopen, group="primary"),
             },
         )
-        sess = create_session()
-        o = sess.query(Order).get(3)
+        sess = fixture_session(autoflush=False)
+        o = sess.get(Order, 3)
         assert "userident" not in o.__dict__
         o.description = "somenewdescription"
         eq_(o.description, "somenewdescription")
@@ -304,7 +312,7 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -314,8 +322,8 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             },
         )
 
-        sess = create_session()
-        o2 = sess.query(Order).get(3)
+        sess = fixture_session()
+        o2 = sess.get(Order, 3)
 
         # this will load the group of attributes
         eq_(o2.description, "order 3")
@@ -334,21 +342,19 @@ class DeferredTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         Order, orders = self.classes.Order, self.tables.orders
 
         order_select = sa.select(
-            [
-                orders.c.id,
-                orders.c.user_id,
-                orders.c.address_id,
-                orders.c.description,
-                orders.c.isopen,
-            ]
+            orders.c.id,
+            orders.c.user_id,
+            orders.c.address_id,
+            orders.c.description,
+            orders.c.isopen,
         ).alias()
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             order_select,
             properties={"description": deferred(order_select.c.description)},
         )
 
-        sess = Session()
+        sess = fixture_session()
         o1 = sess.query(Order).order_by(Order.id).first()
         assert "description" not in o1.__dict__
         eq_(o1.description, "order 1")
@@ -362,10 +368,10 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
-        q = sess.query(Order).order_by(Order.id).options(defer("user_id"))
+        sess = fixture_session()
+        q = sess.query(Order).order_by(Order.id).options(defer(Order.user_id))
 
         def go():
             q.all()[0].user_id
@@ -383,14 +389,14 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                 ),
                 (
                     "SELECT orders.user_id AS orders_user_id "
-                    "FROM orders WHERE orders.id = :param_1",
-                    {"param_1": 1},
+                    "FROM orders WHERE orders.id = :pk_1",
+                    {"pk_1": 1},
                 ),
             ],
         )
         sess.expunge_all()
 
-        q2 = q.options(undefer("user_id"))
+        q2 = q.options(undefer(Order.user_id))
         self.sql_eq_(
             q2.all,
             [
@@ -409,7 +415,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_undefer_group(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -424,7 +430,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).order_by(Order.id)
 
         def go():
@@ -452,7 +458,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_undefer_group_multi(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -467,7 +473,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).order_by(Order.id)
 
         def go():
@@ -497,7 +503,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_undefer_group_multi_pathed(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -512,7 +518,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).order_by(Order.id)
 
         def go():
@@ -547,12 +553,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             self.tables.orders,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(orders=relationship(Order, order_by=orders.c.id)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -567,7 +573,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = (
             sess.query(User)
             .filter(User.id == 7)
@@ -610,12 +616,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             self.tables.orders,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(orders=relationship(Order, order_by=orders.c.id)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -630,7 +636,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = (
             sess.query(User)
             .filter(User.id == 7)
@@ -676,12 +682,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             self.tables.orders,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(orders=relationship(Order, order_by=orders.c.id)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -696,7 +702,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = (
             sess.query(User)
             .filter(User.id == 7)
@@ -736,12 +742,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             self.tables.orders,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(orders=relationship(Order, order_by=orders.c.id)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -759,7 +765,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = (
             sess.query(User)
             .filter(User.id == 7)
@@ -795,7 +801,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_undefer_star(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=util.OrderedDict(
@@ -807,7 +813,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).options(Load(Order).undefer("*"))
         self.assert_compile(
             q,
@@ -825,17 +831,17 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         o1 = (
             sess.query(Order)
             .order_by(Order.id)
-            .add_column(orders.c.description)
+            .add_columns(orders.c.description)
             .first()
         )[0]
 
@@ -858,14 +864,14 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
 
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
-        stmt = sa.select([Order]).order_by(Order.id)
+        sess = fixture_session()
+        stmt = sa.select(Order).order_by(Order.id)
         o1 = (sess.query(Order).from_statement(stmt).all())[0]
 
         def go():
@@ -874,6 +880,72 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         # prior to 1.0 we'd search in the result for this column
         # self.sql_count_(0, go)
         self.sql_count_(1, go)
+
+    def test_raise_on_col_rowproc_only(self):
+        orders, Order = self.tables.orders, self.classes.Order
+
+        self.mapper_registry.map_imperatively(
+            Order,
+            orders,
+            properties={
+                "description": deferred(orders.c.description, raiseload=True)
+            },
+        )
+
+        sess = fixture_session()
+        stmt = sa.select(Order).order_by(Order.id)
+        o1 = (sess.query(Order).from_statement(stmt).all())[0]
+
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'Order.description' is not available due to raiseload=True",
+            getattr,
+            o1,
+            "description",
+        )
+
+    def test_locates_col_w_option_rowproc_only(self):
+        orders, Order = self.tables.orders, self.classes.Order
+
+        self.mapper_registry.map_imperatively(Order, orders)
+
+        sess = fixture_session()
+        stmt = sa.select(Order).order_by(Order.id)
+        o1 = (
+            sess.query(Order)
+            .from_statement(stmt)
+            .options(defer(Order.description))
+            .all()
+        )[0]
+
+        def go():
+            eq_(o1.description, "order 1")
+
+        # prior to 1.0 we'd search in the result for this column
+        # self.sql_count_(0, go)
+        self.sql_count_(1, go)
+
+    def test_raise_on_col_w_option_rowproc_only(self):
+        orders, Order = self.tables.orders, self.classes.Order
+
+        self.mapper_registry.map_imperatively(Order, orders)
+
+        sess = fixture_session()
+        stmt = sa.select(Order).order_by(Order.id)
+        o1 = (
+            sess.query(Order)
+            .from_statement(stmt)
+            .options(defer(Order.description, raiseload=True))
+            .all()
+        )[0]
+
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'Order.description' is not available due to raiseload=True",
+            getattr,
+            o1,
+            "description",
+        )
 
     def test_deep_options(self):
         users, items, order_items, Order, Item, User, orders = (
@@ -886,23 +958,23 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             self.tables.orders,
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Item,
             items,
             properties=dict(description=deferred(items.c.description)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties=dict(items=relationship(Item, secondary=order_items)),
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=dict(orders=relationship(Order, order_by=orders.c.id)),
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User).order_by(User.id)
         result = q.all()
         item = result[0].orders[1].items[1]
@@ -914,7 +986,11 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         eq_(item.description, "item 4")
 
         sess.expunge_all()
-        result = q.options(undefer("orders.items.description")).all()
+        result = q.options(
+            defaultload(User.orders)
+            .defaultload(Order.items)
+            .undefer(Item.description)
+        ).all()
         item = result[0].orders[1].items[1]
 
         def go():
@@ -935,12 +1011,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         items = self.tables.items
         order_items = self.tables.order_items
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties={"orders": relationship(Order, lazy="joined")},
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={
@@ -949,9 +1025,9 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
                 )
             },
         )
-        mapper(Item, items)
+        self.mapper_registry.map_imperatively(Item, items)
 
-        sess = create_session()
+        sess = fixture_session()
 
         exp = (
             "SELECT users.id AS users_id, users.name AS users_name, "
@@ -977,12 +1053,16 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(User, users, properties={"orders": relationship(Order)})
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(
+            User, users, properties={"orders": relationship(Order)}
+        )
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User).options(
-            joinedload(User.orders).defer("description").defer("isopen")
+            joinedload(User.orders)
+            .defer(Order.description)
+            .defer(Order.isopen)
         )
         self.assert_compile(
             q,
@@ -999,10 +1079,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_load_only_no_pk(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
-        q = sess.query(Order).options(load_only("isopen", "description"))
+        sess = fixture_session()
+        q = sess.query(Order).options(
+            load_only(Order.isopen, Order.description)
+        )
         self.assert_compile(
             q,
             "SELECT orders.id AS orders_id, "
@@ -1013,28 +1095,28 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
     def test_load_only_no_pk_rt(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
+        sess = fixture_session()
         q = (
             sess.query(Order)
             .order_by(Order.id)
-            .options(load_only("isopen", "description"))
+            .options(load_only(Order.isopen, Order.description))
         )
         eq_(q.first(), Order(id=1))
 
     def test_load_only_w_deferred(self):
         orders, Order = self.tables.orders, self.classes.Order
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Order,
             orders,
             properties={"description": deferred(orders.c.description)},
         )
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(Order).options(
-            load_only("isopen", "description"), undefer("user_id")
+            load_only(Order.isopen, Order.description), undefer(Order.user_id)
         )
         self.assert_compile(
             q,
@@ -1042,6 +1124,26 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             "orders.id AS orders_id, "
             "orders.user_id AS orders_user_id, "
             "orders.isopen AS orders_isopen FROM orders",
+        )
+
+    def test_load_only_synonym(self):
+        orders, Order = self.tables.orders, self.classes.Order
+
+        self.mapper_registry.map_imperatively(
+            Order,
+            orders,
+            properties={"desc": synonym("description")},
+        )
+
+        opt = load_only(Order.isopen, Order.desc)
+
+        sess = fixture_session()
+        q = sess.query(Order).options(opt)
+        self.assert_compile(
+            q,
+            "SELECT orders.id AS orders_id, orders.description "
+            "AS orders_description, orders.isopen AS orders_isopen "
+            "FROM orders",
         )
 
     def test_load_only_propagate_unbound(self):
@@ -1057,15 +1159,17 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         users = self.tables.users
         addresses = self.tables.addresses
 
-        mapper(User, users, properties={"addresses": relationship(Address)})
-        mapper(Address, addresses)
+        self.mapper_registry.map_imperatively(
+            User, users, properties={"addresses": relationship(Address)}
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
 
-        sess = create_session()
+        sess = fixture_session()
         expected = [
             (
                 "SELECT users.id AS users_id, users.name AS users_name "
-                "FROM users WHERE users.id IN (:id_1, :id_2)",
-                {"id_2": 8, "id_1": 7},
+                "FROM users WHERE users.id IN (__[POSTCOMPILE_id_1])",
+                {"id_1": [7, 8]},
             ),
             (
                 "SELECT addresses.id AS addresses_id, "
@@ -1085,10 +1189,12 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             opt = (
                 Load(User)
                 .defaultload(User.addresses)
-                .load_only("id", "email_address")
+                .load_only(Address.id, Address.email_address)
             )
         else:
-            opt = defaultload(User.addresses).load_only("id", "email_address")
+            opt = defaultload(User.addresses).load_only(
+                Address.id, Address.email_address
+            )
         q = sess.query(User).options(opt).filter(User.id.in_([7, 8]))
 
         def go():
@@ -1106,15 +1212,15 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         addresses = self.tables.addresses
         orders = self.tables.orders
 
-        mapper(User, users)
-        mapper(Address, addresses)
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(User, users)
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
+        sess = fixture_session()
         q = sess.query(User, Order, Address).options(
-            Load(User).load_only("name"),
-            Load(Order).load_only("id"),
-            Load(Address).load_only("id", "email_address"),
+            Load(User).load_only(User.name),
+            Load(Order).load_only(Order.id),
+            Load(Address).load_only(Address.id, Address.email_address),
         )
 
         self.assert_compile(
@@ -1136,7 +1242,7 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
         addresses = self.tables.addresses
         orders = self.tables.orders
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             users,
             properties=util.OrderedDict(
@@ -1147,16 +1253,16 @@ class DeferredOptionsTest(AssertsCompiledSQL, _fixtures.FixtureTest):
             ),
         )
 
-        mapper(Address, addresses)
-        mapper(Order, orders)
+        self.mapper_registry.map_imperatively(Address, addresses)
+        self.mapper_registry.map_imperatively(Order, orders)
 
-        sess = create_session()
+        sess = fixture_session()
 
         q = sess.query(User).options(
-            load_only("name")
-            .defaultload("addresses")
-            .load_only("id", "email_address"),
-            defaultload("orders").load_only("id"),
+            load_only(User.name)
+            .defaultload(User.addresses)
+            .load_only(Address.id, Address.email_address),
+            defaultload(User.orders).load_only(Order.id),
         )
 
         # hmmmm joinedload seems to be forcing users.id into here...
@@ -1205,7 +1311,7 @@ class SelfReferentialMultiPathTest(testing.fixtures.DeclarativeMappedTest):
     def test_present_overrides_deferred(self):
         Node = self.classes.Node
 
-        session = Session()
+        session = fixture_session()
 
         q = session.query(Node).options(
             joinedload(Node.parent).load_only(Node.id, Node.parent_id)
@@ -1231,14 +1337,16 @@ class InheritanceTest(_Polymorphic):
         super(InheritanceTest, cls).setup_mappers()
         from sqlalchemy import inspect
 
-        inspect(Company).add_property("managers", relationship(Manager))
+        inspect(Company).add_property(
+            "managers", relationship(Manager, viewonly=True)
+        )
 
     def test_load_only_subclass(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Manager)
             .order_by(Manager.person_id)
-            .options(load_only("status", "manager_name"))
+            .options(load_only(Manager.status, Manager.manager_name))
         )
         self.assert_compile(
             q,
@@ -1253,11 +1361,13 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_bound(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Manager)
             .order_by(Manager.person_id)
-            .options(Load(Manager).load_only("status", "manager_name"))
+            .options(
+                Load(Manager).load_only(Manager.status, Manager.manager_name)
+            )
         )
         self.assert_compile(
             q,
@@ -1272,11 +1382,11 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_and_superclass(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Boss)
             .order_by(Person.person_id)
-            .options(load_only("status", "manager_name"))
+            .options(load_only(Boss.status, Boss.manager_name))
         )
         self.assert_compile(
             q,
@@ -1291,11 +1401,11 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_and_superclass_bound(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Boss)
             .order_by(Person.person_id)
-            .options(Load(Boss).load_only("status", "manager_name"))
+            .options(Load(Boss).load_only(Boss.status, Manager.manager_name))
         )
         self.assert_compile(
             q,
@@ -1310,12 +1420,12 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_alias_subclass(self):
-        s = Session()
+        s = fixture_session()
         m1 = aliased(Manager, flat=True)
         q = (
             s.query(m1)
             .order_by(m1.person_id)
-            .options(load_only("status", "manager_name"))
+            .options(load_only(m1.status, m1.manager_name))
         )
         self.assert_compile(
             q,
@@ -1330,12 +1440,12 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_alias_subclass_bound(self):
-        s = Session()
+        s = fixture_session()
         m1 = aliased(Manager, flat=True)
         q = (
             s.query(m1)
             .order_by(m1.person_id)
-            .options(Load(m1).load_only("status", "manager_name"))
+            .options(Load(m1).load_only(m1.status, m1.manager_name))
         )
         self.assert_compile(
             q,
@@ -1350,7 +1460,7 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_from_relationship_polymorphic(self):
-        s = Session()
+        s = fixture_session()
         wp = with_polymorphic(Person, [Manager], flat=True)
         q = (
             s.query(Company)
@@ -1377,7 +1487,7 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_from_relationship_polymorphic_bound(self):
-        s = Session()
+        s = fixture_session()
         wp = with_polymorphic(Person, [Manager], flat=True)
         q = (
             s.query(Company)
@@ -1404,13 +1514,13 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_from_relationship(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Company)
             .join(Company.managers)
             .options(
                 contains_eager(Company.managers).load_only(
-                    "status", "manager_name"
+                    Manager.status, Manager.manager_name
                 )
             )
         )
@@ -1428,14 +1538,14 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_subclass_from_relationship_bound(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Company)
             .join(Company.managers)
             .options(
                 Load(Company)
                 .contains_eager(Company.managers)
-                .load_only("status", "manager_name")
+                .load_only(Manager.status, Manager.manager_name)
             )
         )
         self.assert_compile(
@@ -1454,14 +1564,11 @@ class InheritanceTest(_Polymorphic):
     def test_defer_on_wildcard_subclass(self):
         # pretty much the same as load_only except doesn't
         # exclude the primary key
-
-        # TODO: what is ".*"?  this is not documented anywhere, how did this
-        # get implemented without docs ?  see #4390
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Manager)
             .order_by(Person.person_id)
-            .options(defer(".*"), undefer("status"))
+            .options(defer("*"), undefer(Manager.status))
         )
         self.assert_compile(
             q,
@@ -1474,9 +1581,11 @@ class InheritanceTest(_Polymorphic):
         # to have this ".*" featue.
 
     def test_load_only_subclass_of_type(self):
-        s = Session()
+        s = fixture_session()
         q = s.query(Company).options(
-            joinedload(Company.employees.of_type(Manager)).load_only("status")
+            joinedload(Company.employees.of_type(Manager)).load_only(
+                Manager.status
+            )
         )
         self.assert_compile(
             q,
@@ -1500,7 +1609,7 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_wildcard_subclass_of_type(self):
-        s = Session()
+        s = fixture_session()
         q = s.query(Company).options(
             joinedload(Company.employees.of_type(Manager)).defer("*")
         )
@@ -1522,8 +1631,12 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_defer_super_name_on_subclass(self):
-        s = Session()
-        q = s.query(Manager).order_by(Person.person_id).options(defer("name"))
+        s = fixture_session()
+        q = (
+            s.query(Manager)
+            .order_by(Person.person_id)
+            .options(defer(Person.name))
+        )
         self.assert_compile(
             q,
             "SELECT managers.person_id AS managers_person_id, "
@@ -1537,11 +1650,11 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_defer_super_name_on_subclass_bound(self):
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(Manager)
             .order_by(Person.person_id)
-            .options(Load(Manager).defer("name"))
+            .options(Load(Manager).defer(Manager.name))
         )
         self.assert_compile(
             q,
@@ -1556,7 +1669,7 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_from_with_polymorphic(self):
-        s = Session()
+        s = fixture_session()
 
         wp = with_polymorphic(Person, [Manager], flat=True)
 
@@ -1565,8 +1678,7 @@ class InheritanceTest(_Polymorphic):
             'Mapped attribute "Manager.status" does not apply to any of the '
             "root entities in this query, e.g. "
             r"with_polymorphic\(Person, \[Manager\]\).",
-            s.query(wp).options,
-            load_only(Manager.status),
+            s.query(wp).options(load_only(Manager.status))._compile_context,
         )
 
         q = s.query(wp).options(load_only(wp.Manager.status))
@@ -1582,28 +1694,21 @@ class InheritanceTest(_Polymorphic):
         )
 
     def test_load_only_of_type_with_polymorphic(self):
-        s = Session()
+        s = fixture_session()
 
         wp = with_polymorphic(Person, [Manager], flat=True)
-
-        # needs to be explicit, we don't currently dig onto all the
-        # sub-entities in the wp
-        assert_raises_message(
-            sa.exc.ArgumentError,
-            r'Can\'t find property named "status" on '
-            r"with_polymorphic\(Person, \[Manager\]\) in this Query.",
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(wp)).load_only("status"),
-        )
 
         assert_raises_message(
             sa.exc.ArgumentError,
             'Attribute "Manager.status" does not link from element '
             r'"with_polymorphic\(Person, \[Manager\]\)"',
-            s.query(Company).options,
-            joinedload(Company.employees.of_type(wp)).load_only(
-                Manager.status
-            ),
+            s.query(Company)
+            .options(
+                joinedload(Company.employees.of_type(wp)).load_only(
+                    Manager.status
+                )
+            )
+            ._compile_context,
         )
 
         self.assert_compile(
@@ -1642,6 +1747,14 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
 
             bs = relationship("B", order_by="B.id")
 
+        class A_default(fixtures.ComparableEntity, Base):
+            __tablename__ = "a_default"
+            id = Column(Integer, primary_key=True)
+            x = Column(Integer)
+            y = Column(Integer)
+
+            my_expr = query_expression(default_expr=literal(15))
+
         class B(fixtures.ComparableEntity, Base):
             __tablename__ = "b"
             id = Column(Integer, primary_key=True)
@@ -1660,7 +1773,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
 
     @classmethod
     def insert_data(cls, connection):
-        A, B, C = cls.classes("A", "B", "C")
+        A, A_default, B, C = cls.classes("A", "A_default", "B", "C")
         s = Session(connection)
 
         s.add_all(
@@ -1671,6 +1784,8 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
                 A(id=4, x=2, y=10, bs=[B(id=4, p=19, q=8), B(id=5, p=5, q=5)]),
                 C(id=1, x=1),
                 C(id=2, x=2),
+                A_default(id=1, x=1, y=2),
+                A_default(id=2, x=2, y=3),
             ]
         )
 
@@ -1679,7 +1794,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_simple_expr(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         a1 = (
             s.query(A)
             .options(with_expression(A.my_expr, A.x + A.y))
@@ -1692,13 +1807,15 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_expr_default_value(self):
         A = self.classes.A
         C = self.classes.C
-        s = Session()
+        s = fixture_session()
 
         a1 = s.query(A).order_by(A.id).filter(A.x > 1)
         eq_(a1.all(), [A(my_expr=None), A(my_expr=None), A(my_expr=None)])
 
         c1 = s.query(C).order_by(C.id)
         eq_(c1.all(), [C(c_expr=1), C(c_expr=1)])
+
+        s.expunge_all()
 
         c2 = (
             s.query(C)
@@ -1711,7 +1828,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_reuse_expr(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
 
         # so people will obv. want to say, "filter(A.my_expr > 10)".
         # but that means Query or Core has to post-modify the statement
@@ -1729,7 +1846,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_in_joinedload(self):
         A, B = self.classes("A", "B")
 
-        s = Session()
+        s = fixture_session()
 
         q = (
             s.query(A)
@@ -1745,8 +1862,8 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_no_refresh_unless_populate_existing(self):
         A = self.classes.A
 
-        s = Session()
-        a1 = s.query(A).first()
+        s = fixture_session()
+        a1 = s.query(A).options(with_expression(A.my_expr, null())).first()
 
         def go():
             eq_(a1.my_expr, None)
@@ -1777,7 +1894,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_no_sql_not_set_up(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         a1 = s.query(A).first()
 
         def go():
@@ -1788,7 +1905,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_dont_explode_on_expire_individual(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(A)
             .options(with_expression(A.my_expr, A.x + A.y))
@@ -1817,7 +1934,7 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
     def test_dont_explode_on_expire_whole(self):
         A = self.classes.A
 
-        s = Session()
+        s = fixture_session()
         q = (
             s.query(A)
             .options(with_expression(A.my_expr, A.x + A.y))
@@ -1842,3 +1959,500 @@ class WithExpressionTest(fixtures.DeclarativeMappedTest):
         )
         q.first()
         eq_(a1.my_expr, 5)
+
+    @testing.combinations("core", "orm", argnames="use_core")
+    @testing.combinations(
+        "from_statement", "aliased", argnames="use_from_statement"
+    )
+    @testing.combinations(
+        "same_name", "different_name", argnames="use_same_labelname"
+    )
+    @testing.combinations(
+        "has_default", "no_default", argnames="attr_has_default"
+    )
+    def test_expr_from_subq_plain(
+        self,
+        use_core,
+        use_from_statement,
+        use_same_labelname,
+        attr_has_default,
+    ):
+        """test #8881"""
+
+        if attr_has_default == "has_default":
+            A = self.classes.A_default
+        else:
+            A = self.classes.A
+
+        s = fixture_session()
+
+        if use_same_labelname == "same_name":
+            labelname = "my_expr"
+        else:
+            labelname = "hi"
+
+        if use_core == "core":
+            stmt = select(A.__table__, literal(12).label(labelname))
+        else:
+            stmt = select(A, literal(12).label(labelname))
+
+        if use_from_statement == "aliased":
+            subq = stmt.subquery()
+            a1 = aliased(A, subq)
+            stmt = select(a1).options(
+                with_expression(a1.my_expr, subq.c[labelname])
+            )
+        else:
+            subq = stmt
+            stmt = (
+                select(A)
+                .options(
+                    with_expression(
+                        A.my_expr, subq.selected_columns[labelname]
+                    )
+                )
+                .from_statement(subq)
+            )
+
+        a_obj = s.scalars(stmt).first()
+
+        if (
+            use_same_labelname == "same_name"
+            and attr_has_default == "has_default"
+            and use_core == "orm"
+        ):
+            eq_(a_obj.my_expr, 15)
+        else:
+            eq_(a_obj.my_expr, 12)
+
+    @testing.combinations("core", "orm", argnames="use_core")
+    @testing.combinations(
+        "from_statement", "aliased", argnames="use_from_statement"
+    )
+    @testing.combinations(
+        "same_name", "different_name", argnames="use_same_labelname"
+    )
+    @testing.combinations(
+        "has_default", "no_default", argnames="attr_has_default"
+    )
+    def test_expr_from_subq_union(
+        self,
+        use_core,
+        use_from_statement,
+        use_same_labelname,
+        attr_has_default,
+    ):
+        """test #8881"""
+
+        if attr_has_default == "has_default":
+            A = self.classes.A_default
+        else:
+            A = self.classes.A
+
+        s = fixture_session()
+
+        if use_same_labelname == "same_name":
+            labelname = "my_expr"
+        else:
+            labelname = "hi"
+
+        if use_core == "core":
+            stmt = union_all(
+                select(A.__table__, literal(12).label(labelname)).where(
+                    A.__table__.c.id == 1
+                ),
+                select(A.__table__, literal(18).label(labelname)).where(
+                    A.__table__.c.id == 2
+                ),
+            )
+
+        else:
+            stmt = union_all(
+                select(A, literal(12).label(labelname)).where(A.id == 1),
+                select(A, literal(18).label(labelname)).where(A.id == 2),
+            )
+
+        if use_from_statement == "aliased":
+            subq = stmt.subquery()
+            a1 = aliased(A, subq)
+            stmt = select(a1).options(
+                with_expression(a1.my_expr, subq.c[labelname])
+            )
+        else:
+            subq = stmt
+            stmt = (
+                select(A)
+                .options(
+                    with_expression(
+                        A.my_expr, subq.selected_columns[labelname]
+                    )
+                )
+                .from_statement(subq)
+            )
+
+        a_objs = s.scalars(stmt).all()
+
+        if (
+            use_same_labelname == "same_name"
+            and attr_has_default == "has_default"
+            and use_core == "orm"
+        ):
+            eq_(a_objs[0].my_expr, 15)
+            eq_(a_objs[1].my_expr, 15)
+        else:
+            eq_(a_objs[0].my_expr, 12)
+            eq_(a_objs[1].my_expr, 18)
+
+
+class RaiseLoadTest(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(fixtures.ComparableEntity, Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            x = Column(Integer)
+            y = deferred(Column(Integer))
+            z = deferred(Column(Integer), raiseload=True)
+
+    @classmethod
+    def insert_data(cls, connection):
+        A = cls.classes.A
+        s = Session(connection)
+        s.add(A(id=1, x=2, y=3, z=4))
+        s.commit()
+
+    def test_mapper_raise(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).first()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.z' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "z",
+        )
+        eq_(a1.x, 2)
+
+    def test_mapper_defer_unraise(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.z)).first()
+        assert "z" not in a1.__dict__
+        eq_(a1.z, 4)
+        eq_(a1.x, 2)
+
+    def test_mapper_undefer_unraise(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(undefer(A.z)).first()
+        assert "z" in a1.__dict__
+        eq_(a1.z, 4)
+        eq_(a1.x, 2)
+
+    def test_deferred_raise_option_raise_column_plain(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.x)).first()
+        a1.x
+
+        s.close()
+
+        a1 = s.query(A).options(defer(A.x, raiseload=True)).first()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.x' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "x",
+        )
+
+    def test_deferred_raise_option_load_column_unexpire(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.x, raiseload=True)).first()
+        s.expire(a1, ["x"])
+
+        # after expire(), options are cleared.  relationship w/ raiseload
+        # works this way also
+        eq_(a1.x, 2)
+
+    def test_mapper_raise_after_expire_attr(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).first()
+
+        s.expire(a1, ["z"])
+
+        # raises even after expire()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.z' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "z",
+        )
+
+    def test_mapper_raise_after_expire_obj(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).first()
+
+        s.expire(a1)
+
+        # raises even after expire()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.z' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "z",
+        )
+
+    def test_mapper_raise_after_modify_attr_expire_obj(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).first()
+
+        a1.z = 10
+        s.expire(a1)
+
+        # raises even after expire()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.z' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "z",
+        )
+
+    def test_deferred_raise_option_load_after_expire_obj(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.y, raiseload=True)).first()
+
+        s.expire(a1)
+
+        # after expire(), options are cleared.  relationship w/ raiseload
+        # works this way also
+        eq_(a1.y, 3)
+
+    def test_option_raiseload_unexpire_modified_obj(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.y, raiseload=True)).first()
+
+        a1.y = 10
+        s.expire(a1)
+
+        # after expire(), options are cleared.  relationship w/ raiseload
+        # works this way also
+        eq_(a1.y, 3)
+
+    def test_option_raise_deferred(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.y, raiseload=True)).first()
+
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            "'A.y' is not available due to raiseload=True",
+            getattr,
+            a1,
+            "y",
+        )
+
+    def test_does_expire_cancel_normal_defer_option(self):
+        A = self.classes.A
+        s = fixture_session()
+        a1 = s.query(A).options(defer(A.x)).first()
+
+        # expire object
+        s.expire(a1)
+
+        # unexpire object
+        eq_(a1.id, 1)
+
+        assert "x" in a1.__dict__
+
+
+class AutoflushTest(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(Base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            bs = relationship("B")
+
+        class B(Base):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+
+        A.b_count = deferred(
+            select(func.count(1)).where(A.id == B.a_id).scalar_subquery()
+        )
+
+    def test_deferred_autoflushes(self):
+        A, B = self.classes("A", "B")
+
+        s = fixture_session()
+
+        a1 = A(id=1, bs=[B()])
+        s.add(a1)
+        s.commit()
+
+        eq_(a1.b_count, 1)
+        s.close()
+
+        a1 = s.query(A).first()
+        assert "b_count" not in a1.__dict__
+
+        b1 = B(a_id=1)
+        s.add(b1)
+
+        eq_(a1.b_count, 2)
+
+        assert b1 in s
+
+
+class DeferredPopulationTest(fixtures.MappedTest):
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "thing",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("name", String(20)),
+        )
+
+        Table(
+            "human",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("thing_id", Integer, ForeignKey("thing.id")),
+            Column("name", String(20)),
+        )
+
+    @classmethod
+    def setup_mappers(cls):
+        thing, human = cls.tables.thing, cls.tables.human
+
+        class Human(cls.Basic):
+            pass
+
+        class Thing(cls.Basic):
+            pass
+
+        cls.mapper_registry.map_imperatively(
+            Human, human, properties={"thing": relationship(Thing)}
+        )
+        cls.mapper_registry.map_imperatively(
+            Thing, thing, properties={"name": deferred(thing.c.name)}
+        )
+
+    @classmethod
+    def insert_data(cls, connection):
+        thing, human = cls.tables.thing, cls.tables.human
+
+        connection.execute(thing.insert(), [{"id": 1, "name": "Chair"}])
+
+        connection.execute(
+            human.insert(), [{"id": 1, "thing_id": 1, "name": "Clark Kent"}]
+        )
+
+    def _test(self, thing):
+        assert "name" in attributes.instance_state(thing).dict
+
+    def test_no_previous_query(self):
+        Thing = self.classes.Thing
+
+        session = fixture_session()
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_query_twice_with_clear(self):
+        Thing = self.classes.Thing
+
+        session = fixture_session()
+        result = session.query(Thing).first()  # noqa
+        session.expunge_all()
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_query_twice_no_clear(self):
+        Thing = self.classes.Thing
+
+        session = fixture_session()
+        result = session.query(Thing).first()  # noqa
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_joinedload_with_clear(self):
+        Thing, Human = self.classes.Thing, self.classes.Human
+
+        session = fixture_session()
+        human = (  # noqa
+            session.query(Human)
+            .options(sa.orm.joinedload(Human.thing))
+            .first()
+        )
+        session.expunge_all()
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_joinedload_no_clear(self):
+        Thing, Human = self.classes.Thing, self.classes.Human
+
+        session = fixture_session()
+        human = (  # noqa
+            session.query(Human)
+            .options(sa.orm.joinedload(Human.thing))
+            .first()
+        )
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_join_with_clear(self):
+        Thing, Human = self.classes.Thing, self.classes.Human
+
+        session = fixture_session()
+        result = (  # noqa
+            session.query(Human).add_entity(Thing).join(Human.thing).first()
+        )
+        session.expunge_all()
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)
+
+    def test_join_no_clear(self):
+        Thing, Human = self.classes.Thing, self.classes.Human
+
+        session = fixture_session()
+        result = (  # noqa
+            session.query(Human).add_entity(Thing).join(Human.thing).first()
+        )
+        thing = (
+            session.query(Thing).options(sa.orm.undefer(Thing.name)).first()
+        )
+        self._test(thing)

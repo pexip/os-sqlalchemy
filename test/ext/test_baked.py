@@ -5,16 +5,9 @@ from sqlalchemy import bindparam
 from sqlalchemy import event
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func
-from sqlalchemy import literal_column
 from sqlalchemy import testing
 from sqlalchemy.ext import baked
-from sqlalchemy.orm import aliased
-from sqlalchemy.orm import backref
-from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import exc as orm_exc
-from sqlalchemy.orm import lazyload
-from sqlalchemy.orm import Load
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import subqueryload
@@ -24,7 +17,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_not
 from sqlalchemy.testing import mock
-from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 
 
@@ -33,7 +26,7 @@ class BakedTest(_fixtures.FixtureTest):
     run_inserts = "once"
     run_deletes = None
 
-    def setup(self):
+    def setup_test(self):
         self.bakery = baked.bakery()
 
 
@@ -42,14 +35,14 @@ class StateChangeTest(BakedTest):
     def setup_mappers(cls):
         User = cls.classes.User
 
-        mapper(User, cls.tables.users)
+        cls.mapper_registry.map_imperatively(User, cls.tables.users)
 
     def _assert_cache_key(self, key, elements):
         eq_(key, tuple(elem.__code__ for elem in elements))
 
     def test_initial_key(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         def l1():
             return session.query(User)
@@ -60,7 +53,7 @@ class StateChangeTest(BakedTest):
 
     def test_inplace_add(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         def l1():
             return session.query(User)
@@ -80,7 +73,7 @@ class StateChangeTest(BakedTest):
 
     def test_inplace_add_operator(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         def l1():
             return session.query(User)
@@ -97,7 +90,7 @@ class StateChangeTest(BakedTest):
 
     def test_chained_add(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         def l1():
             return session.query(User)
@@ -115,7 +108,7 @@ class StateChangeTest(BakedTest):
 
     def test_chained_add_operator(self):
         User = self.classes.User
-        session = Session()
+        session = fixture_session()
 
         def l1():
             return session.query(User)
@@ -137,7 +130,7 @@ class LikeQueryTest(BakedTest):
     def setup_mappers(cls):
         User = cls.classes.User
 
-        mapper(User, cls.tables.users)
+        cls.mapper_registry.map_imperatively(User, cls.tables.users)
 
     def test_first_no_result(self):
         User = self.classes.User
@@ -145,7 +138,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User))
         bq += lambda q: q.filter(User.name == "asdf")
 
-        eq_(bq(Session()).first(), None)
+        eq_(bq(fixture_session()).first(), None)
 
     def test_first_multiple_result(self):
         User = self.classes.User
@@ -153,7 +146,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User.id))
         bq += lambda q: q.filter(User.name.like("%ed%")).order_by(User.id)
 
-        eq_(bq(Session()).first(), (8,))
+        eq_(bq(fixture_session()).first(), (8,))
 
     def test_one_or_none_no_result(self):
         User = self.classes.User
@@ -161,7 +154,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User))
         bq += lambda q: q.filter(User.name == "asdf")
 
-        eq_(bq(Session()).one_or_none(), None)
+        eq_(bq(fixture_session()).one_or_none(), None)
 
     def test_one_or_none_result(self):
         User = self.classes.User
@@ -169,7 +162,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User))
         bq += lambda q: q.filter(User.name == "ed")
 
-        u1 = bq(Session()).one_or_none()
+        u1 = bq(fixture_session()).one_or_none()
         eq_(u1.name, "ed")
 
     def test_one_or_none_multiple_result(self):
@@ -180,8 +173,8 @@ class LikeQueryTest(BakedTest):
 
         assert_raises_message(
             orm_exc.MultipleResultsFound,
-            "Multiple rows were found for one_or_none()",
-            bq(Session()).one_or_none,
+            "Multiple rows were found when one or none was required",
+            bq(fixture_session()).one_or_none,
         )
 
     def test_one_no_result(self):
@@ -192,8 +185,8 @@ class LikeQueryTest(BakedTest):
 
         assert_raises_message(
             orm_exc.NoResultFound,
-            "No row was found for one()",
-            bq(Session()).one,
+            "No row was found when one was required",
+            bq(fixture_session()).one,
         )
 
     def test_one_result(self):
@@ -202,7 +195,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User))
         bq += lambda q: q.filter(User.name == "ed")
 
-        u1 = bq(Session()).one()
+        u1 = bq(fixture_session()).one()
         eq_(u1.name, "ed")
 
     def test_one_multiple_result(self):
@@ -213,8 +206,8 @@ class LikeQueryTest(BakedTest):
 
         assert_raises_message(
             orm_exc.MultipleResultsFound,
-            "Multiple rows were found for one()",
-            bq(Session()).one,
+            "Multiple rows were found when exactly one was required",
+            bq(fixture_session()).one,
         )
 
     def test_get(self):
@@ -222,7 +215,7 @@ class LikeQueryTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User))
 
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             u1 = bq(sess).get(7)
@@ -230,7 +223,7 @@ class LikeQueryTest(BakedTest):
 
         self.assert_sql_count(testing.db, go, 1)
 
-        u1 = sess.query(User).get(7)  # noqa
+        u1 = sess.get(User, 7)  # noqa
 
         def go():
             u2 = bq(sess).get(7)
@@ -249,7 +242,7 @@ class LikeQueryTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User.id))
 
-        sess = Session()
+        sess = fixture_session()
 
         bq += lambda q: q.filter(User.id == 7)
 
@@ -260,7 +253,7 @@ class LikeQueryTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User))
 
-        sess = Session()
+        sess = fixture_session()
 
         eq_(bq(sess).count(), 4)
 
@@ -279,7 +272,7 @@ class LikeQueryTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User))
 
-        sess = Session()
+        sess = fixture_session()
 
         eq_(bq(sess).count(), 4)
 
@@ -289,6 +282,7 @@ class LikeQueryTest(BakedTest):
         # with multiple params, the **kwargs will be used
         bq += lambda q: q.filter(User.id == bindparam("anid"))
         eq_(bq(sess).params(uname="fred", anid=9).count(), 1)
+
         eq_(
             # wrong id, so 0 results:
             bq(sess).params(uname="fred", anid=8).count(),
@@ -301,7 +295,7 @@ class LikeQueryTest(BakedTest):
         class AddressUser(object):
             pass
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             AddressUser,
             self.tables.users.outerjoin(self.tables.addresses),
             properties={
@@ -312,7 +306,7 @@ class LikeQueryTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(AddressUser))
 
-        sess = Session()
+        sess = fixture_session()
 
         def go():
             u1 = bq(sess).get((10, None))
@@ -320,7 +314,7 @@ class LikeQueryTest(BakedTest):
 
         self.assert_sql_count(testing.db, go, 1)
 
-        u1 = sess.query(AddressUser).get((10, None))  # noqa
+        u1 = sess.get(AddressUser, (10, None))  # noqa
 
         def go():
             u2 = bq(sess).get((10, None))
@@ -335,7 +329,7 @@ class LikeQueryTest(BakedTest):
         bq = self.bakery(lambda s: s.query(User))
 
         for i in range(5):
-            sess = Session()
+            sess = fixture_session()
             u1 = bq(sess).get(7)
             eq_(u1.name, "jack")
             sess.close()
@@ -349,11 +343,22 @@ class LikeQueryTest(BakedTest):
         del inspect(User).__dict__["_get_clause"]
 
         for i in range(5):
-            sess = Session()
+            sess = fixture_session()
             u1 = bq(sess).get(7)
             eq_(u1.name, "jack")
             sess.close()
-        eq_(len(bq._bakery), 4)
+
+        # this went from 4 to 3 as a result of #6055.  by giving a name
+        # to the bind param in mapper._get_clause, while the baked cache
+        # here grows by one element, the SQL compiled_cache no longer
+        # changes because the keys of the bindparam() objects are passed
+        # explicitly as params to the execute() call as a result of
+        #  _load_on_pk_identity() (either the one in baked or the one in
+        # loading.py), which then puts them
+        # in column_keys which makes them part of the cache key.  These
+        # were previously anon names, now they are explicit so they
+        # stay across resets
+        eq_(len(bq._bakery), 3)
 
 
 class ResultPostCriteriaTest(BakedTest):
@@ -363,7 +368,7 @@ class ResultPostCriteriaTest(BakedTest):
         Address = cls.classes.Address
         Order = cls.classes.Order
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             User,
             cls.tables.users,
             properties={
@@ -373,8 +378,8 @@ class ResultPostCriteriaTest(BakedTest):
                 "orders": relationship(Order, order_by=cls.tables.orders.c.id),
             },
         )
-        mapper(Address, cls.tables.addresses)
-        mapper(Order, cls.tables.orders)
+        cls.mapper_registry.map_imperatively(Address, cls.tables.addresses)
+        cls.mapper_registry.map_imperatively(Order, cls.tables.orders)
 
     @contextlib.contextmanager
     def _fixture(self):
@@ -385,8 +390,15 @@ class ResultPostCriteriaTest(BakedTest):
         with testing.db.connect() as conn:
 
             @event.listens_for(conn, "before_execute")
-            def before_execute(conn, clauseelement, multiparams, params):
-                assert "yes" in conn._execution_options
+            def before_execute(
+                conn, clauseelement, multiparams, params, execution_options
+            ):
+                # execution options are kind of moving around a bit,
+                # test both places
+                assert (
+                    "yes" in clauseelement._execution_options
+                    or "yes" in execution_options
+                )
 
             bq = self.bakery(lambda s: s.query(User.id).order_by(User.id))
 
@@ -437,7 +449,7 @@ class ResultTest(BakedTest):
         Address = cls.classes.Address
         Order = cls.classes.Order
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             User,
             cls.tables.users,
             properties={
@@ -447,8 +459,8 @@ class ResultTest(BakedTest):
                 "orders": relationship(Order, order_by=cls.tables.orders.c.id),
             },
         )
-        mapper(Address, cls.tables.addresses)
-        mapper(Order, cls.tables.orders)
+        cls.mapper_registry.map_imperatively(Address, cls.tables.addresses)
+        cls.mapper_registry.map_imperatively(Order, cls.tables.orders)
 
     def test_cachekeys_on_constructor(self):
         User = self.classes.User
@@ -462,7 +474,7 @@ class ResultTest(BakedTest):
         bq2 = self.bakery(fn, 8)
 
         for i in range(3):
-            session = Session(autocommit=True)
+            session = fixture_session()
             eq_(bq1(session).all(), [(7,)])
 
             eq_(bq2(session).all(), [(8,)])
@@ -475,7 +487,7 @@ class ResultTest(BakedTest):
         )
 
         for i in range(3):
-            session = Session(autocommit=True)
+            session = fixture_session()
             eq_(
                 bq(session).all(),
                 [(7, "jack"), (8, "ed"), (9, "fred"), (10, "chuck")],
@@ -489,7 +501,7 @@ class ResultTest(BakedTest):
         )
 
         bq += lambda q: q.limit(bindparam("limit")).offset(bindparam("offset"))
-        session = Session(autocommit=True)
+        session = fixture_session()
 
         for i in range(4):
             for limit, offset, exp in [
@@ -521,7 +533,7 @@ class ResultTest(BakedTest):
 
             bq += fn2
 
-            sess = Session(autocommit=True, enable_baked_queries=False)
+            sess = fixture_session(enable_baked_queries=False)
             eq_(bq.add_criteria(fn3)(sess).params(id=7).all(), [(7, "jack")])
 
         eq_(
@@ -561,7 +573,7 @@ class ResultTest(BakedTest):
 
             bq += fn2
 
-            sess = Session(autocommit=True)
+            sess = fixture_session()
             eq_(
                 bq.spoil(full=True).add_criteria(fn3)(sess).params(id=7).all(),
                 [(7, "jack")],
@@ -608,7 +620,7 @@ class ResultTest(BakedTest):
 
             bq += fn2
 
-            sess = Session(autocommit=True)
+            sess = fixture_session()
             eq_(
                 bq.spoil().add_criteria(fn3)(sess).params(id=7).all(),
                 [(7, "jack")],
@@ -635,10 +647,10 @@ class ResultTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User.id, User.name))
 
-        bq += lambda q: q.from_self().with_entities(func.count(User.id))
+        bq += lambda q: q._from_self().with_entities(func.count(User.id))
 
         for i in range(3):
-            session = Session(autocommit=True)
+            session = fixture_session()
             eq_(bq(session).all(), [(4,)])
 
     def test_conditional_step(self):
@@ -670,10 +682,10 @@ class ResultTest(BakedTest):
                     bq += lambda q: q.filter(User.name == "jack")
 
                 if cond4:
-                    bq += lambda q: q.from_self().with_entities(
+                    bq += lambda q: q._from_self().with_entities(
                         func.count(User.id)
                     )
-                sess = Session(autocommit=True)
+                sess = fixture_session()
                 result = bq(sess).all()
                 if cond4:
                     if cond1:
@@ -728,7 +740,7 @@ class ResultTest(BakedTest):
                     if cond1
                     else (lambda q: q.filter(User.name == "jack"))
                 )  # noqa
-                sess = Session(autocommit=True)
+                sess = fixture_session()
                 result = bq(sess).all()
 
                 if cond1:
@@ -753,7 +765,7 @@ class ResultTest(BakedTest):
         main_bq += lambda q: q.filter(sub_bq.to_query(q).exists())
         main_bq += lambda q: q.order_by(Address.id)
 
-        sess = Session()
+        sess = fixture_session()
         result = main_bq(sess).all()
         eq_(result, [(2,), (3,), (4,)])
 
@@ -767,12 +779,14 @@ class ResultTest(BakedTest):
         )
 
         main_bq = self.bakery(
-            lambda s: s.query(Address.id, sub_bq.to_query(s).as_scalar())
+            lambda s: s.query(Address.id, sub_bq.to_query(s).scalar_subquery())
         )
-        main_bq += lambda q: q.filter(sub_bq.to_query(q).as_scalar() == "ed")
+        main_bq += lambda q: q.filter(
+            sub_bq.to_query(q).scalar_subquery() == "ed"
+        )
         main_bq += lambda q: q.order_by(Address.id)
 
-        sess = Session()
+        sess = fixture_session()
         result = main_bq(sess).all()
         eq_(result, [(2, "ed"), (3, "ed"), (4, "ed")])
 
@@ -800,9 +814,7 @@ class ResultTest(BakedTest):
         Address = self.classes.Address
         Order = self.classes.Order
 
-        # Override the default bakery for one with a smaller size. This used to
-        # trigger a bug when unbaking subqueries.
-        self.bakery = baked.bakery(size=3)
+        self.bakery = baked.bakery()
         base_bq = self.bakery(lambda s: s.query(User))
 
         base_bq += lambda q: q.options(
@@ -838,7 +850,7 @@ class ResultTest(BakedTest):
             ):
                 bq = base_bq._clone()
 
-                sess = Session()
+                sess = fixture_session()
 
                 if cond1:
                     bq += lambda q: q.filter(User.name == "jack")
@@ -899,14 +911,14 @@ class ResultTest(BakedTest):
             )
         ]
 
-        self.bakery = baked.bakery(size=3)
+        self.bakery = baked.bakery()
 
         bq = self.bakery(lambda s: s.query(User))
 
         bq += lambda q: q.options(subqueryload(User.addresses))
         bq += lambda q: q.order_by(User.id)
         bq += lambda q: q.filter(User.name == bindparam("name"))
-        sess = Session()
+        sess = fixture_session()
 
         def set_params(q):
             return q.params(name="jack")
@@ -948,7 +960,7 @@ class ResultTest(BakedTest):
         bq += lambda q: q.options(subqueryload(User.addresses))
         bq += lambda q: q.order_by(User.id)
         bq += lambda q: q.filter(User.name == bindparam("name"))
-        sess = Session()
+        sess = fixture_session()
 
         def set_params(q):
             return q.params(name="jack")
@@ -962,501 +974,6 @@ class ResultTest(BakedTest):
         self.assert_sql_count(testing.db, go, 2)
 
 
-class LazyLoaderTest(testing.AssertsCompiledSQL, BakedTest):
-    run_setup_mappers = "each"
-
-    @testing.fixture
-    def modify_query_fixture(self):
-        def set_event(bake_ok):
-
-            event.listen(
-                Query,
-                "before_compile",
-                _modify_query,
-                retval=True,
-                bake_ok=bake_ok,
-            )
-            return m1
-
-        m1 = mock.Mock()
-
-        def _modify_query(query):
-            m1(query.column_descriptions[0]["entity"])
-            query = query.enable_assertions(False).filter(
-                literal_column("1") == 1
-            )
-            return query
-
-        yield set_event
-        event.remove(Query, "before_compile", _modify_query)
-
-    def _o2m_fixture(self, lazy="select", **kw):
-        User = self.classes.User
-        Address = self.classes.Address
-
-        mapper(
-            User,
-            self.tables.users,
-            properties={
-                "addresses": relationship(
-                    Address,
-                    order_by=self.tables.addresses.c.id,
-                    lazy=lazy,
-                    **kw
-                )
-            },
-        )
-        mapper(Address, self.tables.addresses)
-        return User, Address
-
-    def _o2m_twolevel_fixture(self, lazy="select", **kw):
-        User = self.classes.User
-        Address = self.classes.Address
-        Dingaling = self.classes.Dingaling
-
-        mapper(
-            User,
-            self.tables.users,
-            properties={
-                "addresses": relationship(
-                    Address,
-                    order_by=self.tables.addresses.c.id,
-                    lazy=lazy,
-                    **kw
-                )
-            },
-        )
-        mapper(
-            Address,
-            self.tables.addresses,
-            properties={"dingalings": relationship(Dingaling, lazy=lazy)},
-        )
-        mapper(Dingaling, self.tables.dingalings)
-        return User, Address, Dingaling
-
-    def _m2o_fixture(self):
-        User = self.classes.User
-        Address = self.classes.Address
-
-        mapper(User, self.tables.users)
-        mapper(
-            Address,
-            self.tables.addresses,
-            properties={"user": relationship(User)},
-        )
-        return User, Address
-
-    def test_no_cache_for_event(self, modify_query_fixture):
-
-        m1 = modify_query_fixture(False)
-
-        User, Address = self._o2m_fixture()
-
-        sess = Session()
-        u1 = sess.query(User).filter(User.id == 7).first()
-
-        u1.addresses
-
-        eq_(m1.mock_calls, [mock.call(User), mock.call(Address)])
-
-        sess.expire(u1, ["addresses"])
-
-        u1.addresses
-        eq_(
-            m1.mock_calls,
-            [mock.call(User), mock.call(Address), mock.call(Address)],
-        )
-
-    def test_cache_ok_for_event(self, modify_query_fixture):
-
-        m1 = modify_query_fixture(True)
-
-        User, Address = self._o2m_fixture()
-
-        sess = Session()
-        u1 = sess.query(User).filter(User.id == 7).first()
-
-        u1.addresses
-
-        eq_(m1.mock_calls, [mock.call(User), mock.call(Address)])
-
-        sess.expire(u1, ["addresses"])
-
-        u1.addresses
-        eq_(m1.mock_calls, [mock.call(User), mock.call(Address)])
-
-    def test_unsafe_unbound_option_cancels_bake(self):
-        User, Address, Dingaling = self._o2m_twolevel_fixture(lazy="joined")
-
-        class SubDingaling(Dingaling):
-            pass
-
-        mapper(SubDingaling, None, inherits=Dingaling)
-
-        lru = Address.dingalings.property._lazy_strategy._bakery(
-            lambda q: None
-        )._bakery
-        l1 = len(lru)
-        for i in range(5):
-            sess = Session()
-            u1 = (
-                sess.query(User)
-                .options(
-                    defaultload(User.addresses).lazyload(
-                        Address.dingalings.of_type(aliased(SubDingaling))
-                    )
-                )
-                .first()
-            )
-            for ad in u1.addresses:
-                ad.dingalings
-        l2 = len(lru)
-        eq_(l1, 0)
-        eq_(l2, 0)
-
-    def test_unsafe_bound_option_cancels_bake(self):
-        User, Address, Dingaling = self._o2m_twolevel_fixture(lazy="joined")
-
-        class SubDingaling(Dingaling):
-            pass
-
-        mapper(SubDingaling, None, inherits=Dingaling)
-
-        lru = Address.dingalings.property._lazy_strategy._bakery(
-            lambda q: None
-        )._bakery
-        l1 = len(lru)
-        for i in range(5):
-            sess = Session()
-            u1 = (
-                sess.query(User)
-                .options(
-                    Load(User)
-                    .defaultload(User.addresses)
-                    .lazyload(
-                        Address.dingalings.of_type(aliased(SubDingaling))
-                    )
-                )
-                .first()
-            )
-            for ad in u1.addresses:
-                ad.dingalings
-        l2 = len(lru)
-        eq_(l1, 0)
-        eq_(l2, 0)
-
-    def test_safe_unbound_option_allows_bake(self):
-        User, Address, Dingaling = self._o2m_twolevel_fixture(lazy="joined")
-
-        lru = Address.dingalings.property._lazy_strategy._bakery(
-            lambda q: None
-        )._bakery
-        l1 = len(lru)
-        for i in range(5):
-            sess = Session()
-            u1 = (
-                sess.query(User)
-                .options(
-                    defaultload(User.addresses).lazyload(Address.dingalings)
-                )
-                .first()
-            )
-            for ad in u1.addresses:
-                ad.dingalings
-        l2 = len(lru)
-        eq_(l1, 0)
-        eq_(l2, 2)
-
-    def test_safe_bound_option_allows_bake(self):
-        User, Address, Dingaling = self._o2m_twolevel_fixture(lazy="joined")
-
-        lru = Address.dingalings.property._lazy_strategy._bakery(
-            lambda q: None
-        )._bakery
-        l1 = len(lru)
-        for i in range(5):
-            sess = Session()
-            u1 = (
-                sess.query(User)
-                .options(
-                    Load(User)
-                    .defaultload(User.addresses)
-                    .lazyload(Address.dingalings)
-                )
-                .first()
-            )
-            for ad in u1.addresses:
-                ad.dingalings
-        l2 = len(lru)
-        eq_(l1, 0)
-        eq_(l2, 2)
-
-    def test_baked_lazy_loading_relationship_flag_true(self):
-        self._test_baked_lazy_loading_relationship_flag(True)
-
-    def test_baked_lazy_loading_relationship_flag_false(self):
-        self._test_baked_lazy_loading_relationship_flag(False)
-
-    def _test_baked_lazy_loading_relationship_flag(self, flag):
-        User, Address = self._o2m_fixture(bake_queries=flag)
-
-        sess = Session()
-        u1 = sess.query(User).first()
-
-        from sqlalchemy.orm import Query
-
-        canary = mock.Mock()
-
-        # I would think Mock can do this but apparently
-        # it cannot (wrap / autospec don't work together)
-        real_compile_context = Query._compile_context
-
-        def _my_compile_context(*arg, **kw):
-            if arg[0].column_descriptions[0]["entity"] is Address:
-                canary()
-            return real_compile_context(*arg, **kw)
-
-        with mock.patch.object(Query, "_compile_context", _my_compile_context):
-            u1.addresses
-
-            sess.expire(u1)
-            u1.addresses
-
-        if flag:
-            eq_(canary.call_count, 1)
-        else:
-            eq_(canary.call_count, 2)
-
-    def test_baked_lazy_loading_option_o2m(self):
-        User, Address = self._o2m_fixture()
-        self._test_baked_lazy_loading(set_option=True)
-
-    def test_baked_lazy_loading_mapped_o2m(self):
-        User, Address = self._o2m_fixture(lazy="baked_select")
-        self._test_baked_lazy_loading(set_option=False)
-
-    def _test_baked_lazy_loading(self, set_option):
-        User, Address = self.classes.User, self.classes.Address
-
-        base_bq = self.bakery(lambda s: s.query(User))
-
-        if set_option:
-            base_bq += lambda q: q.options(lazyload(User.addresses))
-
-        base_bq += lambda q: q.order_by(User.id)
-
-        assert_result = self.static.user_address_result
-
-        for i in range(4):
-            for cond1, cond2 in itertools.product(
-                *[(False, True) for j in range(2)]
-            ):
-                bq = base_bq._clone()
-
-                sess = Session()
-
-                if cond1:
-                    bq += lambda q: q.filter(User.name == "jack")
-                else:
-                    bq += lambda q: q.filter(User.name.like("%ed%"))
-
-                if cond2:
-                    ct = func.count(Address.id).label("count")
-                    subq = (
-                        sess.query(ct, Address.user_id)
-                        .group_by(Address.user_id)
-                        .having(ct > 2)
-                        .subquery()
-                    )
-
-                    bq += lambda q: q.join(subq)
-
-                if cond2:
-                    if cond1:
-
-                        def go():
-                            result = bq(sess).all()
-                            eq_([], result)
-
-                        self.assert_sql_count(testing.db, go, 1)
-                    else:
-
-                        def go():
-                            result = bq(sess).all()
-                            eq_(assert_result[1:2], result)
-
-                        self.assert_sql_count(testing.db, go, 2)
-                else:
-                    if cond1:
-
-                        def go():
-                            result = bq(sess).all()
-                            eq_(assert_result[0:1], result)
-
-                        self.assert_sql_count(testing.db, go, 2)
-                    else:
-
-                        def go():
-                            result = bq(sess).all()
-                            eq_(assert_result[1:3], result)
-
-                        self.assert_sql_count(testing.db, go, 3)
-
-                sess.close()
-
-    def test_baked_lazy_loading_m2o(self):
-        User, Address = self._m2o_fixture()
-
-        base_bq = self.bakery(lambda s: s.query(Address))
-
-        base_bq += lambda q: q.options(lazyload(Address.user))
-        base_bq += lambda q: q.order_by(Address.id)
-
-        assert_result = self.static.address_user_result
-
-        for i in range(4):
-            for cond1 in (False, True):
-                bq = base_bq._clone()
-
-                sess = Session()
-
-                if cond1:
-                    bq += lambda q: q.filter(
-                        Address.email_address == "jack@bean.com"
-                    )
-                else:
-                    bq += lambda q: q.filter(
-                        Address.email_address.like("ed@%")
-                    )
-
-                if cond1:
-
-                    def go():
-                        result = bq(sess).all()
-                        eq_(assert_result[0:1], result)
-
-                    self.assert_sql_count(testing.db, go, 2)
-                else:
-
-                    def go():
-                        result = bq(sess).all()
-                        eq_(assert_result[1:4], result)
-
-                    self.assert_sql_count(testing.db, go, 2)
-
-                sess.close()
-
-    def test_useget_cancels_eager(self):
-        """test that a one to many lazyload cancels the unnecessary
-        eager many-to-one join on the other side."""
-
-        User = self.classes.User
-        Address = self.classes.Address
-
-        mapper(User, self.tables.users)
-        mapper(
-            Address,
-            self.tables.addresses,
-            properties={
-                "user": relationship(
-                    User,
-                    lazy="joined",
-                    backref=backref("addresses", lazy="baked_select"),
-                )
-            },
-        )
-
-        sess = Session()
-        u1 = sess.query(User).filter(User.id == 8).one()
-
-        def go():
-            eq_(u1.addresses[0].user, u1)
-
-        self.assert_sql_execution(
-            testing.db,
-            go,
-            CompiledSQL(
-                "SELECT addresses.id AS addresses_id, addresses.user_id AS "
-                "addresses_user_id, addresses.email_address AS "
-                "addresses_email_address FROM addresses WHERE :param_1 = "
-                "addresses.user_id",
-                {"param_1": 8},
-            ),
-        )
-
-    def test_useget_cancels_eager_propagated_present(self):
-        """test that a one to many lazyload cancels the unnecessary
-        eager many-to-one join on the other side, even when a propagated
-        option is present."""
-
-        User = self.classes.User
-        Address = self.classes.Address
-
-        mapper(User, self.tables.users)
-        mapper(
-            Address,
-            self.tables.addresses,
-            properties={
-                "user": relationship(
-                    User,
-                    lazy="joined",
-                    backref=backref("addresses", lazy="baked_select"),
-                )
-            },
-        )
-
-        from sqlalchemy.orm.interfaces import MapperOption
-
-        class MyBogusOption(MapperOption):
-            propagate_to_loaders = True
-
-        sess = Session()
-        u1 = (
-            sess.query(User)
-            .options(MyBogusOption())
-            .filter(User.id == 8)
-            .one()
-        )
-
-        def go():
-            eq_(u1.addresses[0].user, u1)
-
-        self.assert_sql_execution(
-            testing.db,
-            go,
-            CompiledSQL(
-                "SELECT addresses.id AS addresses_id, addresses.user_id AS "
-                "addresses_user_id, addresses.email_address AS "
-                "addresses_email_address FROM addresses WHERE :param_1 = "
-                "addresses.user_id",
-                {"param_1": 8},
-            ),
-        )
-
-    def test_simple_lazy_clause_no_race_on_generate(self):
-        User, Address = self._o2m_fixture()
-
-        (
-            expr1,
-            paramdict1,
-        ) = User.addresses.property._lazy_strategy._simple_lazy_clause
-
-        # delete the attr, as though a concurrent thread is also generating it
-        del User.addresses.property._lazy_strategy._simple_lazy_clause
-        (
-            expr2,
-            paramdict2,
-        ) = User.addresses.property._lazy_strategy._simple_lazy_clause
-
-        eq_(paramdict1, paramdict2)
-
-    # additional tests:
-    # 1. m2m w lazyload
-    # 2. o2m lazyload where m2o backrefs have an eager load, test
-    # that eager load is canceled out
-    # 3. uselist = False, uselist=False assertion
-
-
 # assert that the integration style illustrated in the dogpile.cache
 # example works w/ baked
 class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
@@ -1466,7 +983,7 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
         User = self.classes.User
         Address = self.classes.Address
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             User,
             self.tables.users,
             properties={
@@ -1478,63 +995,63 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
                 )
             },
         )
-        mapper(Address, self.tables.addresses)
+        self.mapper_registry.map_imperatively(Address, self.tables.addresses)
         return User, Address
 
     def _query_fixture(self):
-        from sqlalchemy.orm.query import Query, _generative
+        from sqlalchemy.orm.query import Query
 
         class CachingQuery(Query):
             cache = {}
 
-            @_generative()
             def set_cache_key(self, key):
-                self._cache_key = key
+                return self.execution_options(_cache_key=key)
 
-            def __iter__(self):
-                super_ = super(CachingQuery, self)
+            def set_cache_key_for_path(self, path, key):
+                return self.execution_options(**{"_cache_key_%s" % path: key})
 
-                if hasattr(self, "_cache_key"):
-                    return self.get_value(
-                        createfunc=lambda: list(super_.__iter__())
-                    )
-                else:
-                    return super_.__iter__()
+        def get_value(cache_key, cache, createfunc):
+            if cache_key in cache:
+                return cache[cache_key]()
+            else:
+                cache[cache_key] = retval = createfunc().freeze()
+                return retval()
 
-            def _execute_and_instances(self, context):
-                super_ = super(CachingQuery, self)
+        s1 = fixture_session(query_cls=CachingQuery)
 
-                if context.query is not self and hasattr(self, "_cache_key"):
-                    return self.get_value(
-                        createfunc=lambda: list(
-                            super_._execute_and_instances(context)
-                        )
-                    )
-                else:
-                    return super_._execute_and_instances(context)
+        @event.listens_for(s1, "do_orm_execute", retval=True)
+        def do_orm_execute(orm_context):
+            ckey = None
+            for opt in orm_context.user_defined_options:
+                ckey = opt.get_cache_key(orm_context)
+                if ckey:
+                    break
+            else:
+                if "_cache_key" in orm_context.execution_options:
+                    ckey = orm_context.execution_options["_cache_key"]
 
-            def get_value(self, createfunc):
-                if self._cache_key in self.cache:
-                    return iter(self.cache[self._cache_key])
-                else:
-                    self.cache[self._cache_key] = retval = createfunc()
-                    return iter(retval)
+            if ckey is not None:
+                return get_value(
+                    ckey,
+                    CachingQuery.cache,
+                    orm_context.invoke_statement,
+                )
 
-        return Session(query_cls=CachingQuery)
+        return s1
 
     def _option_fixture(self):
-        from sqlalchemy.orm.interfaces import MapperOption
+        from sqlalchemy.orm.interfaces import UserDefinedOption
 
-        class RelationshipCache(MapperOption):
+        class RelationshipCache(UserDefinedOption):
+            inherit_cache = True
 
             propagate_to_loaders = True
 
-            def process_query_conditionally(self, query):
-                if query._current_path:
-                    query._cache_key = "user7_addresses"
-
-            def _generate_cache_key(self, path):
-                return None
+            def get_cache_key(self, orm_context):
+                if orm_context.loader_strategy_path:
+                    return "user7_addresses"
+                else:
+                    return None
 
         return RelationshipCache()
 
@@ -1549,9 +1066,30 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
 
         eq_(q.all(), [User(id=7, addresses=[Address(id=1)])])
 
-        eq_(q.cache, {"user7": [User(id=7, addresses=[Address(id=1)])]})
+        eq_(list(q.cache), ["user7"])
 
         eq_(q.all(), [User(id=7, addresses=[Address(id=1)])])
+
+    def test_non_baked_tuples(self):
+        User, Address = self._o2m_fixture()
+
+        sess = self._query_fixture()
+        q = sess._query_cls
+        eq_(q.cache, {})
+
+        q = sess.query(User).filter(User.id == 7).set_cache_key("user7")
+
+        eq_(
+            sess.execute(q.statement).all(),
+            [(User(id=7, addresses=[Address(id=1)]),)],
+        )
+
+        eq_(list(q.cache), ["user7"])
+
+        eq_(
+            sess.execute(q.statement).all(),
+            [(User(id=7, addresses=[Address(id=1)]),)],
+        )
 
     def test_use_w_baked(self):
         User, Address = self._o2m_fixture()
@@ -1566,7 +1104,7 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
 
         eq_(base_bq(sess).all(), [User(id=7, addresses=[Address(id=1)])])
 
-        eq_(q.cache, {"user7": [User(id=7, addresses=[Address(id=1)])]})
+        eq_(list(q.cache), ["user7"])
 
         eq_(base_bq(sess).all(), [User(id=7, addresses=[Address(id=1)])])
 
@@ -1583,7 +1121,7 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
         u = q.first()
         eq_(u.addresses, [Address(id=1)])
 
-        eq_(q.cache, {"user7_addresses": [Address(id=1)]})
+        eq_(list(q.cache), ["user7_addresses"])
 
         sess.close()
 
@@ -1592,4 +1130,5 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
 
         u = q.first()
         eq_(u.addresses, [Address(id=1)])
-        eq_(q.cache, {"user7_addresses": [Address(id=1)]})
+
+        eq_(list(q.cache), ["user7_addresses"])

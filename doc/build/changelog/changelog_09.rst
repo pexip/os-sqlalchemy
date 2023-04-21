@@ -1341,7 +1341,7 @@
         :versions: 1.0.0b1
 
         Fixes to the newly enhanced boolean coercion in :ticket:`2804` where
-        the new rules for "where" and "having" woudn't take effect for the
+        the new rules for "where" and "having" wouldn't take effect for the
         "whereclause" and "having" kw arguments of the :func:`_expression.select` construct,
         which is also what :class:`_query.Query` uses so wasn't working in the
         ORM either.
@@ -1708,15 +1708,15 @@
         ad-hoc keyword arguments within the :attr:`.Index.kwargs` collection,
         after construction::
 
-            idx = Index('a', 'b')
-            idx.kwargs['mysql_someargument'] = True
+            idx = Index("a", "b")
+            idx.kwargs["mysql_someargument"] = True
 
         To suit the use case of allowing custom arguments at construction time,
         the :meth:`.DialectKWArgs.argument_for` method now allows this registration::
 
-            Index.argument_for('mysql', 'someargument', False)
+            Index.argument_for("mysql", "someargument", False)
 
-            idx = Index('a', 'b', mysql_someargument=True)
+            idx = Index("a", "b", mysql_someargument=True)
 
         .. seealso::
 
@@ -1788,7 +1788,7 @@
         :tags: sqlite, bug
 
         Support has been added to SQLite type reflection to fully support
-        the "type affinity" contract specified at http://www.sqlite.org/datatype3.html.
+        the "type affinity" contract specified at https://www.sqlite.org/datatype3.html.
         In this scheme, keywords like ``INT``, ``CHAR``, ``BLOB`` or
         ``REAL`` located in the type name generically associate the type with
         one of five affinities.  Pull request courtesy Erich Blume.
@@ -1920,7 +1920,7 @@
     .. change::
         :tags: feature, sql
 
-        Added :paramref:`.MetaData.reflect.**dialect_kwargs`
+        Added :paramref:`.MetaData.reflect.dialect_kwargs`
         to support dialect-level reflection options for all :class:`_schema.Table`
         objects reflected.
 
@@ -2647,11 +2647,11 @@
         :tags: bug, engine
         :tickets: 2873
 
-        The :func:`_sa.create_engine` routine and the related
-        :func:`.make_url` function no longer considers the ``+`` sign
-        to be a space within the password field.  The parsing has been
-        adjusted to match RFC 1738 exactly, in that both ``username``
-        and ``password`` expect only ``:``, ``@``, and ``/`` to be
+        The :func:`_sa.create_engine` routine and the related :func:`.make_url`
+        function no longer considers the ``+`` sign to be a space within the
+        password field. The parsing in this area has been adjusted to match
+        more closely to how RFC 1738 handles these tokens, in that both
+        ``username`` and ``password`` expect only ``:``, ``@``, and ``/`` to be
         encoded.
 
         .. seealso::

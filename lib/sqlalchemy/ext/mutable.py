@@ -1,9 +1,9 @@
 # ext/mutable.py
-# Copyright (C) 2005-2020 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2023 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
-# the MIT License: http://www.opensource.org/licenses/mit-license.php
+# the MIT License: https://www.opensource.org/licenses/mit-license.php
 
 r"""Provide support for tracking of in-place changes to scalar values,
 which are propagated into ORM change events on owning parent objects.
@@ -354,13 +354,14 @@ pickling process of the parent's object-relational state so that the
 :meth:`MutableBase._parents` collection is restored to all ``Point`` objects.
 
 """
+from collections import defaultdict
 import weakref
 
 from .. import event
+from .. import inspect
 from .. import types
 from ..orm import Mapper
 from ..orm import mapper
-from ..orm import object_mapper
 from ..orm.attributes import flag_modified
 from ..sql.base import SchemaEventTarget
 from ..util import memoized_property
@@ -374,11 +375,16 @@ class MutableBase(object):
 
     @memoized_property
     def _parents(self):
-        """Dictionary of parent object->attribute name on the parent.
+        """Dictionary of parent object's :class:`.InstanceState`->attribute
+        name on the parent.
 
         This attribute is a so-called "memoized" property.  It initializes
         itself with a new ``weakref.WeakKeyDictionary`` the first time
         it is accessed, returning the same object upon subsequent access.
+
+        .. versionchanged:: 1.4 the :class:`.InstanceState` is now used
+           as the key in the weak dictionary rather than the instance
+           itself.
 
         """
 
@@ -461,7 +467,7 @@ class MutableBase(object):
                 if coerce:
                     val = cls.coerce(key, val)
                     state.dict[key] = val
-                val._parents[state.obj()] = key
+                val._parents[state] = key
 
         def load_attrs(state, ctx, attrs):
             if not attrs or listen_keys.intersection(attrs):
@@ -482,22 +488,36 @@ class MutableBase(object):
             if not isinstance(value, cls):
                 value = cls.coerce(key, value)
             if value is not None:
-                value._parents[target.obj()] = key
+                value._parents[target] = key
             if isinstance(oldvalue, cls):
-                oldvalue._parents.pop(target.obj(), None)
+                oldvalue._parents.pop(inspect(target), None)
             return value
 
         def pickle(state, state_dict):
             val = state.dict.get(key, None)
             if val is not None:
                 if "ext.mutable.values" not in state_dict:
-                    state_dict["ext.mutable.values"] = []
-                state_dict["ext.mutable.values"].append(val)
+                    state_dict["ext.mutable.values"] = defaultdict(list)
+                state_dict["ext.mutable.values"][key].append(val)
 
         def unpickle(state, state_dict):
             if "ext.mutable.values" in state_dict:
-                for val in state_dict["ext.mutable.values"]:
-                    val._parents[state.obj()] = key
+                collection = state_dict["ext.mutable.values"]
+                if isinstance(collection, list):
+                    # legacy format
+                    for val in collection:
+                        val._parents[state] = key
+                else:
+                    for val in state_dict["ext.mutable.values"][key]:
+                        val._parents[state] = key
+
+        event.listen(
+            parent_cls,
+            "_sa_event_merge_wo_load",
+            load,
+            raw=True,
+            propagate=True,
+        )
 
         event.listen(parent_cls, "load", load, raw=True, propagate=True)
         event.listen(
@@ -527,7 +547,7 @@ class Mutable(MutableBase):
         """Subclasses should call this method whenever change events occur."""
 
         for parent, key in self._parents.items():
-            flag_modified(parent, key)
+            flag_modified(parent.obj(), key)
 
     @classmethod
     def associate_with_attribute(cls, attribute):
@@ -647,11 +667,11 @@ class MutableComposite(MutableBase):
 
         for parent, key in self._parents.items():
 
-            prop = object_mapper(parent).get_property(key)
+            prop = parent.mapper.get_property(key)
             for value, attr_name in zip(
                 self.__composite_values__(), prop._attribute_keys
             ):
-                setattr(parent, attr_name, value)
+                setattr(parent.obj(), attr_name, value)
 
 
 def _setup_composite_listener():

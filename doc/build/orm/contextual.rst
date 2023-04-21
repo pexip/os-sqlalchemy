@@ -17,7 +17,22 @@ integration systems to help construct their integration schemes.
 The object is the :class:`.scoped_session` object, and it represents a
 **registry** of :class:`.Session` objects.  If you're not familiar with the
 registry pattern, a good introduction can be found in `Patterns of Enterprise
-Architecture <http://martinfowler.com/eaaCatalog/registry.html>`_.
+Architecture <https://martinfowler.com/eaaCatalog/registry.html>`_.
+
+.. warning::
+
+    The :class:`.scoped_session` registry by default uses a Python
+    ``threading.local()``
+    in order to track :class:`_orm.Session` instances.   **This is not
+    necessarily compatible with all application servers**, particularly those
+    which make use of greenlets or other alternative forms of concurrency
+    control, which may lead to race conditions (e.g. randomly occurring
+    failures) when used in moderate to high concurrency scenarios.
+    Please read :ref:`unitofwork_contextual_threadlocal` and
+    :ref:`session_lifespan` below to more fully understand the implications
+    of using ``threading.local()`` to track :class:`_orm.Session` objects
+    and consider more explicit means of scoping when using application servers
+    which are not based on traditional threads.
 
 .. note::
 
@@ -27,8 +42,8 @@ Architecture <http://martinfowler.com/eaaCatalog/registry.html>`_.
    management.  If you're new to SQLAlchemy, and especially if the
    term "thread-local variable" seems strange to you, we recommend that
    if possible you familiarize first with an off-the-shelf integration
-   system such as `Flask-SQLAlchemy <http://packages.python.org/Flask-SQLAlchemy/>`_
-   or `zope.sqlalchemy <http://pypi.python.org/pypi/zope.sqlalchemy>`_.
+   system such as `Flask-SQLAlchemy <https://pypi.org/project/Flask-SQLAlchemy/>`_
+   or `zope.sqlalchemy <https://pypi.org/project/zope.sqlalchemy>`_.
 
 A :class:`.scoped_session` is constructed by calling it, passing it a
 **factory** which can create new :class:`.Session` objects.   A factory
@@ -103,6 +118,8 @@ underlying :class:`.Session` being maintained by the registry::
 The above code accomplishes the same task as that of acquiring the current
 :class:`.Session` by calling upon the registry, then using that :class:`.Session`.
 
+.. _unitofwork_contextual_threadlocal:
+
 Thread-Local Scope
 ------------------
 
@@ -117,7 +134,7 @@ to be in place such that multiple calls across many threads don't actually get
 a handle to the same session.   We call this notion **thread local storage**,
 which means, a special object is used that will maintain a distinct object
 per each application thread.   Python provides this via the
-`threading.local() <http://docs.python.org/library/threading.html#threading.local>`_
+`threading.local() <https://docs.python.org/library/threading.html#threading.local>`_
 construct.  The :class:`.scoped_session` object by default uses this object
 as storage, so that a single :class:`.Session` is maintained for all who call
 upon the :class:`.scoped_session` registry, but only within the scope of a single
@@ -236,6 +253,7 @@ this in conjunction with a hypothetical event marker provided by the web framewo
 
     Session = scoped_session(sessionmaker(bind=some_engine), scopefunc=get_current_request)
 
+
     @on_request_end
     def remove_session(req):
         Session.remove()
@@ -252,7 +270,8 @@ Contextual Session API
 ----------------------
 
 .. autoclass:: sqlalchemy.orm.scoping.scoped_session
-   :members:
+    :members:
+    :inherited-members:
 
 .. autoclass:: sqlalchemy.util.ScopedRegistry
     :members:

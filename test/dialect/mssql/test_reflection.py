@@ -1,8 +1,15 @@
 # -*- encoding: utf-8
+import datetime
+import decimal
+import random
+
 from sqlalchemy import Column
 from sqlalchemy import DDL
 from sqlalchemy import event
+from sqlalchemy import exc
 from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKeyConstraint
+from sqlalchemy import Identity
 from sqlalchemy import Index
 from sqlalchemy import inspect
 from sqlalchemy import Integer
@@ -12,28 +19,32 @@ from sqlalchemy import schema
 from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import types
+from sqlalchemy import types as sqltypes
 from sqlalchemy import util
-from sqlalchemy.databases import mssql
+from sqlalchemy.dialects import mssql
 from sqlalchemy.dialects.mssql import base
 from sqlalchemy.dialects.mssql.information_schema import CoerceUnicode
 from sqlalchemy.dialects.mssql.information_schema import tables
-from sqlalchemy.engine.reflection import Inspector
+from sqlalchemy.pool import NullPool
+from sqlalchemy.schema import CreateIndex
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import ComparesTables
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
+from sqlalchemy.testing import provision
 
 
 class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
     __only_on__ = "mssql"
     __backend__ = True
 
-    @testing.provide_metadata
-    def test_basic_reflection(self):
-        meta = self.metadata
+    def test_basic_reflection(self, metadata, connection):
+        meta = metadata
 
         users = Table(
             "engine_users",
@@ -69,60 +80,44 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             ),
             Column("email_address", types.String(20)),
         )
-        meta.create_all()
+        meta.create_all(connection)
 
         meta2 = MetaData()
         reflected_users = Table(
-            "engine_users", meta2, autoload=True, autoload_with=testing.db
+            "engine_users", meta2, autoload_with=connection
         )
         reflected_addresses = Table(
             "engine_email_addresses",
             meta2,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         self.assert_tables_equal(users, reflected_users)
         self.assert_tables_equal(addresses, reflected_addresses)
 
-    @testing.provide_metadata
-    def _test_specific_type(self, type_obj, ddl):
-        metadata = self.metadata
+    @testing.combinations(
+        (mssql.XML, "XML"),
+        (mssql.IMAGE, "IMAGE"),
+        (mssql.MONEY, "MONEY"),
+        (mssql.NUMERIC(10, 2), "NUMERIC(10, 2)"),
+        (mssql.FLOAT, "FLOAT(53)"),
+        (mssql.REAL, "REAL"),
+        # FLOAT(5) comes back as REAL
+        (mssql.FLOAT(5), "REAL"),
+        argnames="type_obj,ddl",
+    )
+    def test_assorted_types(self, metadata, connection, type_obj, ddl):
 
         table = Table("type_test", metadata, Column("col1", type_obj))
-        table.create()
+        table.create(connection)
 
         m2 = MetaData()
-        table2 = Table("type_test", m2, autoload_with=testing.db)
+        table2 = Table("type_test", m2, autoload_with=connection)
         self.assert_compile(
             schema.CreateTable(table2),
             "CREATE TABLE type_test (col1 %s NULL)" % ddl,
         )
 
-    def test_xml_type(self):
-        self._test_specific_type(mssql.XML, "XML")
-
-    def test_image_type(self):
-        self._test_specific_type(mssql.IMAGE, "IMAGE")
-
-    def test_money_type(self):
-        self._test_specific_type(mssql.MONEY, "MONEY")
-
-    def test_numeric_prec_scale(self):
-        self._test_specific_type(mssql.NUMERIC(10, 2), "NUMERIC(10, 2)")
-
-    def test_float(self):
-        self._test_specific_type(mssql.FLOAT, "FLOAT(53)")
-
-    def test_real(self):
-        self._test_specific_type(mssql.REAL, "REAL")
-
-    def test_float_as_real(self):
-        # FLOAT(5) comes back as REAL
-        self._test_specific_type(mssql.FLOAT(5), "REAL")
-
-    @testing.provide_metadata
-    def test_identity(self):
-        metadata = self.metadata
+    def test_identity(self, metadata, connection):
         table = Table(
             "identity_test",
             metadata,
@@ -134,33 +129,55 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                 primary_key=True,
             ),
         )
-        table.create()
+        with testing.expect_deprecated(
+            "The dialect options 'mssql_identity_start' and"
+        ):
+            table.create(connection)
 
-        meta2 = MetaData(testing.db)
-        table2 = Table("identity_test", meta2, autoload=True)
-        eq_(table2.c["col1"].dialect_options["mssql"]["identity_start"], 2)
-        eq_(table2.c["col1"].dialect_options["mssql"]["identity_increment"], 3)
+        meta2 = MetaData()
+        table2 = Table("identity_test", meta2, autoload_with=connection)
+        eq_(table2.c["col1"].dialect_options["mssql"]["identity_start"], None)
+        eq_(
+            table2.c["col1"].dialect_options["mssql"]["identity_increment"],
+            None,
+        )
+        eq_(table2.c["col1"].identity.start, 2)
+        eq_(table2.c["col1"].identity.increment, 3)
 
-    @testing.emits_warning("Did not recognize")
-    @testing.provide_metadata
-    def test_skip_types(self):
-        metadata = self.metadata
-        testing.db.execute(
-            """
-            create table foo (id integer primary key, data xml)
-        """
+    def test_skip_types(self, connection):
+        connection.exec_driver_sql(
+            "create table foo (id integer primary key, data xml)"
         )
         with mock.patch.object(
-            testing.db.dialect, "ischema_names", {"int": mssql.INTEGER}
+            connection.dialect, "ischema_names", {"int": mssql.INTEGER}
         ):
-            t1 = Table("foo", metadata, autoload=True)
-        assert isinstance(t1.c.id.type, Integer)
-        assert isinstance(t1.c.data.type, types.NullType)
+            with testing.expect_warnings(
+                "Did not recognize type 'xml' of column 'data'"
+            ):
+                eq_(
+                    inspect(connection).get_columns("foo"),
+                    [
+                        {
+                            "name": "id",
+                            "type": testing.eq_type_affinity(sqltypes.INTEGER),
+                            "nullable": False,
+                            "default": None,
+                            "autoincrement": False,
+                        },
+                        {
+                            "name": "data",
+                            "type": testing.eq_type_affinity(
+                                sqltypes.NullType
+                            ),
+                            "nullable": True,
+                            "default": None,
+                            "autoincrement": False,
+                        },
+                    ],
+                )
 
-    @testing.provide_metadata
-    def test_cross_schema_fk_pk_name_overlaps(self):
+    def test_cross_schema_fk_pk_name_overlaps(self, metadata, connection):
         # test for issue #4228
-        metadata = self.metadata
 
         Table(
             "subject",
@@ -192,9 +209,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             schema=testing.config.test_schema_2,
         )
 
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        insp = inspect(testing.db)
+        insp = inspect(connection)
         eq_(
             insp.get_foreign_keys("referrer", testing.config.test_schema),
             [
@@ -204,13 +221,14 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                     "referred_schema": "test_schema",
                     "referred_table": "subject",
                     "referred_columns": ["id"],
+                    "options": {},
                 }
             ],
         )
 
-    @testing.provide_metadata
-    def test_table_name_that_is_greater_than_16_chars(self):
-        metadata = self.metadata
+    def test_table_name_that_is_greater_than_16_chars(
+        self, metadata, connection
+    ):
         Table(
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             metadata,
@@ -218,16 +236,182 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             Column("foo", Integer),
             Index("foo_idx", "foo"),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
         t = Table(
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZ", MetaData(), autoload_with=testing.db
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ", MetaData(), autoload_with=connection
         )
         eq_(t.name, "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-    @testing.provide_metadata
-    def test_db_qualified_items(self):
-        metadata = self.metadata
+    @testing.combinations(
+        ("local_temp", "#tmp", True),
+        ("global_temp", "##tmp", True),
+        ("nonexistent", "#no_es_bueno", False),
+        id_="iaa",
+        argnames="table_name, exists",
+    )
+    def test_temporary_table(self, metadata, connection, table_name, exists):
+        if exists:
+            tt = Table(
+                table_name,
+                metadata,
+                Column("id", Integer, primary_key=True),
+                Column("txt", mssql.NVARCHAR(50)),
+                Column("dt2", mssql.DATETIME2),
+            )
+            tt.create(connection)
+            connection.execute(
+                tt.insert(),
+                [
+                    {
+                        "id": 1,
+                        "txt": u"foo",
+                        "dt2": datetime.datetime(2020, 1, 1, 1, 1, 1),
+                    },
+                    {
+                        "id": 2,
+                        "txt": u"bar",
+                        "dt2": datetime.datetime(2020, 2, 2, 2, 2, 2),
+                    },
+                ],
+            )
+
+        if not exists:
+            with expect_raises(exc.NoSuchTableError):
+                Table(
+                    table_name,
+                    metadata,
+                    autoload_with=connection,
+                )
+        else:
+            tmp_t = Table(table_name, metadata, autoload_with=connection)
+            result = connection.execute(
+                tmp_t.select().where(tmp_t.c.id == 2)
+            ).fetchall()
+            eq_(
+                result,
+                [(2, "bar", datetime.datetime(2020, 2, 2, 2, 2, 2))],
+            )
+
+    @testing.combinations(
+        ("local_temp", "#tmp", True),
+        ("global_temp", "##tmp", True),
+        ("nonexistent", "#no_es_bueno", False),
+        id_="iaa",
+        argnames="table_name, exists",
+    )
+    def test_has_table_temporary(
+        self, metadata, connection, table_name, exists
+    ):
+        if exists:
+            tt = Table(
+                table_name,
+                metadata,
+                Column("id", Integer),
+            )
+            tt.create(connection)
+
+        found_it = testing.db.dialect.has_table(connection, table_name)
+        eq_(found_it, exists)
+
+    def test_has_table_temp_not_present_but_another_session(self):
+        """test #6910"""
+
+        with testing.db.connect() as c1, testing.db.connect() as c2:
+
+            try:
+                with c1.begin():
+                    c1.exec_driver_sql(
+                        "create table #myveryveryuniquetemptablename (a int)"
+                    )
+                assert not c2.dialect.has_table(
+                    c2, "#myveryveryuniquetemptablename"
+                )
+            finally:
+                with c1.begin():
+                    c1.exec_driver_sql(
+                        "drop table #myveryveryuniquetemptablename"
+                    )
+
+    def test_has_table_temp_temp_present_both_sessions(self):
+        """test #7168, continues from #6910"""
+
+        with testing.db.connect() as c1, testing.db.connect() as c2:
+            try:
+                with c1.begin():
+                    c1.exec_driver_sql(
+                        "create table #myveryveryuniquetemptablename (a int)"
+                    )
+
+                with c2.begin():
+                    c2.exec_driver_sql(
+                        "create table #myveryveryuniquetemptablename (a int)"
+                    )
+
+                assert c2.dialect.has_table(
+                    c2, "#myveryveryuniquetemptablename"
+                )
+            finally:
+                with c1.begin():
+                    c1.exec_driver_sql(
+                        "drop table #myveryveryuniquetemptablename"
+                    )
+                with c2.begin():
+                    c2.exec_driver_sql(
+                        "drop table #myveryveryuniquetemptablename"
+                    )
+
+    @testing.fixture
+    def temp_db_alt_collation_fixture(
+        self, connection_no_trans, testing_engine
+    ):
+        temp_db_name = "%s_different_collation" % (
+            provision.FOLLOWER_IDENT or "default"
+        )
+        cnxn = connection_no_trans.execution_options(
+            isolation_level="AUTOCOMMIT"
+        )
+        cnxn.exec_driver_sql("DROP DATABASE IF EXISTS %s" % temp_db_name)
+        cnxn.exec_driver_sql(
+            "CREATE DATABASE %s COLLATE Danish_Norwegian_CI_AS" % temp_db_name
+        )
+        eng = testing_engine(
+            url=testing.db.url.set(database=temp_db_name),
+            options=dict(poolclass=NullPool, future=True),
+        )
+
+        yield eng
+
+        cnxn.exec_driver_sql("DROP DATABASE IF EXISTS %s" % temp_db_name)
+
+    def test_global_temp_different_collation(
+        self, temp_db_alt_collation_fixture
+    ):
+        """test #8035"""
+
+        tname = "##foo%s" % (random.randint(1, 1000000),)
+
+        with temp_db_alt_collation_fixture.connect() as conn:
+            conn.exec_driver_sql(
+                "CREATE TABLE %s (id int primary key)" % (tname,)
+            )
+            conn.commit()
+
+            eq_(
+                inspect(conn).get_columns(tname),
+                [
+                    {
+                        "name": "id",
+                        "type": testing.eq_type_affinity(sqltypes.INTEGER),
+                        "nullable": False,
+                        "default": None,
+                        "autoincrement": False,
+                    }
+                ],
+            )
+            Table(tname, MetaData(), autoload_with=conn)
+
+    def test_db_qualified_items(self, metadata, connection):
         Table("foo", metadata, Column("id", Integer, primary_key=True))
         Table(
             "bar",
@@ -235,16 +419,16 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             Column("id", Integer, primary_key=True),
             Column("foo_id", Integer, ForeignKey("foo.id", name="fkfoo")),
         )
-        metadata.create_all()
+        metadata.create_all(connection)
 
-        dbname = testing.db.scalar("select db_name()")
-        owner = testing.db.scalar("SELECT user_name()")
+        dbname = connection.exec_driver_sql("select db_name()").scalar()
+        owner = connection.exec_driver_sql("SELECT user_name()").scalar()
         referred_schema = "%(dbname)s.%(owner)s" % {
             "dbname": dbname,
             "owner": owner,
         }
 
-        inspector = inspect(testing.db)
+        inspector = inspect(connection)
         bar_via_db = inspector.get_foreign_keys("bar", schema=referred_schema)
         eq_(
             bar_via_db,
@@ -255,38 +439,84 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                     "referred_schema": referred_schema,
                     "name": "fkfoo",
                     "constrained_columns": ["foo_id"],
+                    "options": {},
                 }
             ],
         )
 
-        assert testing.db.has_table("bar", schema=referred_schema)
+        assert inspect(connection).has_table("bar", schema=referred_schema)
 
         m2 = MetaData()
         Table(
             "bar",
             m2,
             schema=referred_schema,
-            autoload=True,
-            autoload_with=testing.db,
+            autoload_with=connection,
         )
         eq_(m2.tables["%s.foo" % referred_schema].schema, referred_schema)
 
-    @testing.provide_metadata
-    def test_indexes_cols(self):
-        metadata = self.metadata
+    def test_fk_on_unique_index(self, metadata, connection):
+        # test for issue #7160
+        Table(
+            "uidx_parent",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("uidx_col1", Integer, nullable=False),
+            Column("uidx_col2", Integer, nullable=False),
+            Index(
+                "UIDX_composite",
+                "uidx_col1",
+                "uidx_col2",
+                unique=True,
+            ),
+        )
+
+        Table(
+            "uidx_child",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("parent_uidx_col1", Integer, nullable=False),
+            Column("parent_uidx_col2", Integer, nullable=False),
+            ForeignKeyConstraint(
+                ["parent_uidx_col1", "parent_uidx_col2"],
+                ["uidx_parent.uidx_col1", "uidx_parent.uidx_col2"],
+                name="FK_uidx_parent",
+            ),
+        )
+
+        metadata.create_all(connection)
+
+        inspector = inspect(connection)
+        fk_info = inspector.get_foreign_keys("uidx_child")
+        eq_(
+            fk_info,
+            [
+                {
+                    "referred_table": "uidx_parent",
+                    "referred_columns": ["uidx_col1", "uidx_col2"],
+                    "referred_schema": None,
+                    "name": "FK_uidx_parent",
+                    "constrained_columns": [
+                        "parent_uidx_col1",
+                        "parent_uidx_col2",
+                    ],
+                    "options": {},
+                }
+            ],
+        )
+
+    def test_indexes_cols(self, metadata, connection):
 
         t1 = Table("t", metadata, Column("x", Integer), Column("y", Integer))
         Index("foo", t1.c.x, t1.c.y)
-        metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
-        t2 = Table("t", m2, autoload=True, autoload_with=testing.db)
+        t2 = Table("t", m2, autoload_with=connection)
 
         eq_(set(list(t2.indexes)[0].columns), set([t2.c["x"], t2.c.y]))
 
-    @testing.provide_metadata
-    def test_indexes_cols_with_commas(self):
-        metadata = self.metadata
+    def test_indexes_cols_with_commas(self, metadata, connection):
 
         t1 = Table(
             "t",
@@ -295,16 +525,14 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             Column("y", Integer),
         )
         Index("foo", t1.c.x, t1.c.y)
-        metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
-        t2 = Table("t", m2, autoload=True, autoload_with=testing.db)
+        t2 = Table("t", m2, autoload_with=connection)
 
         eq_(set(list(t2.indexes)[0].columns), set([t2.c["x, col"], t2.c.y]))
 
-    @testing.provide_metadata
-    def test_indexes_cols_with_spaces(self):
-        metadata = self.metadata
+    def test_indexes_cols_with_spaces(self, metadata, connection):
 
         t1 = Table(
             "t",
@@ -313,15 +541,42 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             Column("y", Integer),
         )
         Index("foo", t1.c.x, t1.c.y)
-        metadata.create_all()
+        metadata.create_all(connection)
 
         m2 = MetaData()
-        t2 = Table("t", m2, autoload=True, autoload_with=testing.db)
+        t2 = Table("t", m2, autoload_with=connection)
 
         eq_(set(list(t2.indexes)[0].columns), set([t2.c["x col"], t2.c.y]))
 
-    @testing.provide_metadata
-    def test_max_ident_in_varchar_not_present(self):
+    def test_indexes_with_filtered(self, metadata, connection):
+
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_where=t1.c.x == "test")
+        Index("idx_y", t1.c.y, mssql_where=t1.c.y >= 5)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        filtered_indexes = []
+        for ix in ind:
+            if "dialect_options" in ix:
+                filtered_indexes.append(ix["dialect_options"]["mssql_where"])
+
+        eq_(sorted(filtered_indexes), ["([x]='test')", "([y]>=(5))"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx), "CREATE INDEX idx_x ON t (x) WHERE ([x]='test')"
+        )
+
+    def test_max_ident_in_varchar_not_present(self, metadata, connection):
         """test [ticket:3504].
 
         Here we are testing not just that the "max" token comes back
@@ -330,7 +585,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         pattern however is likely in common use.
 
         """
-        metadata = self.metadata
 
         Table(
             "t",
@@ -341,10 +595,10 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             Column("t4", types.LargeBinary("max")),
             Column("t5", types.VARBINARY("max")),
         )
-        metadata.create_all()
-        for col in inspect(testing.db).get_columns("t"):
+        metadata.create_all(connection)
+        for col in inspect(connection).get_columns("t"):
             is_(col["type"].length, None)
-            in_("max", str(col["type"].compile(dialect=testing.db.dialect)))
+            in_("max", str(col["type"].compile(dialect=connection.dialect)))
 
 
 class InfoCoerceUnicodeTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -376,44 +630,37 @@ class InfoCoerceUnicodeTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
 
-class ReflectHugeViewTest(fixtures.TestBase):
+class ReflectHugeViewTest(fixtures.TablesTest):
     __only_on__ = "mssql"
     __backend__ = True
 
     # crashes on freetds 0.91, not worth it
     __skip_if__ = (lambda: testing.requires.mssql_freetds.enabled,)
 
-    def setup(self):
-        self.col_num = 150
+    @classmethod
+    def define_tables(cls, metadata):
+        col_num = 150
 
-        self.metadata = MetaData(testing.db)
         t = Table(
             "base_table",
-            self.metadata,
+            metadata,
             *[
                 Column("long_named_column_number_%d" % i, Integer)
-                for i in range(self.col_num)
+                for i in range(col_num)
             ]
         )
-        self.view_str = (
+        cls.view_str = (
             view_str
         ) = "CREATE VIEW huge_named_view AS SELECT %s FROM base_table" % (
-            ",".join(
-                "long_named_column_number_%d" % i for i in range(self.col_num)
-            )
+            ",".join("long_named_column_number_%d" % i for i in range(col_num))
         )
         assert len(view_str) > 4000
 
         event.listen(t, "after_create", DDL(view_str))
         event.listen(t, "before_drop", DDL("DROP VIEW huge_named_view"))
 
-        self.metadata.create_all()
-
-    def teardown(self):
-        self.metadata.drop_all()
-
     def test_inspect_view_definition(self):
-        inspector = Inspector.from_engine(testing.db)
+        inspector = inspect(testing.db)
         view_def = inspector.get_view_definition("huge_named_view")
         eq_(view_def, self.view_str)
 
@@ -438,11 +685,21 @@ class OwnerPlusDBTest(fixtures.TestBase):
         schema, owner = base._owner_plus_db(dialect, identifier)
 
         mock_connection = mock.Mock(
-            dialect=dialect, scalar=mock.Mock(return_value="my_db")
+            dialect=dialect,
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(scalar=mock.Mock(return_value="my_db"))
+            ),
         )
         mock_lambda = mock.Mock()
         base._switch_db(schema, mock_connection, mock_lambda, "x", y="bar")
-        eq_(mock_connection.mock_calls, [mock.call.scalar("select db_name()")])
+        eq_(
+            mock_connection.mock_calls,
+            [mock.call.exec_driver_sql("select db_name()")],
+        )
+        eq_(
+            mock_connection.exec_driver_sql.return_value.mock_calls,
+            [mock.call.scalar()],
+        ),
         eq_(mock_lambda.mock_calls, [mock.call("x", y="bar")])
 
     def test_owner_database_pairs_switch_for_different_db(self):
@@ -452,17 +709,24 @@ class OwnerPlusDBTest(fixtures.TestBase):
         schema, owner = base._owner_plus_db(dialect, identifier)
 
         mock_connection = mock.Mock(
-            dialect=dialect, scalar=mock.Mock(return_value="my_db")
+            dialect=dialect,
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(scalar=mock.Mock(return_value="my_db"))
+            ),
         )
         mock_lambda = mock.Mock()
         base._switch_db(schema, mock_connection, mock_lambda, "x", y="bar")
         eq_(
             mock_connection.mock_calls,
             [
-                mock.call.scalar("select db_name()"),
-                mock.call.execute("use my_other_db"),
-                mock.call.execute("use my_db"),
+                mock.call.exec_driver_sql("select db_name()"),
+                mock.call.exec_driver_sql("use my_other_db"),
+                mock.call.exec_driver_sql("use my_db"),
             ],
+            eq_(
+                mock_connection.exec_driver_sql.return_value.mock_calls,
+                [mock.call.scalar()],
+            ),
         )
         eq_(mock_lambda.mock_calls, [mock.call("x", y="bar")])
 
@@ -504,7 +768,11 @@ class OwnerPlusDBTest(fixtures.TestBase):
 
         mock_connection = mock.Mock(
             dialect=dialect,
-            scalar=mock.Mock(return_value="Some  Database"),
+            exec_driver_sql=mock.Mock(
+                return_value=mock.Mock(
+                    scalar=mock.Mock(return_value="Some Database")
+                )
+            ),
         )
         mock_lambda = mock.Mock()
         base._switch_db(schema, mock_connection, mock_lambda, "x", y="bar")
@@ -514,9 +782,81 @@ class OwnerPlusDBTest(fixtures.TestBase):
             eq_(
                 mock_connection.mock_calls,
                 [
-                    mock.call.scalar("select db_name()"),
-                    mock.call.execute(use_stmt),
-                    mock.call.execute("use [Some  Database]"),
+                    mock.call.exec_driver_sql("select db_name()"),
+                    mock.call.exec_driver_sql(use_stmt),
+                    mock.call.exec_driver_sql("use [Some Database]"),
                 ],
             )
+            eq_(
+                mock_connection.exec_driver_sql.return_value.mock_calls,
+                [mock.call.scalar()],
+            )
         eq_(mock_lambda.mock_calls, [mock.call("x", y="bar")])
+
+
+class IdentityReflectionTest(fixtures.TablesTest):
+    __only_on__ = "mssql"
+    __backend__ = True
+    __requires__ = ("identity_columns",)
+
+    @classmethod
+    def define_tables(cls, metadata):
+
+        for i, col in enumerate(
+            [
+                Column(
+                    "id1",
+                    Integer,
+                    Identity(
+                        always=True,
+                        start=2,
+                        increment=3,
+                        minvalue=-2,
+                        maxvalue=42,
+                        cycle=True,
+                        cache=4,
+                    ),
+                ),
+                Column("id2", Integer, Identity()),
+                Column("id3", sqltypes.BigInteger, Identity()),
+                Column("id4", sqltypes.SmallInteger, Identity()),
+                Column("id5", sqltypes.Numeric, Identity()),
+            ]
+        ):
+            Table("t%s" % i, metadata, col)
+
+    def test_reflect_identity(self, connection):
+        insp = inspect(connection)
+        cols = []
+        for t in self.tables_test_metadata.tables.keys():
+            cols.extend(insp.get_columns(t))
+        for col in cols:
+            is_true("dialect_options" not in col)
+            is_true("identity" in col)
+            if col["name"] == "id1":
+                eq_(col["identity"], {"start": 2, "increment": 3})
+            elif col["name"] == "id2":
+                eq_(col["identity"], {"start": 1, "increment": 1})
+                eq_(type(col["identity"]["start"]), int)
+                eq_(type(col["identity"]["increment"]), int)
+            elif col["name"] == "id3":
+                eq_(col["identity"], {"start": 1, "increment": 1})
+                eq_(type(col["identity"]["start"]), util.compat.long_type)
+                eq_(type(col["identity"]["increment"]), util.compat.long_type)
+            elif col["name"] == "id4":
+                eq_(col["identity"], {"start": 1, "increment": 1})
+                eq_(type(col["identity"]["start"]), int)
+                eq_(type(col["identity"]["increment"]), int)
+            elif col["name"] == "id5":
+                eq_(col["identity"], {"start": 1, "increment": 1})
+                eq_(type(col["identity"]["start"]), decimal.Decimal)
+                eq_(type(col["identity"]["increment"]), decimal.Decimal)
+
+    @testing.requires.views
+    def test_reflect_views(self, connection):
+        connection.exec_driver_sql("CREATE VIEW view1 AS SELECT * FROM t1")
+        insp = inspect(connection)
+        for col in insp.get_columns("view1"):
+            is_true("dialect_options" not in col)
+            is_true("identity" in col)
+            eq_(col["identity"], {})

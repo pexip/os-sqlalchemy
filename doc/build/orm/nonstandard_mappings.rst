@@ -2,6 +2,8 @@
 Non-Traditional Mappings
 ========================
 
+.. _orm_mapping_joins:
+
 .. _maptojoin:
 
 Mapping a Class against Multiple Tables
@@ -13,24 +15,27 @@ function creates a selectable unit comprised of
 multiple tables, complete with its own composite primary key, which can be
 mapped in the same way as a :class:`_schema.Table`::
 
-    from sqlalchemy import Table, Column, Integer, \
-            String, MetaData, join, ForeignKey
+    from sqlalchemy import Table, Column, Integer, String, MetaData, join, ForeignKey
     from sqlalchemy.ext.declarative import declarative_base
     from sqlalchemy.orm import column_property
 
-    metadata = MetaData()
+    metadata_obj = MetaData()
 
     # define two Table objects
-    user_table = Table('user', metadata,
-                Column('id', Integer, primary_key=True),
-                Column('name', String),
-            )
+    user_table = Table(
+        "user",
+        metadata_obj,
+        Column("id", Integer, primary_key=True),
+        Column("name", String),
+    )
 
-    address_table = Table('address', metadata,
-                Column('id', Integer, primary_key=True),
-                Column('user_id', Integer, ForeignKey('user.id')),
-                Column('email_address', String)
-                )
+    address_table = Table(
+        "address",
+        metadata_obj,
+        Column("id", Integer, primary_key=True),
+        Column("user_id", Integer, ForeignKey("user.id")),
+        Column("email_address", String),
+    )
 
     # define a join between them.  This
     # takes place across the user.id and address.user_id
@@ -102,9 +107,10 @@ may be used::
 
         from sqlalchemy import event
 
-        @event.listens_for(PtoQ, 'before_update')
+
+        @event.listens_for(PtoQ, "before_update")
         def receive_before_update(mapper, connection, target):
-           if target.some_required_attr_on_q is None:
+            if target.some_required_attr_on_q is None:
                 connection.execute(q_table.insert(), {"id": target.id})
 
     where above, a row is INSERTed into the ``q_table`` table by creating an
@@ -114,28 +120,34 @@ may be used::
     that the LEFT OUTER JOIN from "p" to "q" does not have an entry for the "q"
     side.
 
+.. _orm_mapping_arbitrary_subqueries:
 
-Mapping a Class against Arbitrary Selects
-=========================================
+Mapping a Class against Arbitrary Subqueries
+============================================
 
-Similar to mapping against a join, a plain :func:`_expression.select` object can be used with a
-mapper as well.  The example fragment below illustrates mapping a class
-called ``Customer`` to a :func:`_expression.select` which includes a join to a
-subquery::
+Similar to mapping against a join, a plain :func:`_expression.select` object
+can be used with a mapper as well.  The example fragment below illustrates
+mapping a class called ``Customer`` to a :func:`_expression.select` which
+includes a join to a subquery::
 
     from sqlalchemy import select, func
 
-    subq = select([
-                func.count(orders.c.id).label('order_count'),
-                func.max(orders.c.price).label('highest_order'),
-                orders.c.customer_id
-                ]).group_by(orders.c.customer_id).alias()
+    subq = (
+        select(
+            func.count(orders.c.id).label("order_count"),
+            func.max(orders.c.price).label("highest_order"),
+            orders.c.customer_id,
+        )
+        .group_by(orders.c.customer_id)
+        .subquery()
+    )
 
-    customer_select = select([customers, subq]).\
-                select_from(
-                    join(customers, subq,
-                            customers.c.id == subq.c.customer_id)
-                ).alias()
+    customer_select = (
+        select(customers, subq)
+        .join_from(customers, subq, customers.c.id == subq.c.customer_id)
+        .subquery()
+    )
+
 
     class Customer(Base):
         __table__ = customer_select
@@ -196,5 +208,5 @@ directly to mapped table columns.   The feature was removed and replaced
 with a simple recipe-oriented approach to accomplishing this task
 without any ambiguity of instrumentation - to create new subclasses, each
 mapped individually.  This pattern is now available as a recipe at `Entity Name
-<http://www.sqlalchemy.org/trac/wiki/UsageRecipes/EntityName>`_.
+<https://www.sqlalchemy.org/trac/wiki/UsageRecipes/EntityName>`_.
 

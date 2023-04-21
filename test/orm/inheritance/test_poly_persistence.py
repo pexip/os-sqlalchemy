@@ -6,8 +6,6 @@ from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy.orm import create_session
-from sqlalchemy.orm import mapper
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
@@ -15,6 +13,7 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
 
@@ -123,13 +122,15 @@ class InsertOrderTest(PolymorphTest):
             {
                 "engineer": people.join(engineers),
                 "manager": people.join(managers),
-                "person": people.select(people.c.type == "person"),
+                "person": people.select()
+                .where(people.c.type == "person")
+                .subquery(),
             },
             None,
             "pjoin",
         )
 
-        person_mapper = mapper(
+        person_mapper = self.mapper_registry.map_imperatively(
             Person,
             people,
             with_polymorphic=("*", person_join),
@@ -137,19 +138,19 @@ class InsertOrderTest(PolymorphTest):
             polymorphic_identity="person",
         )
 
-        mapper(
+        self.mapper_registry.map_imperatively(
             Engineer,
             engineers,
             inherits=person_mapper,
             polymorphic_identity="engineer",
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Manager,
             managers,
             inherits=person_mapper,
             polymorphic_identity="manager",
         )
-        mapper(
+        self.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={
@@ -159,7 +160,7 @@ class InsertOrderTest(PolymorphTest):
             },
         )
 
-        session = create_session()
+        session = fixture_session()
         c = Company(name="company1")
         c.employees.append(
             Manager(
@@ -191,7 +192,7 @@ class InsertOrderTest(PolymorphTest):
         session.add(c)
         session.flush()
         session.expunge_all()
-        eq_(session.query(Company).get(c.company_id), c)
+        eq_(session.get(Company, c.company_id), c)
 
 
 @testing.combinations(
@@ -235,7 +236,9 @@ class RoundTripTest(PolymorphTest):
                     {
                         "engineer": people.join(engineers),
                         "manager": people.join(managers),
-                        "person": people.select(people.c.type == "person"),
+                        "person": people.select()
+                        .where(people.c.type == "person")
+                        .subquery(),
                     },
                     None,
                     "pjoin",
@@ -268,7 +271,7 @@ class RoundTripTest(PolymorphTest):
             manager_with_polymorphic = None
 
         if redefine_colprop:
-            person_mapper = mapper(
+            person_mapper = cls.mapper_registry.map_imperatively(
                 Person,
                 people,
                 with_polymorphic=person_with_polymorphic,
@@ -277,7 +280,7 @@ class RoundTripTest(PolymorphTest):
                 properties={"person_name": people.c.name},
             )
         else:
-            person_mapper = mapper(
+            person_mapper = cls.mapper_registry.map_imperatively(
                 Person,
                 people,
                 with_polymorphic=person_with_polymorphic,
@@ -285,13 +288,13 @@ class RoundTripTest(PolymorphTest):
                 polymorphic_identity="person",
             )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Engineer,
             engineers,
             inherits=person_mapper,
             polymorphic_identity="engineer",
         )
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Manager,
             managers,
             inherits=person_mapper,
@@ -299,9 +302,11 @@ class RoundTripTest(PolymorphTest):
             polymorphic_identity="manager",
         )
 
-        mapper(Boss, boss, inherits=Manager, polymorphic_identity="boss")
+        cls.mapper_registry.map_imperatively(
+            Boss, boss, inherits=Manager, polymorphic_identity="boss"
+        )
 
-        mapper(
+        cls.mapper_registry.map_imperatively(
             Company,
             companies,
             properties={
@@ -387,7 +392,7 @@ class RoundTripTest(PolymorphTest):
         else:
             person_attribute_name = "name"
 
-        session = create_session()
+        session = fixture_session()
 
         dilbert = (
             session.query(Engineer)
@@ -397,7 +402,7 @@ class RoundTripTest(PolymorphTest):
         employees = session.query(Person).order_by(Person.person_id).all()
         company = session.query(Company).first()
 
-        eq_(session.query(Person).get(dilbert.person_id), dilbert)
+        eq_(session.get(Person, dilbert.person_id), dilbert)
         session.expunge_all()
 
         eq_(
@@ -409,7 +414,7 @@ class RoundTripTest(PolymorphTest):
         session.expunge_all()
 
         def go():
-            cc = session.query(Company).get(company.company_id)
+            cc = session.get(Company, company.company_id)
             eq_(cc.employees, employees)
 
         if not lazy_relationship:
@@ -425,7 +430,7 @@ class RoundTripTest(PolymorphTest):
                 self.assert_sql_count(testing.db, go, 3)
 
     def test_baseclass_lookup(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
         if self.redefine_colprop:
@@ -445,7 +450,7 @@ class RoundTripTest(PolymorphTest):
         )
 
     def test_subclass_lookup(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
         if self.redefine_colprop:
@@ -461,7 +466,7 @@ class RoundTripTest(PolymorphTest):
         )
 
     def test_baseclass_base_alias_filter(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
         # test selecting from the query, joining against
@@ -469,7 +474,7 @@ class RoundTripTest(PolymorphTest):
         # the "palias" alias does *not* get sucked up
         # into the "person_join" conversion.
         palias = people.alias("palias")
-        dilbert = session.query(Person).get(dilbert.person_id)
+        dilbert = session.get(Person, dilbert.person_id)
         is_(
             dilbert,
             session.query(Person)
@@ -481,7 +486,7 @@ class RoundTripTest(PolymorphTest):
         )
 
     def test_subclass_base_alias_filter(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
         palias = people.alias("palias")
@@ -497,21 +502,24 @@ class RoundTripTest(PolymorphTest):
         )
 
     def test_baseclass_sub_table_filter(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
+        # this unusual test is selecting from the plain people/engineers
+        # table at the same time as the polymorphic entity
         is_(
             dilbert,
             session.query(Person)
             .filter(
                 (Engineer.engineer_name == "engineer1")
                 & (engineers.c.person_id == people.c.person_id)
+                & (people.c.person_id == Person.person_id)
             )
             .first(),
         )
 
     def test_subclass_getitem(self, get_dilbert):
-        session = Session()
+        session = fixture_session()
         dilbert = get_dilbert(session)
 
         is_(
@@ -523,7 +531,7 @@ class RoundTripTest(PolymorphTest):
 
     def test_primary_table_only_for_requery(self):
 
-        session = Session()
+        session = fixture_session()
 
         if self.redefine_colprop:
             person_attribute_name = "person_name"
@@ -553,7 +561,7 @@ class RoundTripTest(PolymorphTest):
         else:
             person_attribute_name = "name"
 
-        session = Session()
+        session = fixture_session()
 
         daboss = Boss(
             status="BBB",
