@@ -16,14 +16,18 @@ two use cases are:
 * Two tables each contain a foreign key referencing the other
   table, with a row in each table referencing the other.
 
-For example::
+For example:
+
+.. sourcecode:: text
 
               user
     ---------------------------------
     user_id    name   related_user_id
        1       'ed'          1
 
-Or::
+Or:
+
+.. sourcecode:: text
 
                  widget                                                  entry
     -------------------------------------------             ---------------------------------
@@ -31,12 +35,13 @@ Or::
        1       'somewidget'          5                         5       'someentry'     1
 
 In the first case, a row points to itself. Technically, a database that uses
-sequences such as PostgreSQL or Oracle can INSERT the row at once using a
-previously generated value, but databases which rely upon autoincrement-style
-primary key identifiers cannot. The :func:`~sqlalchemy.orm.relationship`
-always assumes a "parent/child" model of row population during flush, so
-unless you are populating the primary key/foreign key columns directly,
-:func:`~sqlalchemy.orm.relationship` needs to use two statements.
+sequences such as PostgreSQL or Oracle Database can INSERT the row at once
+using a previously generated value, but databases which rely upon
+autoincrement-style primary key identifiers cannot. The
+:func:`~sqlalchemy.orm.relationship` always assumes a "parent/child" model of
+row population during flush, so unless you are populating the primary
+key/foreign key columns directly, :func:`~sqlalchemy.orm.relationship` needs to
+use two statements.
 
 In the second case, the "widget" row must be inserted before any referring
 "entry" rows, but then the "favorite_entry_id" column of that "widget" row
@@ -58,28 +63,31 @@ be placed on just *one* of the relationships, preferably the
 many-to-one side.  Below we illustrate
 a complete example, including two :class:`_schema.ForeignKey` constructs::
 
-    from sqlalchemy import Integer, ForeignKey, Column
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy import Integer, ForeignKey
+    from sqlalchemy.orm import mapped_column
+    from sqlalchemy.orm import DeclarativeBase
     from sqlalchemy.orm import relationship
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Entry(Base):
         __tablename__ = "entry"
-        entry_id = Column(Integer, primary_key=True)
-        widget_id = Column(Integer, ForeignKey("widget.widget_id"))
-        name = Column(String(50))
+        entry_id = mapped_column(Integer, primary_key=True)
+        widget_id = mapped_column(Integer, ForeignKey("widget.widget_id"))
+        name = mapped_column(String(50))
 
 
     class Widget(Base):
         __tablename__ = "widget"
 
-        widget_id = Column(Integer, primary_key=True)
-        favorite_entry_id = Column(
+        widget_id = mapped_column(Integer, primary_key=True)
+        favorite_entry_id = mapped_column(
             Integer, ForeignKey("entry.entry_id", name="fk_favorite_entry")
         )
-        name = Column(String(50))
+        name = mapped_column(String(50))
 
         entries = relationship(Entry, primaryjoin=widget_id == Entry.widget_id)
         favorite_entry = relationship(
@@ -99,8 +107,8 @@ row at a time for the time being):
     >>> w1.favorite_entry = e1
     >>> w1.entries = [e1]
     >>> session.add_all([w1, e1])
-    {sql}>>> session.commit()
-    BEGIN (implicit)
+    >>> session.commit()
+    {execsql}BEGIN (implicit)
     INSERT INTO widget (favorite_entry_id, name) VALUES (?, ?)
     (None, 'somewidget')
     INSERT INTO entry (widget_id, name) VALUES (?, ?)
@@ -119,31 +127,33 @@ as illustrated below::
         Integer,
         ForeignKey,
         String,
-        Column,
         UniqueConstraint,
         ForeignKeyConstraint,
     )
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
+    from sqlalchemy.orm import mapped_column
     from sqlalchemy.orm import relationship
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Entry(Base):
         __tablename__ = "entry"
-        entry_id = Column(Integer, primary_key=True)
-        widget_id = Column(Integer, ForeignKey("widget.widget_id"))
-        name = Column(String(50))
+        entry_id = mapped_column(Integer, primary_key=True)
+        widget_id = mapped_column(Integer, ForeignKey("widget.widget_id"))
+        name = mapped_column(String(50))
         __table_args__ = (UniqueConstraint("entry_id", "widget_id"),)
 
 
     class Widget(Base):
         __tablename__ = "widget"
 
-        widget_id = Column(Integer, autoincrement="ignore_fk", primary_key=True)
-        favorite_entry_id = Column(Integer)
+        widget_id = mapped_column(Integer, autoincrement="ignore_fk", primary_key=True)
+        favorite_entry_id = mapped_column(Integer)
 
-        name = Column(String(50))
+        name = mapped_column(String(50))
 
         __table_args__ = (
             ForeignKeyConstraint(
@@ -194,8 +204,8 @@ illustrates this is::
         __tablename__ = "user"
         __table_args__ = {"mysql_engine": "InnoDB"}
 
-        username = Column(String(50), primary_key=True)
-        fullname = Column(String(100))
+        username = mapped_column(String(50), primary_key=True)
+        fullname = mapped_column(String(100))
 
         addresses = relationship("Address")
 
@@ -204,8 +214,10 @@ illustrates this is::
         __tablename__ = "address"
         __table_args__ = {"mysql_engine": "InnoDB"}
 
-        email = Column(String(50), primary_key=True)
-        username = Column(String(50), ForeignKey("user.username", onupdate="cascade"))
+        email = mapped_column(String(50), primary_key=True)
+        username = mapped_column(
+            String(50), ForeignKey("user.username", onupdate="cascade")
+        )
 
 Above, we illustrate ``onupdate="cascade"`` on the :class:`_schema.ForeignKey`
 object, and we also illustrate the ``mysql_engine='InnoDB'`` setting
@@ -218,7 +230,7 @@ should be enabled, using the configuration described at
 
     :ref:`passive_deletes` - supporting ON DELETE CASCADE with relationships
 
-    :paramref:`.orm.mapper.passive_updates` - similar feature on :func:`.mapper`
+    :paramref:`.orm.mapper.passive_updates` - similar feature on :class:`_orm.Mapper`
 
 
 Simulating limited ON UPDATE CASCADE without foreign key support
@@ -232,7 +244,7 @@ by emitting an UPDATE statement against foreign key columns that immediately
 reference a primary key column whose value has changed.
 The primary platforms without referential integrity features are
 MySQL when the ``MyISAM`` storage engine is used, and SQLite when the
-``PRAGMA foreign_keys=ON`` pragma is not used.  The Oracle database also
+``PRAGMA foreign_keys=ON`` pragma is not used.  Oracle Database also
 has no support for ``ON UPDATE CASCADE``, but because it still enforces
 referential integrity, needs constraints to be marked as deferrable
 so that SQLAlchemy can emit UPDATE statements.
@@ -252,8 +264,8 @@ Our previous mapping using ``passive_updates=False`` looks like::
     class User(Base):
         __tablename__ = "user"
 
-        username = Column(String(50), primary_key=True)
-        fullname = Column(String(100))
+        username = mapped_column(String(50), primary_key=True)
+        fullname = mapped_column(String(100))
 
         # passive_updates=False *only* needed if the database
         # does not implement ON UPDATE CASCADE
@@ -263,8 +275,8 @@ Our previous mapping using ``passive_updates=False`` looks like::
     class Address(Base):
         __tablename__ = "address"
 
-        email = Column(String(50), primary_key=True)
-        username = Column(String(50), ForeignKey("user.username"))
+        email = mapped_column(String(50), primary_key=True)
+        username = mapped_column(String(50), ForeignKey("user.username"))
 
 Key limitations of ``passive_updates=False`` include:
 
@@ -286,7 +298,7 @@ Key limitations of ``passive_updates=False`` include:
   map for objects that may be referencing the one with a
   mutating primary key, not throughout the database.
 
-As virtually all databases other than Oracle now support ``ON UPDATE CASCADE``,
-it is highly recommended that traditional ``ON UPDATE CASCADE`` support be used
-in the case that natural and mutable primary key values are in use.
-
+As virtually all databases other than Oracle Database now support ``ON UPDATE
+CASCADE``, it is highly recommended that traditional ``ON UPDATE CASCADE``
+support be used in the case that natural and mutable primary key values are in
+use.

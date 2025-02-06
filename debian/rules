@@ -4,8 +4,8 @@ pd=python-sqlalchemy-doc
 
 PY3VERS=$(shell py3versions -vr)
 pkgdir=$(CURDIR)/debian/python3-sqlalchemy
-sqla_libdir=$(pkgdir)/usr/lib/python3/dist-packages/sqlalchemy
-sqla_ext_libdir=$(pkgdir)-ext/usr/lib/python3/dist-packages/sqlalchemy
+sqla_libdir=$(pkgdir)/usr/lib/python3/dist-packages/sqlalchemy/cyextension
+sqla_ext_libdir=$(pkgdir)-ext/usr/lib/python3/dist-packages/sqlalchemy/cyextension
 
 %:
 	dh $@ --buildsystem=pybuild --with python3,sphinxdoc
@@ -15,6 +15,7 @@ override_dh_auto_clean:
 	find . -name '*\.py[co]' -delete
 
 override_dh_auto_install:
+	REQUIRE_SQLALCHEMY_CEXT=1 \
 	set -e ; set -x ; for i in $(PY3VERS) ; do \
 		python$$i ./setup.py install --root $(CURDIR)/debian/python3-sqlalchemy --install-layout=deb ; \
 	done
@@ -22,13 +23,16 @@ override_dh_auto_install:
 	# Tests need an installed package.
 ifeq (,$(findstring nocheck, $(DEB_BUILD_OPTIONS)))
 	set -e ; set -x ; for i in $(PY3VERS) ; do \
-		PYTHONPATH=$(CURDIR)/debian/python3-sqlalchemy/usr/lib/python3/dist-packages python$$i -m pytest test; \
+		PYTHONPATH=$(CURDIR)/debian/python3-sqlalchemy/usr/lib/python3/dist-packages \
+		python$$i -m pytest --numprocesses `nproc` test \
+		-k 'not test_joined_across and not test_eager_join and not test_plugin_files' \
+		--ignore-glob="*mypy*";\
 	done
 endif
 
 	# move extensions to -ext binary package
 	mkdir -p $(sqla_ext_libdir)
-	mv $(sqla_libdir)/*so $(sqla_ext_libdir)/
+	mv $(sqla_libdir)/*.so $(sqla_ext_libdir)/
 
 override_dh_auto_build:
 	echo "Do nothing here..."

@@ -1,5 +1,3 @@
-# coding: utf-8
-
 import datetime
 
 from sqlalchemy import and_
@@ -14,6 +12,7 @@ from sqlalchemy import Float
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import Integer
+from sqlalchemy import JSON
 from sqlalchemy import literal
 from sqlalchemy import literal_column
 from sqlalchemy import MetaData
@@ -27,8 +26,12 @@ from sqlalchemy import text
 from sqlalchemy import Time
 from sqlalchemy import true
 from sqlalchemy import tuple_
+from sqlalchemy import Uuid
+from sqlalchemy import values
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import REGCONFIG
+from sqlalchemy.sql.expression import type_coerce
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
@@ -40,32 +43,39 @@ from sqlalchemy.testing.assertsql import CursorSQL
 from sqlalchemy.testing.assertsql import DialectSQL
 
 
-class InsertTest(fixtures.TestBase, AssertsExecutionResults):
-
+class FunctionTypingTest(fixtures.TestBase, AssertsExecutionResults):
     __only_on__ = "postgresql"
     __backend__ = True
 
-    def setup_test(self):
-        self.metadata = MetaData()
+    def test_count_star(self, connection):
+        eq_(connection.scalar(func.count("*")), 1)
 
-    def teardown_test(self):
-        with testing.db.begin() as conn:
-            self.metadata.drop_all(conn)
+    def test_count_int(self, connection):
+        eq_(connection.scalar(func.count(1)), 1)
 
-    @testing.combinations((False,), (True,))
-    def test_foreignkey_missing_insert(self, implicit_returning):
-        engine = engines.testing_engine(
-            options={"implicit_returning": implicit_returning}
+
+class InsertTest(fixtures.TestBase, AssertsExecutionResults):
+    __only_on__ = "postgresql"
+    __backend__ = True
+
+    @testing.combinations((False,), (True,), argnames="implicit_returning")
+    def test_foreignkey_missing_insert(
+        self, metadata, connection, implicit_returning
+    ):
+        Table(
+            "t1",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            implicit_returning=implicit_returning,
         )
-
-        Table("t1", self.metadata, Column("id", Integer, primary_key=True))
         t2 = Table(
             "t2",
-            self.metadata,
+            metadata,
             Column("id", Integer, ForeignKey("t1.id"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
 
-        self.metadata.create_all(engine)
+        metadata.create_all(connection)
 
         # want to ensure that "null value in column "id" violates not-
         # null constraint" is raised (IntegrityError on psycoopg2, but
@@ -75,39 +85,36 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
         # the case here due to the foreign key.
 
         with expect_warnings(".*has no Python-side or server-side default.*"):
-            with engine.connect() as conn:
-                conn.begin()
-                assert_raises(
-                    (exc.IntegrityError, exc.ProgrammingError),
-                    conn.execute,
-                    t2.insert(),
-                )
+            assert_raises(
+                (exc.IntegrityError, exc.ProgrammingError),
+                connection.execute,
+                t2.insert(),
+            )
 
-    def test_sequence_insert(self):
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_sequence_insert(self, metadata, connection, implicit_returning):
         table = Table(
             "testtable",
-            self.metadata,
+            metadata,
             Column("id", Integer, Sequence("my_seq"), primary_key=True),
             Column("data", String(30)),
+            implicit_returning=implicit_returning,
         )
-        self.metadata.create_all(testing.db)
-        self._assert_data_with_sequence(table, "my_seq")
+        metadata.create_all(connection)
+        if implicit_returning:
+            self._assert_data_with_sequence_returning(
+                connection, table, "my_seq"
+            )
+        else:
+            self._assert_data_with_sequence(connection, table, "my_seq")
 
-    @testing.requires.returning
-    def test_sequence_returning_insert(self):
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_opt_sequence_insert(
+        self, metadata, connection, implicit_returning
+    ):
         table = Table(
             "testtable",
-            self.metadata,
-            Column("id", Integer, Sequence("my_seq"), primary_key=True),
-            Column("data", String(30)),
-        )
-        self.metadata.create_all(testing.db)
-        self._assert_data_with_sequence_returning(table, "my_seq")
-
-    def test_opt_sequence_insert(self):
-        table = Table(
-            "testtable",
-            self.metadata,
+            metadata,
             Column(
                 "id",
                 Integer,
@@ -115,490 +122,694 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                 primary_key=True,
             ),
             Column("data", String(30)),
+            implicit_returning=implicit_returning,
         )
-        self.metadata.create_all(testing.db)
-        self._assert_data_autoincrement(table)
+        metadata.create_all(connection)
+        if implicit_returning:
+            self._assert_data_autoincrement_returning(connection, table)
+        else:
+            self._assert_data_autoincrement(connection, table)
 
-    @testing.requires.returning
-    def test_opt_sequence_returning_insert(self):
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_autoincrement_insert(
+        self, metadata, connection, implicit_returning
+    ):
         table = Table(
             "testtable",
-            self.metadata,
-            Column(
-                "id",
-                Integer,
-                Sequence("my_seq", optional=True),
-                primary_key=True,
-            ),
-            Column("data", String(30)),
-        )
-        self.metadata.create_all(testing.db)
-        self._assert_data_autoincrement_returning(table)
-
-    def test_autoincrement_insert(self):
-        table = Table(
-            "testtable",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True),
             Column("data", String(30)),
+            implicit_returning=implicit_returning,
         )
-        self.metadata.create_all(testing.db)
-        self._assert_data_autoincrement(table)
+        metadata.create_all(connection)
+        if implicit_returning:
+            self._assert_data_autoincrement_returning(connection, table)
+        else:
+            self._assert_data_autoincrement(connection, table)
 
-    @testing.requires.returning
-    def test_autoincrement_returning_insert(self):
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_noautoincrement_insert(
+        self, metadata, connection, implicit_returning
+    ):
         table = Table(
             "testtable",
-            self.metadata,
-            Column("id", Integer, primary_key=True),
-            Column("data", String(30)),
-        )
-        self.metadata.create_all(testing.db)
-        self._assert_data_autoincrement_returning(table)
-
-    def test_noautoincrement_insert(self):
-        table = Table(
-            "testtable",
-            self.metadata,
+            metadata,
             Column("id", Integer, primary_key=True, autoincrement=False),
             Column("data", String(30)),
+            implicit_returning=implicit_returning,
         )
-        self.metadata.create_all(testing.db)
-        self._assert_data_noautoincrement(table)
+        metadata.create_all(connection)
+        self._assert_data_noautoincrement(connection, table)
 
-    def _assert_data_autoincrement(self, table):
-        engine = engines.testing_engine(options={"implicit_returning": False})
-
-        with self.sql_execution_asserter(engine) as asserter:
-
-            with engine.begin() as conn:
-                # execute with explicit id
-
-                r = conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                eq_(r.inserted_primary_key, (30,))
-
-                # execute with prefetch id
-
-                r = conn.execute(table.insert(), {"data": "d2"})
-                eq_(r.inserted_primary_key, (1,))
-
-                # executemany with explicit ids
-
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-
-                # executemany, uses SERIAL
-
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-
-                # single execute, explicit id, inline
-
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-
-                # single execute, inline, uses SERIAL
-
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 1, "data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)",
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)", [{"data": "d8"}]
-            ),
+    def _ints_and_strs_setinputsizes(self, connection):
+        return (
+            connection.dialect._bind_typing_render_casts
+            and String().dialect_impl(connection.dialect).render_bind_cast
         )
 
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
+    def _assert_data_autoincrement(self, connection, table):
+        """
+        invoked by:
+        * test_opt_sequence_insert
+        * test_autoincrement_insert
+        """
+
+        with self.sql_execution_asserter(connection) as asserter:
+            conn = connection
+            # execute with explicit id
+
+            r = conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            eq_(r.inserted_primary_key, (30,))
+
+            # execute with prefetch id
+
+            r = conn.execute(table.insert(), {"data": "d2"})
+            eq_(r.inserted_primary_key, (1,))
+
+            # executemany with explicit ids
+
+            conn.execute(
+                table.insert(),
                 [
-                    (30, "d1"),
-                    (1, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (2, "d5"),
-                    (3, "d6"),
-                    (33, "d7"),
-                    (4, "d8"),
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
                 ],
             )
 
-            conn.execute(table.delete())
+            # executemany, uses SERIAL
+
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+
+            # single execute, explicit id, inline
+
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+
+            # single execute, inline, uses SERIAL
+
+            conn.execute(table.insert().inline(), {"data": "d8"})
+
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 1, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 1, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d8"}],
+                ),
+            )
+
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (1, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (2, "d5"),
+                (3, "d6"),
+                (33, "d7"),
+                (4, "d8"),
+            ],
+        )
+
+        conn.execute(table.delete())
 
         # test the same series of events using a reflected version of
         # the table
 
         m2 = MetaData()
-        table = Table(table.name, m2, autoload_with=engine)
-
-        with self.sql_execution_asserter(engine) as asserter:
-            with engine.begin() as conn:
-                conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                r = conn.execute(table.insert(), {"data": "d2"})
-                eq_(r.inserted_primary_key, (5,))
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 5, "data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)",
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)", [{"data": "d8"}]
-            ),
-        )
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
-                [
-                    (30, "d1"),
-                    (5, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (6, "d5"),
-                    (7, "d6"),
-                    (33, "d7"),
-                    (8, "d8"),
-                ],
-            )
-            conn.execute(table.delete())
-
-    def _assert_data_autoincrement_returning(self, table):
-        engine = engines.testing_engine(options={"implicit_returning": True})
-
-        with self.sql_execution_asserter(engine) as asserter:
-            with engine.begin() as conn:
-
-                # execute with explicit id
-
-                r = conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                eq_(r.inserted_primary_key, (30,))
-
-                # execute with prefetch id
-
-                r = conn.execute(table.insert(), {"data": "d2"})
-                eq_(r.inserted_primary_key, (1,))
-
-                # executemany with explicit ids
-
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-
-                # executemany, uses SERIAL
-
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-
-                # single execute, explicit id, inline
-
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-
-                # single execute, inline, uses SERIAL
-
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data) RETURNING "
-                "testtable.id",
-                {"data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)",
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)", [{"data": "d8"}]
-            ),
+        table = Table(
+            table.name, m2, autoload_with=connection, implicit_returning=False
         )
 
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
+        with self.sql_execution_asserter(connection) as asserter:
+            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            r = conn.execute(table.insert(), {"data": "d2"})
+            eq_(r.inserted_primary_key, (5,))
+            conn.execute(
+                table.insert(),
                 [
-                    (30, "d1"),
-                    (1, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (2, "d5"),
-                    (3, "d6"),
-                    (33, "d7"),
-                    (4, "d8"),
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
                 ],
             )
-            conn.execute(table.delete())
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+            conn.execute(table.insert().inline(), {"data": "d8"})
+
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 5, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 5, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d8"}],
+                ),
+            )
+
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (5, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (6, "d5"),
+                (7, "d6"),
+                (33, "d7"),
+                (8, "d8"),
+            ],
+        )
+
+    def _assert_data_autoincrement_returning(self, connection, table):
+        """
+        invoked by:
+        * test_opt_sequence_returning_insert
+        * test_autoincrement_returning_insert
+        """
+        with self.sql_execution_asserter(connection) as asserter:
+            conn = connection
+
+            # execute with explicit id
+
+            r = conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            eq_(r.inserted_primary_key, (30,))
+
+            # execute with prefetch id
+
+            r = conn.execute(table.insert(), {"data": "d2"})
+            eq_(r.inserted_primary_key, (1,))
+
+            # executemany with explicit ids
+
+            conn.execute(
+                table.insert(),
+                [
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
+                ],
+            )
+
+            # executemany, uses SERIAL
+
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+
+            # single execute, explicit id, inline
+
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+
+            # single execute, inline, uses SERIAL
+
+            conn.execute(table.insert().inline(), {"data": "d8"})
+
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES "
+                    "(:data::VARCHAR) RETURNING "
+                    "testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data) RETURNING "
+                    "testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d8"}],
+                ),
+            )
+
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (1, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (2, "d5"),
+                (3, "d6"),
+                (33, "d7"),
+                (4, "d8"),
+            ],
+        )
+        conn.execute(table.delete())
 
         # test the same series of events using a reflected version of
         # the table
 
         m2 = MetaData()
-        table = Table(table.name, m2, autoload_with=engine)
-
-        with self.sql_execution_asserter(engine) as asserter:
-            with engine.begin() as conn:
-                conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                r = conn.execute(table.insert(), {"data": "d2"})
-                eq_(r.inserted_primary_key, (5,))
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data) RETURNING "
-                "testtable.id",
-                {"data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)",
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (data) VALUES (:data)", [{"data": "d8"}]
-            ),
+        table = Table(
+            table.name,
+            m2,
+            autoload_with=connection,
+            implicit_returning=True,
         )
 
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
+        with self.sql_execution_asserter(connection) as asserter:
+            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            r = conn.execute(table.insert(), {"data": "d2"})
+            eq_(r.inserted_primary_key, (5,))
+            conn.execute(
+                table.insert(),
                 [
-                    (30, "d1"),
-                    (5, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (6, "d5"),
-                    (7, "d6"),
-                    (33, "d7"),
-                    (8, "d8"),
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
                 ],
             )
-            conn.execute(table.delete())
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+            conn.execute(table.insert().inline(), {"data": "d8"})
 
-    def _assert_data_with_sequence(self, table, seqname):
-        engine = engines.testing_engine(options={"implicit_returning": False})
-
-        with self.sql_execution_asserter(engine) as asserter:
-            with engine.begin() as conn:
-                conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                conn.execute(table.insert(), {"data": "d2"})
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            CursorSQL("select nextval('my_seq')", consume_statement=False),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 1, "data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
-                ":data)" % seqname,
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
-                ":data)" % seqname,
-                [{"data": "d8"}],
-            ),
-        )
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
-                [
-                    (30, "d1"),
-                    (1, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (2, "d5"),
-                    (3, "d6"),
-                    (33, "d7"),
-                    (4, "d8"),
-                ],
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES "
+                    "(:data::VARCHAR) RETURNING "
+                    "testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data::VARCHAR)",
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data) RETURNING "
+                    "testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (data) VALUES (:data)",
+                    [{"data": "d8"}],
+                ),
             )
 
-        # cant test reflection here since the Sequence must be
-        # explicitly specified
-
-    def _assert_data_with_sequence_returning(self, table, seqname):
-        engine = engines.testing_engine(options={"implicit_returning": True})
-
-        with self.sql_execution_asserter(engine) as asserter:
-            with engine.begin() as conn:
-                conn.execute(table.insert(), {"id": 30, "data": "d1"})
-                conn.execute(table.insert(), {"data": "d2"})
-                conn.execute(
-                    table.insert(),
-                    [
-                        {"id": 31, "data": "d3"},
-                        {"id": 32, "data": "d4"},
-                    ],
-                )
-                conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
-                conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
-                conn.execute(table.insert().inline(), {"data": "d8"})
-
-        asserter.assert_(
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                {"id": 30, "data": "d1"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES "
-                "(nextval('my_seq'), :data) RETURNING testtable.id",
-                {"data": "d2"},
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
-                ":data)" % seqname,
-                [{"data": "d5"}, {"data": "d6"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (:id, :data)",
-                [{"id": 33, "data": "d7"}],
-            ),
-            DialectSQL(
-                "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
-                ":data)" % seqname,
-                [{"data": "d8"}],
-            ),
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (5, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (6, "d5"),
+                (7, "d6"),
+                (33, "d7"),
+                (8, "d8"),
+            ],
         )
 
-        with engine.begin() as conn:
-            eq_(
-                conn.execute(table.select()).fetchall(),
+    def _assert_data_with_sequence(self, connection, table, seqname):
+        """
+        invoked by:
+        * test_sequence_insert
+        """
+
+        with self.sql_execution_asserter(connection) as asserter:
+            conn = connection
+            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            conn.execute(table.insert(), {"data": "d2"})
+            conn.execute(
+                table.insert(),
                 [
-                    (30, "d1"),
-                    (1, "d2"),
-                    (31, "d3"),
-                    (32, "d4"),
-                    (2, "d5"),
-                    (3, "d6"),
-                    (33, "d7"),
-                    (4, "d8"),
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
                 ],
             )
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+            conn.execute(table.insert().inline(), {"data": "d8"})
 
-            # cant test reflection here since the Sequence must be
-            # explicitly specified
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                CursorSQL("select nextval('my_seq')", consume_statement=False),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 1, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data::VARCHAR)" % seqname,
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data::VARCHAR)" % seqname,
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                CursorSQL("select nextval('my_seq')", consume_statement=False),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 1, "data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data)" % seqname,
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data)" % seqname,
+                    [{"data": "d8"}],
+                ),
+            )
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (1, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (2, "d5"),
+                (3, "d6"),
+                (33, "d7"),
+                (4, "d8"),
+            ],
+        )
 
-    def _assert_data_noautoincrement(self, table):
-        engine = engines.testing_engine(options={"implicit_returning": False})
+    def _assert_data_with_sequence_returning(self, connection, table, seqname):
+        """
+        invoked by:
+        * test_sequence_returning_insert
+        """
+
+        with self.sql_execution_asserter(connection) as asserter:
+            conn = connection
+            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+            conn.execute(table.insert(), {"data": "d2"})
+            conn.execute(
+                table.insert(),
+                [
+                    {"id": 31, "data": "d3"},
+                    {"id": 32, "data": "d4"},
+                ],
+            )
+            conn.execute(table.insert(), [{"data": "d5"}, {"data": "d6"}])
+            conn.execute(table.insert().inline(), {"id": 33, "data": "d7"})
+            conn.execute(table.insert().inline(), {"data": "d8"})
+
+        if self._ints_and_strs_setinputsizes(connection):
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(nextval('my_seq'), :data::VARCHAR) "
+                    "RETURNING testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data::VARCHAR)" % seqname,
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(:id::INTEGER, :data::VARCHAR)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data::VARCHAR)" % seqname,
+                    [{"data": "d8"}],
+                ),
+            )
+        else:
+            asserter.assert_(
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    {"id": 30, "data": "d1"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES "
+                    "(nextval('my_seq'), :data) RETURNING testtable.id",
+                    {"data": "d2"},
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 31, "data": "d3"}, {"id": 32, "data": "d4"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data)" % seqname,
+                    [{"data": "d5"}, {"data": "d6"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (:id, :data)",
+                    [{"id": 33, "data": "d7"}],
+                ),
+                DialectSQL(
+                    "INSERT INTO testtable (id, data) VALUES (nextval('%s'), "
+                    ":data)" % seqname,
+                    [{"data": "d8"}],
+                ),
+            )
+
+        eq_(
+            connection.execute(table.select()).fetchall(),
+            [
+                (30, "d1"),
+                (1, "d2"),
+                (31, "d3"),
+                (32, "d4"),
+                (2, "d5"),
+                (3, "d6"),
+                (33, "d7"),
+                (4, "d8"),
+            ],
+        )
+
+    def _assert_data_noautoincrement(self, connection, table):
+        """
+        invoked by:
+        * test_noautoincrement_insert
+        """
 
         # turning off the cache because we are checking for compile-time
         # warnings
-        engine = engine.execution_options(compiled_cache=None)
+        connection.execution_options(compiled_cache=None)
 
-        with engine.begin() as conn:
-            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+        conn = connection
+        conn.execute(table.insert(), {"id": 30, "data": "d1"})
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -608,10 +819,9 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     {"data": "d2"},
                 )
-            trans.rollback()
+            nested.rollback()
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -621,10 +831,9 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     [{"data": "d2"}, {"data": "d3"}],
                 )
-            trans.rollback()
+            nested.rollback()
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -634,10 +843,9 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     {"data": "d2"},
                 )
-            trans.rollback()
+            nested.rollback()
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -647,30 +855,29 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     [{"data": "d2"}, {"data": "d3"}],
                 )
-            trans.rollback()
+            nested.rollback()
 
-        with engine.begin() as conn:
-            conn.execute(
-                table.insert(),
-                [{"id": 31, "data": "d2"}, {"id": 32, "data": "d3"}],
-            )
-            conn.execute(table.insert().inline(), {"id": 33, "data": "d4"})
-            eq_(
-                conn.execute(table.select()).fetchall(),
-                [(30, "d1"), (31, "d2"), (32, "d3"), (33, "d4")],
-            )
-            conn.execute(table.delete())
+        conn.execute(
+            table.insert(),
+            [{"id": 31, "data": "d2"}, {"id": 32, "data": "d3"}],
+        )
+        conn.execute(table.insert().inline(), {"id": 33, "data": "d4"})
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [(30, "d1"), (31, "d2"), (32, "d3"), (33, "d4")],
+        )
+        conn.execute(table.delete())
 
         # test the same series of events using a reflected version of
         # the table
 
         m2 = MetaData()
-        table = Table(table.name, m2, autoload_with=engine)
-        with engine.begin() as conn:
-            conn.execute(table.insert(), {"id": 30, "data": "d1"})
+        table = Table(table.name, m2, autoload_with=connection)
+        conn = connection
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        conn.execute(table.insert(), {"id": 30, "data": "d1"})
+
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -680,9 +887,9 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     {"data": "d2"},
                 )
+            nested.rollback()
 
-        with engine.connect() as conn:
-            trans = conn.begin()
+        with conn.begin_nested() as nested:
             with expect_warnings(
                 ".*has no Python-side or server-side default.*"
             ):
@@ -692,22 +899,20 @@ class InsertTest(fixtures.TestBase, AssertsExecutionResults):
                     table.insert(),
                     [{"data": "d2"}, {"data": "d3"}],
                 )
-            trans.rollback()
+            nested.rollback()
 
-        with engine.begin() as conn:
-            conn.execute(
-                table.insert(),
-                [{"id": 31, "data": "d2"}, {"id": 32, "data": "d3"}],
-            )
-            conn.execute(table.insert().inline(), {"id": 33, "data": "d4"})
-            eq_(
-                conn.execute(table.select()).fetchall(),
-                [(30, "d1"), (31, "d2"), (32, "d3"), (33, "d4")],
-            )
+        conn.execute(
+            table.insert(),
+            [{"id": 31, "data": "d2"}, {"id": 32, "data": "d3"}],
+        )
+        conn.execute(table.insert().inline(), {"id": 33, "data": "d4"})
+        eq_(
+            conn.execute(table.select()).fetchall(),
+            [(30, "d1"), (31, "d2"), (32, "d3"), (33, "d4")],
+        )
 
 
 class MatchTest(fixtures.TablesTest, AssertsCompiledSQL):
-
     __only_on__ = "postgresql >= 8.3"
     __backend__ = True
 
@@ -761,21 +966,145 @@ class MatchTest(fixtures.TablesTest, AssertsCompiledSQL):
             ],
         )
 
-    @testing.requires.pyformat_paramstyle
-    def test_expression_pyformat(self):
-        matchtable = self.tables.matchtable
-        self.assert_compile(
-            matchtable.c.title.match("somstr"),
-            "matchtable.title @@ to_tsquery(%(title_1)s" ")",
+    def _strs_render_bind_casts(self, connection):
+        return (
+            connection.dialect._bind_typing_render_casts
+            and String().dialect_impl(connection.dialect).render_bind_cast
         )
 
-    @testing.requires.format_paramstyle
-    def test_expression_positional(self):
+    @testing.requires.pyformat_paramstyle
+    def test_expression_pyformat(self, connection):
         matchtable = self.tables.matchtable
-        self.assert_compile(
-            matchtable.c.title.match("somstr"),
-            "matchtable.title @@ to_tsquery(%s)",
+
+        if self._strs_render_bind_casts(connection):
+            self.assert_compile(
+                matchtable.c.title.match("somstr"),
+                "matchtable.title @@ plainto_tsquery(%(title_1)s::VARCHAR)",
+            )
+        else:
+            self.assert_compile(
+                matchtable.c.title.match("somstr"),
+                "matchtable.title @@ plainto_tsquery(%(title_1)s)",
+            )
+
+    @testing.only_if("+asyncpg")
+    def test_expression_positional(self, connection):
+        matchtable = self.tables.matchtable
+
+        if self._strs_render_bind_casts(connection):
+            self.assert_compile(
+                matchtable.c.title.match("somstr"),
+                "matchtable.title @@ plainto_tsquery($1::VARCHAR)",
+            )
+        else:
+            self.assert_compile(
+                matchtable.c.title.match("somstr"),
+                "matchtable.title @@ plainto_tsquery($1)",
+            )
+
+    @testing.combinations(
+        (func.to_tsvector,),
+        (func.to_tsquery,),
+        (func.plainto_tsquery,),
+        (func.phraseto_tsquery,),
+        (func.websearch_to_tsquery,),
+        argnames="to_ts_func",
+    )
+    @testing.variation("use_regconfig", [True, False, "literal"])
+    def test_to_regconfig_fns(self, connection, to_ts_func, use_regconfig):
+        """test #8977"""
+
+        matchtable = self.tables.matchtable
+
+        fn_name = to_ts_func().name
+
+        if use_regconfig.literal:
+            regconfig = literal("english", REGCONFIG)
+        elif use_regconfig:
+            regconfig = "english"
+        else:
+            regconfig = None
+
+        if regconfig is None:
+            if fn_name == "to_tsvector":
+                fn = to_ts_func(matchtable.c.title).match("python")
+            else:
+                fn = func.to_tsvector(matchtable.c.title).op("@@")(
+                    to_ts_func("python")
+                )
+        else:
+            if fn_name == "to_tsvector":
+                fn = to_ts_func(regconfig, matchtable.c.title).match("python")
+            else:
+                fn = func.to_tsvector(matchtable.c.title).op("@@")(
+                    to_ts_func(regconfig, "python")
+                )
+
+        stmt = matchtable.select().where(fn).order_by(matchtable.c.id)
+        results = connection.execute(stmt).fetchall()
+        eq_([2, 5], [r.id for r in results])
+
+    @testing.variation("use_regconfig", [True, False, "literal"])
+    @testing.variation("include_options", [True, False])
+    def test_ts_headline(self, connection, use_regconfig, include_options):
+        """test #8977"""
+        if use_regconfig.literal:
+            regconfig = literal("english", REGCONFIG)
+        elif use_regconfig:
+            regconfig = "english"
+        else:
+            regconfig = None
+
+        text = (
+            "The most common type of search is to find all documents "
+            "containing given query terms and return them in order of "
+            "their similarity to the query."
         )
+        tsquery = func.to_tsquery("english", "query & similarity")
+
+        if regconfig is None:
+            if include_options:
+                fn = func.ts_headline(
+                    text,
+                    tsquery,
+                    "MaxFragments=10, MaxWords=7, MinWords=3, "
+                    "StartSel=<<, StopSel=>>",
+                )
+            else:
+                fn = func.ts_headline(
+                    text,
+                    tsquery,
+                )
+        else:
+            if include_options:
+                fn = func.ts_headline(
+                    regconfig,
+                    text,
+                    tsquery,
+                    "MaxFragments=10, MaxWords=7, MinWords=3, "
+                    "StartSel=<<, StopSel=>>",
+                )
+            else:
+                fn = func.ts_headline(
+                    regconfig,
+                    text,
+                    tsquery,
+                )
+
+        stmt = select(fn)
+
+        if include_options:
+            eq_(
+                connection.scalar(stmt),
+                "documents containing given <<query>> terms and return ... "
+                "their <<similarity>> to the <<query>>",
+            )
+        else:
+            eq_(
+                connection.scalar(stmt),
+                "containing given <b>query</b> terms and return them in "
+                "order of their <b>similarity</b> to the <b>query</b>.",
+            )
 
     def test_simple_match(self, connection):
         matchtable = self.tables.matchtable
@@ -822,9 +1151,16 @@ class MatchTest(fixtures.TablesTest, AssertsCompiledSQL):
             .order_by(matchtable.c.id)
         ).fetchall()
         eq_([3, 5], [r.id for r in results1])
+
+    def test_or_tsquery(self, connection):
+        matchtable = self.tables.matchtable
         results2 = connection.execute(
             matchtable.select()
-            .where(matchtable.c.title.match("nutshells | rubies"))
+            .where(
+                matchtable.c.title.bool_op("@@")(
+                    func.to_tsquery("nutshells | rubies")
+                )
+            )
             .order_by(matchtable.c.id)
         ).fetchall()
         eq_([3, 5], [r.id for r in results2])
@@ -840,9 +1176,14 @@ class MatchTest(fixtures.TablesTest, AssertsCompiledSQL):
             )
         ).fetchall()
         eq_([5], [r.id for r in results1])
+
+    def test_and_tsquery(self, connection):
+        matchtable = self.tables.matchtable
         results2 = connection.execute(
             matchtable.select().where(
-                matchtable.c.title.match("python & nutshells")
+                matchtable.c.title.op("@@")(
+                    func.to_tsquery("python & nutshells")
+                )
             )
         ).fetchall()
         eq_([5], [r.id for r in results2])
@@ -870,7 +1211,6 @@ class TupleTest(fixtures.TestBase):
     __backend__ = True
 
     def test_tuple_containment(self, connection):
-
         for test, exp in [
             ([("a", "b")], True),
             ([("a", "c")], False),
@@ -900,10 +1240,9 @@ class TupleTest(fixtures.TestBase):
 
 
 class ExtractTest(fixtures.TablesTest):
-
     """The rationale behind this test is that for many years we've had a system
     of embedding type casts into the expressions rendered by visit_extract()
-    on the postgreql platform.  The reason for this cast is not clear.
+    on the postgresql platform.  The reason for this cast is not clear.
     So here we try to produce a wide range of cases to ensure that these casts
     are not needed; see [ticket:2740].
 
@@ -948,7 +1287,6 @@ class ExtractTest(fixtures.TablesTest):
 
     @classmethod
     def insert_data(cls, connection):
-
         connection.execute(
             cls.tables.t.insert(),
             {
@@ -1206,7 +1544,6 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         )
 
     def test_table_valued(self, assets_transactions, connection):
-
         jb = func.jsonb_each(assets_transactions.c.contents).table_valued(
             "key", "value"
         )
@@ -1281,13 +1618,11 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         )
 
     def test_function_against_row_constructor(self, connection):
-
         stmt = select(func.row_to_json(func.row(1, "foo")))
 
         eq_(connection.scalar(stmt), {"f1": 1, "f2": "foo"})
 
     def test_with_ordinality_named(self, connection):
-
         stmt = select(
             func.generate_series(4, 1, -1)
             .table_valued("gs", with_ordinality="ordinality")
@@ -1297,7 +1632,6 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         eq_(connection.execute(stmt).all(), [(4, 1), (3, 2), (2, 3), (1, 4)])
 
     def test_with_ordinality_star(self, connection):
-
         stmt = select("*").select_from(
             func.generate_series(4, 1, -1).table_valued(
                 with_ordinality="ordinality"
@@ -1305,6 +1639,10 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         )
 
         eq_(connection.execute(stmt).all(), [(4, 1), (3, 2), (2, 3), (1, 4)])
+
+    def test_array_empty_with_type(self, connection):
+        stmt = select(postgresql.array([], type_=Integer))
+        eq_(connection.execute(stmt).all(), [([],)])
 
     def test_plain_old_unnest(self, connection):
         fn = func.unnest(
@@ -1319,7 +1657,6 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         )
 
     def test_unnest_with_ordinality(self, connection):
-
         array_val = postgresql.array(
             [postgresql.array([14, 41, 7]), postgresql.array([54, 9, 49])]
         )
@@ -1335,7 +1672,6 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         )
 
     def test_unnest_with_ordinality_named(self, connection):
-
         array_val = postgresql.array(
             [postgresql.array([14, 41, 7]), postgresql.array([54, 9, 49])]
         )
@@ -1354,17 +1690,36 @@ class TableValuedRoundTripTest(fixtures.TestBase):
             [(14, 1), (41, 2), (7, 3), (54, 4), (9, 5), (49, 6)],
         )
 
-    @testing.only_on(
-        "postgresql+psycopg2",
-        "I cannot get this to run at all on other drivers, "
-        "even selecting from a table",
+    @testing.combinations(
+        (
+            type_coerce,
+            testing.fails("fails on all drivers"),
+        ),
+        (
+            cast,
+            testing.fails("fails on all drivers"),
+        ),
+        (
+            None,
+            testing.fails_on_everything_except(
+                ["postgresql+psycopg2"],
+                "I cannot get this to run at all on other drivers, "
+                "even selecting from a table",
+            ),
+        ),
+        argnames="cast_fn",
     )
-    def test_render_derived_quoting(self, connection):
+    def test_render_derived_quoting_text(self, connection, cast_fn):
+        value = (
+            '[{"CaseSensitive":1,"the % value":"foo"}, '
+            '{"CaseSensitive":"2","the % value":"bar"}]'
+        )
+
+        if cast_fn:
+            value = cast_fn(value, JSON)
+
         fn = (
-            func.json_to_recordset(  # noqa
-                '[{"CaseSensitive":1,"the % value":"foo"}, '
-                '{"CaseSensitive":"2","the % value":"bar"}]'
-            )
+            func.json_to_recordset(value)
             .table_valued(
                 column("CaseSensitive", Integer), column("the % value", String)
             )
@@ -1374,3 +1729,127 @@ class TableValuedRoundTripTest(fixtures.TestBase):
         stmt = select(fn.c.CaseSensitive, fn.c["the % value"])
 
         eq_(connection.execute(stmt).all(), [(1, "foo"), (2, "bar")])
+
+    @testing.combinations(
+        (
+            type_coerce,
+            testing.fails("fails on all drivers"),
+        ),
+        (
+            cast,
+            testing.fails("fails on all drivers"),
+        ),
+        (
+            None,
+            testing.fails("Fails on all drivers"),
+        ),
+        argnames="cast_fn",
+    )
+    def test_render_derived_quoting_text_to_json(self, connection, cast_fn):
+        value = (
+            '[{"CaseSensitive":1,"the % value":"foo"}, '
+            '{"CaseSensitive":"2","the % value":"bar"}]'
+        )
+
+        if cast_fn:
+            value = cast_fn(value, JSON)
+
+        # why won't this work?!?!?
+        # should be exactly json_to_recordset(to_json('string'::text))
+        #
+        fn = (
+            func.json_to_recordset(func.to_json(value))
+            .table_valued(
+                column("CaseSensitive", Integer), column("the % value", String)
+            )
+            .render_derived(with_types=True)
+        )
+
+        stmt = select(fn.c.CaseSensitive, fn.c["the % value"])
+
+        eq_(connection.execute(stmt).all(), [(1, "foo"), (2, "bar")])
+
+    @testing.combinations(
+        (type_coerce,),
+        (cast,),
+        (None, testing.fails("Fails on all PG backends")),
+        argnames="cast_fn",
+    )
+    def test_render_derived_quoting_straight_json(self, connection, cast_fn):
+        # these all work
+
+        value = [
+            {"CaseSensitive": 1, "the % value": "foo"},
+            {"CaseSensitive": "2", "the % value": "bar"},
+        ]
+
+        if cast_fn:
+            value = cast_fn(value, JSON)
+
+        fn = (
+            func.json_to_recordset(value)  # noqa
+            .table_valued(
+                column("CaseSensitive", Integer), column("the % value", String)
+            )
+            .render_derived(with_types=True)
+        )
+
+        stmt = select(fn.c.CaseSensitive, fn.c["the % value"])
+
+        eq_(connection.execute(stmt).all(), [(1, "foo"), (2, "bar")])
+
+
+class RequiresCastTest(fixtures.TablesTest):
+    __only_on__ = "postgresql"
+    __backend__ = True
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "t",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("uuid", Uuid),
+            Column("j", JSON),
+            Column("jb", JSONB),
+        )
+
+    @classmethod
+    def insert_data(cls, connection):
+        connection.execute(
+            cls.tables["t"].insert(),
+            [
+                {"id": 1, "uuid": "d24587a1-06d9-41df-b1c3-3f423b97a755"},
+                {"id": 2, "uuid": "4b07e1c8-d60c-4ea8-9d01-d7cd01362224"},
+            ],
+        )
+
+    def test_update_values(self, connection):
+        value = values(
+            Column("id", Integer),
+            Column("uuid", Uuid),
+            Column("j", JSON),
+            Column("jb", JSONB),
+            name="update_data",
+        ).data(
+            [
+                (
+                    1,
+                    "8b6ec1ec-b979-4d0b-b2ce-9acc6e4c2943",
+                    {"foo": 1},
+                    {"foo_jb": 1},
+                ),
+                (
+                    2,
+                    "a2123bcb-7ea3-420a-8284-1db4b2759d79",
+                    {"bar": 2},
+                    {"bar_jb": 2},
+                ),
+            ]
+        )
+        connection.execute(
+            self.tables["t"]
+            .update()
+            .values(uuid=value.c.uuid, j=value.c.j, jb=value.c.jb)
+            .where(self.tables["t"].c.id == value.c.id)
+        )

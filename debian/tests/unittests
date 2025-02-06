@@ -6,5 +6,5 @@ set -e
 echo "===> Running tests"
 for i in ${PYTHON3S}; do
 	echo "===> Testing with python$i"
-	python$i -m pytest --ignore=.pc
+	python$i -m pytest --numprocesses `nproc` --ignore=.pc
 done

@@ -4,20 +4,46 @@ Mypy  / Pep-484 Support for ORM Mappings
 ========================================
 
 Support for :pep:`484` typing annotations as well as the
-MyPy_ type checking tool.
+MyPy_ type checking tool when using SQLAlchemy
+:ref:`declarative <orm_declarative_mapper_config_toplevel>` mappings
+that refer to the :class:`_schema.Column` object directly, rather than
+the :func:`_orm.mapped_column` construct introduced in SQLAlchemy 2.0.
+
+.. deprecated:: 2.0
+
+    **The SQLAlchemy Mypy Plugin is DEPRECATED, and will be removed in
+    the SQLAlchemy 2.1 release.  We would urge users to please
+    migrate away from it ASAP.   The mypy plugin also works only up until
+    mypy version 1.10.1.    version 1.11.0 and greater may not work properly.**
+
+    This plugin cannot be maintained across constantly changing releases
+    of mypy and its stability going forward CANNOT be guaranteed.
+
+    Modern SQLAlchemy now offers
+    :ref:`fully pep-484 compliant mapping syntaxes <whatsnew_20_orm_declarative_typing>`;
+    see the linked section for migration details.
 
 .. topic:: SQLAlchemy Mypy Plugin Status Update
 
-   **Updated February 17, 2022**
+   **Updated July 2024**
+
+   The mypy plugin is supported **only up until mypy 1.10.1, and it will have
+   issues running with 1.11.0 or greater**.   Use with mypy 1.11.0 or greater
+   may have error conditions which currently cannot be resolved.
+
+   For SQLAlchemy 2.0, the Mypy plugin continues to work at the level at which
+   it reached in the SQLAlchemy 1.4 release.  SQLAlchemy 2.0 however features
+   an
+   :ref:`all new typing system <whatsnew_20_orm_declarative_typing>`
+   for ORM Declarative models that removes the need for the Mypy plugin and
+   delivers much more consistent behavior with generally superior capabilities.
+   Note that this new capability is **not
+   part of SQLAlchemy 1.4, it is only in SQLAlchemy 2.0**.
 
    The SQLAlchemy Mypy plugin, while it has technically never left the "alpha"
-   stage, should **now be considered as legacy, even though it is still
-   necessary for full Mypy support when using SQLAlchemy 1.4**. SQLAlchemy
-   version 2.0, when released, will include new constructs that will allow for
-   construction of declarative mappings in place which will support proper
-   typing directly, without the need for plugins. This new feature is **not
-   part of SQLAlchemy 1.4, it is only in SQLAlchemy 2.0, which is not released
-   yet as of Feb 17, 2022**.
+   stage, should **now be considered as deprecated in SQLAlchemy 2.0, even
+   though it is still necessary for full Mypy support when using
+   SQLAlchemy 1.4**.
 
    The Mypy plugin itself does not solve the issue of supplying correct typing
    with other typing tools such as Pylance/Pyright, Pytype, Pycharm, etc, which
@@ -29,24 +55,19 @@ MyPy_ type checking tool.
    patterns which are reported regularly.
 
    For these reasons, new non-regression issues reported against the Mypy
-   plugin are unlikely to be fixed. When SQLAlchemy 2.0 is released, it will
-   continue to include the plugin, which will have been updated to continue to
-   function as well as it does in SQLAlchemy 1.4, when running under SQLAlchemy
-   2.0. **Existing code that passes Mypy checks using the plugin with
-   SQLAlchemy 1.4 installed will continue to pass all checks in SQLAlchemy 2.0
-   without any changes required, provided the plugin is still used. The
-   upcoming API to be released with SQLAlchemy 2.0 is fully backwards
-   compatible with the SQLAlchemy 1.4 API and Mypy plugin behavior.**
+   plugin are unlikely to be fixed.  **Existing code that passes Mypy checks
+   using the plugin with SQLAlchemy 1.4 installed will continue to pass all
+   checks in SQLAlchemy 2.0 without any changes required, provided the plugin
+   is still used. SQLAlchemy 2.0's API is fully
+   backwards compatible with the SQLAlchemy 1.4 API and Mypy plugin behavior.**
 
    End-user code that passes all checks under SQLAlchemy 1.4 with the Mypy
-   plugin will be able to incrementally migrate to the new structures, once
-   that code is running exclusively on SQLAlchemy 2.0. The change consists of
-   altering how the :func:`_orm.declarative_base` construct is produced, and
-   then the replacement of inline Declarative :class:`_schema.Column`
-   structures with a fully cross-compatible ``mapped_column()`` construct. Both
-   constructs can coexist on any declaratively mapped class.
+   plugin may incrementally migrate to the new structures, once
+   that code is running exclusively on SQLAlchemy 2.0.  See the section
+   :ref:`whatsnew_20_orm_declarative_typing` for background on how this
+   migration may proceed.
 
-   Code that is running exclusively on **not-released-yet** SQLAlchemy version
+   Code that is running exclusively on SQLAlchemy version
    2.0 and has fully migrated to the new declarative constructs will enjoy full
    compliance with pep-484 as well as working correctly within IDEs and other
    typing tools, without the need for plugins.
@@ -55,14 +76,14 @@ MyPy_ type checking tool.
 Installation
 ------------
 
-The Mypy plugin depends upon new stubs for SQLAlchemy packaged at
-`sqlalchemy2-stubs <https://pypi.org/project/sqlalchemy2-stubs/>`_.  These
-stubs necessarily fully replace the previous ``sqlalchemy-stubs`` typing
-annotations published by Dropbox, as they occupy the same ``sqlalchemy-stubs``
-namespace as specified by :pep:`561`.  The Mypy_
-package itself is also a dependency.
+For **SQLAlchemy 2.0 only**: No stubs should be installed and packages
+like sqlalchemy-stubs_ and sqlalchemy2-stubs_ should be fully uninstalled.
 
-Both packages may be installed using the "mypy" extras hook using pip::
+The Mypy_ package itself is a dependency.
+
+Mypy may be installed using the "mypy" extras hook using pip:
+
+.. sourcecode:: text
 
     pip install sqlalchemy[mypy]
 
@@ -73,6 +94,10 @@ using the ``sqlalchemy.ext.mypy.plugin`` module name, such as within
 
     [mypy]
     plugins = sqlalchemy.ext.mypy.plugin
+
+.. _sqlalchemy-stubs: https://github.com/dropbox/sqlalchemy-stubs
+
+.. _sqlalchemy2-stubs: https://github.com/sqlalchemy/sqlalchemy2-stubs
 
 What the Plugin Does
 --------------------
@@ -159,8 +184,7 @@ following::
         )
         name: Mapped[Optional[str]] = Mapped._special_method(Column(String))
 
-        def __init__(self, id: Optional[int] = ..., name: Optional[str] = ...) -> None:
-            ...
+        def __init__(self, id: Optional[int] = ..., name: Optional[str] = ...) -> None: ...
 
 
     some_user = User(id=5, name="user")
@@ -180,7 +204,6 @@ The key steps which have been taken above include:
   :class:`_orm.Mapped` class is now the base class for the :class:`_orm.InstrumentedAttribute`
   class that is used for all ORM mapped attributes.
 
-  In ``sqlalchemy2-stubs``,
   :class:`_orm.Mapped` is defined as a generic class against arbitrary Python
   types, meaning specific occurrences of :class:`_orm.Mapped` are associated
   with a specific Python type, such as ``Mapped[Optional[int]]`` and
@@ -279,17 +302,6 @@ behavior of a validating system such as Python ``dataclasses`` which will
 generate a constructor that matches the annotations in terms of optional
 vs. required attributes.
 
-.. tip::
-
-    In the above examples the :class:`_types.Integer` and
-    :class:`_types.String` datatypes are both :class:`_types.TypeEngine`
-    subclasses. In ``sqlalchemy2-stubs``, the :class:`_schema.Column` object is
-    a `generic <https://www.python.org/dev/peps/pep-0484/#generics>`_ which
-    subscribes to the type, e.g. above the column types are
-    ``Column[Integer]``, ``Column[String]``, and ``Column[String]``. The
-    :class:`_types.Integer` and :class:`_types.String` classes are in turn
-    generically subscribed to the Python types they correspond towards, i.e.
-    ``Integer(TypeEngine[int])``, ``String(TypeEngine[str])``.
 
 Columns that Don't have an Explicit Type
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -318,7 +330,9 @@ needs an explicit type to be sent::
         id = Column(Integer, primary_key=True)
         user_id = Column(ForeignKey("user.id"))
 
-The plugin will deliver the message as follows::
+The plugin will deliver the message as follows:
+
+.. sourcecode:: text
 
     $ mypy test3.py --strict
     test3.py:20: error: [SQLAlchemy Mypy plugin] Can't infer type from
@@ -392,7 +406,9 @@ is a string or callable, and not a class::
 
         user = relationship(User)
 
-The above mapping will produce the following error::
+The above mapping will produce the following error:
+
+.. sourcecode:: text
 
     test3.py:22: error: [SQLAlchemy Mypy plugin] Can't infer scalar or
     collection for ORM mapped expression assigned to attribute 'user'
@@ -486,7 +502,7 @@ plugin that a particular class intends to serve as a declarative mixin::
     class HasCompany:
         @declared_attr
         def company_id(cls) -> Mapped[int]:  # uses Mapped
-            return Column(ForeignKey("company.id"))
+            return mapped_column(ForeignKey("company.id"))
 
         @declared_attr
         def company(cls) -> Mapped["Company"]:

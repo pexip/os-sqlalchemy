@@ -20,13 +20,17 @@ import sys
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 sys.path.insert(0, os.path.abspath("../../lib"))
 sys.path.insert(0, os.path.abspath("../.."))  # examples
-sys.path.insert(0, os.path.abspath("."))
 
+# was never needed, does not work as of python 3.12 due to conflicts
+# sys.path.insert(0, os.path.abspath("."))
+
+
+os.environ["DISABLE_SQLALCHEMY_CEXT_RUNTIME"] = "true"
 
 # -- General configuration --------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-needs_sphinx = "3.5.0"
+needs_sphinx = "5.0.1"
 
 # Add any Sphinx extension module names here, as strings. They can be
 # extensions coming with Sphinx (named 'sphinx.ext.*') or your custom ones.
@@ -51,6 +55,12 @@ copybutton_prompt_text = (
 )
 copybutton_prompt_is_regexp = True
 
+# workaround
+# https://sphinx-copybutton-exclude-issue.readthedocs.io/en/v0.5.1-go/
+# https://github.com/executablebooks/sphinx-copybutton/issues/185
+# while we're at it, add our SQL css classes to also not be copied
+copybutton_exclude = ".linenos .show_sql .show_sql_print .popup_sql"
+
 nitpicky = False
 
 # The suffix of source filenames.
@@ -65,11 +75,13 @@ changelog_sections = [
     "orm declarative",
     "orm querying",
     "orm configuration",
+    "orm extensions",
     "examples",
     "engine",
     "sql",
     "schema",
     "extensions",
+    "typing",
     "mypy",
     "asyncio",
     "postgresql",
@@ -78,12 +90,12 @@ changelog_sections = [
     "sqlite",
     "mssql",
     "oracle",
-    "firebird",
     "tests",
 ]
 # tags to sort on inside of sections
 changelog_inner_tag_sort = [
     "feature",
+    "improvement",
     "usecase",
     "change",
     "changed",
@@ -107,6 +119,25 @@ changelog_render_pullreq = {
 changelog_render_changeset = "https://www.sqlalchemy.org/trac/changeset/%s"
 
 exclude_patterns = ["build", "**/unreleased*/*", "**/*_include.rst", ".venv"]
+
+autodoc_class_signature = "separated"
+
+autodoc_default_options = {
+    "exclude-members": "__new__",
+    "no-undoc-members": True,
+}
+
+# enable "annotation" indicator.  doesn't actually use this
+# link right now, it's just a png image
+zzzeeksphinx_annotation_key = "glossary#annotated-example"
+
+# to use this, we need:
+# 1. fix sphinx-paramlinks to work with "description" typing
+# 2. we need a huge autodoc_type_aliases map as we have extensive type aliasing
+# present, and typing is largely not very legible w/ the aliases
+# autodoc_typehints = "description"
+# autodoc_typehints_format = "short"
+# autodoc_typehints_description_target = "documented"
 
 # zzzeeksphinx makes these conversions when it is rendering the
 # docstrings classes, methods, and functions within the scope of
@@ -203,19 +234,19 @@ zzzeeksphinx_module_prefixes = {
 master_doc = "contents"
 
 # General information about the project.
-project = u"SQLAlchemy"
-copyright = u"2007-2023, the SQLAlchemy authors and contributors"  # noqa
+project = "SQLAlchemy"
+copyright = "2007-2025, the SQLAlchemy authors and contributors"  # noqa
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
 # built documents.
 #
 # The short X.Y version.
-version = "1.4"
+version = "2.0"
 # The full version, including alpha/beta/rc tags.
-release = "1.4.46"
+release = "2.0.40"
 
-release_date = "January 3, 2023"
+release_date = "March 27, 2025"
 
 site_base = os.environ.get("RTD_SITE_BASE", "https://www.sqlalchemy.org")
 site_adapter_template = "docs_adapter.mako"
@@ -408,8 +439,8 @@ man_pages = [
     (
         "index",
         "sqlalchemy",
-        u"SQLAlchemy Documentation",
-        [u"SQLAlchemy authors"],
+        "SQLAlchemy Documentation",
+        ["SQLAlchemy authors"],
         1,
     )
 ]
@@ -418,10 +449,10 @@ man_pages = [
 # -- Options for Epub output -------------------------------------------------
 
 # Bibliographic Dublin Core info.
-epub_title = u"SQLAlchemy"
-epub_author = u"SQLAlchemy authors"
-epub_publisher = u"SQLAlchemy authors"
-epub_copyright = u"2007-2015, SQLAlchemy authors"
+epub_title = "SQLAlchemy"
+epub_author = "SQLAlchemy authors"
+epub_publisher = "SQLAlchemy authors"
+epub_copyright = "2007-2015, SQLAlchemy authors"
 
 # The language of the text. It defaults to the language option
 # or en if the language is not set.

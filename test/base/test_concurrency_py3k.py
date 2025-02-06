@@ -1,9 +1,9 @@
 import asyncio
+import contextvars
 import random
 import threading
 
 from sqlalchemy import exc
-from sqlalchemy import testing
 from sqlalchemy.testing import async_test
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises
@@ -38,7 +38,6 @@ class TestAsyncioCompat(fixtures.TestBase):
 
     @async_test
     async def test_ok(self):
-
         eq_(await greenlet_spawn(go, run1, run2), 3)
 
     @async_test
@@ -95,7 +94,12 @@ class TestAsyncioCompat(fixtures.TestBase):
         ):
             await_only(to_await)
 
-        # ensure no warning
+        # existing awaitable is done
+        with expect_raises(RuntimeError):
+            await greenlet_spawn(await_fallback, to_await)
+
+        # no warning for a new one...
+        to_await = run1()
         await greenlet_spawn(await_fallback, to_await)
 
     @async_test
@@ -118,7 +122,8 @@ class TestAsyncioCompat(fixtures.TestBase):
         ):
             await greenlet_spawn(go)
 
-        await to_await
+        with expect_raises(RuntimeError):
+            await to_await
 
     @async_test
     async def test_await_only_error(self):
@@ -141,14 +146,11 @@ class TestAsyncioCompat(fixtures.TestBase):
         ):
             await greenlet_spawn(go)
 
-        await to_await
+        with expect_raises(RuntimeError):
+            await to_await
 
     @async_test
-    @testing.requires.python37
     async def test_contextvars(self):
-        import asyncio
-        import contextvars
-
         var = contextvars.ContextVar("var")
         concurrency = 500
 
@@ -212,9 +214,7 @@ class TestAsyncioCompat(fixtures.TestBase):
 
 
 class TestAsyncAdaptedQueue(fixtures.TestBase):
-    # uses asyncio.run() in alternate threads which is not available
-    # in Python 3.6
-    __requires__ = ("python37", "greenlet")
+    __requires__ = ("greenlet",)
 
     def test_lazy_init(self):
         run = [False]
@@ -264,3 +264,18 @@ class TestAsyncAdaptedQueue(fixtures.TestBase):
         t.join()
 
         is_true(run[0])
+
+
+class GracefulNoGreenletTest(fixtures.TestBase):
+    __requires__ = ("no_greenlet",)
+
+    def test_await_only_graceful(self):
+        async def async_fn():
+            pass
+
+        with expect_raises_message(
+            ValueError,
+            "the greenlet library is required to use this "
+            "function. No module named 'greenlet'",
+        ):
+            await_only(async_fn())

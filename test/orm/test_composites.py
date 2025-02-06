@@ -1,19 +1,31 @@
+import dataclasses
+import operator
+import random
+
 import sqlalchemy as sa
+from sqlalchemy import event
 from sqlalchemy import ForeignKey
+from sqlalchemy import insert
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import update
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm import Composite
 from sqlalchemy.orm import composite
-from sqlalchemy.orm import CompositeProperty
 from sqlalchemy.orm import configure_mappers
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import LoaderCallableStatus
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import mock
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -90,14 +102,14 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             },
         )
 
-    def _fixture(self, future=False):
+    def _fixture(self):
         Graph, Edge, Point = (
             self.classes.Graph,
             self.classes.Edge,
             self.classes.Point,
         )
 
-        sess = Session(testing.db, future=future)
+        sess = Session(testing.db)
         g = Graph(
             id=1,
             edges=[
@@ -228,10 +240,10 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             is g.edges[1]
         )
 
-    def test_bulk_update_sql(self):
+    def test_update_crit_sql(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
-        sess = self._fixture(future=True)
+        sess = self._fixture()
 
         e1 = sess.execute(
             select(Edge).filter(Edge.start == Point(14, 5))
@@ -253,10 +265,10 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             dialect="default",
         )
 
-    def test_bulk_update_evaluate(self):
+    def test_update_crit_evaluate(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
-        sess = self._fixture(future=True)
+        sess = self._fixture()
 
         e1 = sess.execute(
             select(Edge).filter(Edge.start == Point(14, 5))
@@ -282,7 +294,7 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
 
         eq_(e1.end, Point(17, 8))
 
-    def test_bulk_update_fetch(self):
+    def test_update_crit_fetch(self):
         Edge, Point = (self.classes.Edge, self.classes.Point)
 
         sess = self._fixture()
@@ -299,6 +311,209 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         q.update({Edge.end: Point(17, 8)}, synchronize_session="fetch")
 
         eq_(e1.end, Point(17, 8))
+
+    @testing.combinations(
+        ("legacy",),
+        ("statement",),
+        ("values",),
+        ("stmt_returning", testing.requires.insertmanyvalues),
+        ("values_returning", testing.requires.insert_returning),
+    )
+    def test_bulk_insert(self, type_):
+        Edge, Point = (self.classes.Edge, self.classes.Point)
+        Graph = self.classes.Graph
+
+        sess = self._fixture()
+
+        graph = Graph(id=2)
+        sess.add(graph)
+        sess.flush()
+        graph_id = 2
+
+        data = [
+            {
+                "start": Point(random.randint(1, 50), random.randint(1, 50)),
+                "end": Point(random.randint(1, 50), random.randint(1, 50)),
+                "graph_id": graph_id,
+            }
+            for i in range(25)
+        ]
+        returning = False
+        if type_ == "statement":
+            sess.execute(insert(Edge), data)
+        elif type_ == "stmt_returning":
+            result = sess.scalars(insert(Edge).returning(Edge), data)
+            returning = True
+        elif type_ == "values":
+            sess.execute(insert(Edge).values(data))
+        elif type_ == "values_returning":
+            result = sess.scalars(insert(Edge).values(data).returning(Edge))
+            returning = True
+        elif type_ == "legacy":
+            sess.bulk_insert_mappings(Edge, data)
+        else:
+            assert False
+
+        if returning:
+            eq_(result.all(), [Edge(rec["start"], rec["end"]) for rec in data])
+
+        edges = self.tables.edges
+        eq_(
+            sess.execute(
+                select(edges.c["x1", "y1", "x2", "y2"])
+                .where(edges.c.graph_id == graph_id)
+                .order_by(edges.c.id)
+            ).all(),
+            [
+                (e["start"].x, e["start"].y, e["end"].x, e["end"].y)
+                for e in data
+            ],
+        )
+
+    @testing.combinations("legacy", "statement")
+    def test_bulk_insert_heterogeneous(self, type_):
+        Edge, Point = (self.classes.Edge, self.classes.Point)
+        Graph = self.classes.Graph
+
+        sess = self._fixture()
+
+        graph = Graph(id=2)
+        sess.add(graph)
+        sess.flush()
+        graph_id = 2
+
+        d1 = [
+            {
+                "start": Point(random.randint(1, 50), random.randint(1, 50)),
+                "end": Point(random.randint(1, 50), random.randint(1, 50)),
+                "graph_id": graph_id,
+            }
+            for i in range(3)
+        ]
+        d2 = [
+            {
+                "start": Point(random.randint(1, 50), random.randint(1, 50)),
+                "graph_id": graph_id,
+            }
+            for i in range(2)
+        ]
+        d3 = [
+            {
+                "x2": random.randint(1, 50),
+                "y2": random.randint(1, 50),
+                "graph_id": graph_id,
+            }
+            for i in range(2)
+        ]
+        data = d1 + d2 + d3
+        random.shuffle(data)
+
+        assert_data = [
+            {
+                "start": d["start"] if "start" in d else None,
+                "end": (
+                    d["end"]
+                    if "end" in d
+                    else Point(d["x2"], d["y2"]) if "x2" in d else None
+                ),
+                "graph_id": d["graph_id"],
+            }
+            for d in data
+        ]
+
+        if type_ == "statement":
+            sess.execute(insert(Edge), data)
+        elif type_ == "legacy":
+            sess.bulk_insert_mappings(Edge, data)
+        else:
+            assert False
+
+        edges = self.tables.edges
+        eq_(
+            sess.execute(
+                select(edges.c["x1", "y1", "x2", "y2"])
+                .where(edges.c.graph_id == graph_id)
+                .order_by(edges.c.id)
+            ).all(),
+            [
+                (
+                    e["start"].x if e["start"] else None,
+                    e["start"].y if e["start"] else None,
+                    e["end"].x if e["end"] else None,
+                    e["end"].y if e["end"] else None,
+                )
+                for e in assert_data
+            ],
+        )
+
+    @testing.combinations("legacy", "statement")
+    def test_bulk_update(self, type_):
+        Edge, Point = (self.classes.Edge, self.classes.Point)
+        Graph = self.classes.Graph
+
+        sess = self._fixture()
+
+        graph = Graph(id=2)
+        sess.add(graph)
+        sess.flush()
+        graph_id = 2
+
+        data = [
+            {
+                "start": Point(random.randint(1, 50), random.randint(1, 50)),
+                "end": Point(random.randint(1, 50), random.randint(1, 50)),
+                "graph_id": graph_id,
+            }
+            for i in range(25)
+        ]
+        sess.execute(insert(Edge), data)
+
+        inserted_data = [
+            dict(row._mapping)
+            for row in sess.execute(
+                select(Edge.id, Edge.start, Edge.end, Edge.graph_id)
+                .where(Edge.graph_id == graph_id)
+                .order_by(Edge.id)
+            )
+        ]
+
+        to_update = []
+        updated_pks = {}
+        for rec in random.choices(inserted_data, k=7):
+            rec_copy = dict(rec)
+            updated_pks[rec_copy["id"]] = rec_copy
+            rec_copy["start"] = Point(
+                random.randint(1, 50), random.randint(1, 50)
+            )
+            rec_copy["end"] = Point(
+                random.randint(1, 50), random.randint(1, 50)
+            )
+            to_update.append(rec_copy)
+
+        expected_dataset = [
+            updated_pks[row["id"]] if row["id"] in updated_pks else row
+            for row in inserted_data
+        ]
+
+        if type_ == "statement":
+            sess.execute(update(Edge), to_update)
+        elif type_ == "legacy":
+            sess.bulk_update_mappings(Edge, to_update)
+        else:
+            assert False
+
+        edges = self.tables.edges
+        eq_(
+            sess.execute(
+                select(edges.c["x1", "y1", "x2", "y2"])
+                .where(edges.c.graph_id == graph_id)
+                .order_by(edges.c.id)
+            ).all(),
+            [
+                (e["start"].x, e["start"].y, e["end"].x, e["end"].y)
+                for e in expected_dataset
+            ],
+        )
 
     def test_get_history(self):
         Edge = self.classes.Edge
@@ -425,6 +640,131 @@ class PointTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         e = Edge()
         eq_(e.start, None)
 
+    def test_no_name_declarative(self, decl_base, connection):
+        """test #7751"""
+
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+
+            def __composite_values__(self):
+                return self.x, self.y
+
+            def __repr__(self):
+                return "Point(x=%r, y=%r)" % (self.x, self.y)
+
+            def __eq__(self, other):
+                return (
+                    isinstance(other, Point)
+                    and other.x == self.x
+                    and other.y == self.y
+                )
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+        class Vertex(decl_base):
+            __tablename__ = "vertices"
+
+            id = Column(Integer, primary_key=True)
+            x1 = Column(Integer)
+            y1 = Column(Integer)
+            x2 = Column(Integer)
+            y2 = Column(Integer)
+
+            start = composite(Point, x1, y1)
+            end = composite(Point, x2, y2)
+
+        self.assert_compile(
+            select(Vertex),
+            "SELECT vertices.id, vertices.x1, vertices.y1, vertices.x2, "
+            "vertices.y2 FROM vertices",
+        )
+
+        decl_base.metadata.create_all(connection)
+        s = Session(connection)
+        hv = Vertex(start=Point(1, 2), end=Point(3, 4))
+        s.add(hv)
+        s.commit()
+
+        is_(
+            hv,
+            s.scalars(
+                select(Vertex).where(Vertex.start == Point(1, 2))
+            ).first(),
+        )
+
+    def test_no_name_declarative_two(self, decl_base, connection):
+        """test #7752"""
+
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+
+            def __composite_values__(self):
+                return self.x, self.y
+
+            def __repr__(self):
+                return "Point(x=%r, y=%r)" % (self.x, self.y)
+
+            def __eq__(self, other):
+                return (
+                    isinstance(other, Point)
+                    and other.x == self.x
+                    and other.y == self.y
+                )
+
+            def __ne__(self, other):
+                return not self.__eq__(other)
+
+        class Vertex:
+            def __init__(self, start, end):
+                self.start = start
+                self.end = end
+
+            @classmethod
+            def _generate(self, x1, y1, x2, y2):
+                """generate a Vertex from a row"""
+                return Vertex(Point(x1, y1), Point(x2, y2))
+
+            def __composite_values__(self):
+                return (
+                    self.start.__composite_values__()
+                    + self.end.__composite_values__()
+                )
+
+        class HasVertex(decl_base):
+            __tablename__ = "has_vertex"
+            id = Column(Integer, primary_key=True)
+            x1 = Column(Integer)
+            y1 = Column(Integer)
+            x2 = Column(Integer)
+            y2 = Column(Integer)
+
+            vertex = composite(Vertex._generate, x1, y1, x2, y2)
+
+        self.assert_compile(
+            select(HasVertex),
+            "SELECT has_vertex.id, has_vertex.x1, has_vertex.y1, "
+            "has_vertex.x2, has_vertex.y2 FROM has_vertex",
+        )
+
+        decl_base.metadata.create_all(connection)
+        s = Session(connection)
+        hv = HasVertex(vertex=Vertex(Point(1, 2), Point(3, 4)))
+        s.add(hv)
+        s.commit()
+        is_(
+            hv,
+            s.scalars(
+                select(HasVertex).where(
+                    HasVertex.vertex == Vertex(Point(1, 2), Point(3, 4))
+                )
+            ).first(),
+        )
+
 
 class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     @classmethod
@@ -442,7 +782,7 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
         )
 
     def _fixture(self):
-        class AB(object):
+        class AB:
             def __init__(self, a, b, cd):
                 self.a = a
                 self.b = b
@@ -466,7 +806,7 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             def __ne__(self, other):
                 return not self.__eq__(other)
 
-        class CD(object):
+        class CD:
             def __init__(self, c, d):
                 self.c = c
                 self.d = d
@@ -484,7 +824,7 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             def __ne__(self, other):
                 return not self.__eq__(other)
 
-        class Thing(object):
+        class Thing:
             def __init__(self, ab):
                 self.ab = ab
 
@@ -514,6 +854,195 @@ class NestedTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
             s.query(Thing).filter(Thing.ab == AB("a", "b", CD("c", "d"))).one()
         )
         eq_(t1.ab, AB("a", "b", CD("c", "d")))
+
+
+class EventsEtcTest(fixtures.MappedTest):
+    @testing.fixture
+    def point_fixture(self, decl_base):
+        def go(active_history):
+            @dataclasses.dataclass
+            class Point:
+                x: int
+                y: int
+
+            class Edge(decl_base):
+                __tablename__ = "edge"
+                id = mapped_column(Integer, primary_key=True)
+
+                start = composite(
+                    Point,
+                    mapped_column("x1", Integer),
+                    mapped_column("y1", Integer),
+                    active_history=active_history,
+                )
+                end = composite(
+                    Point,
+                    mapped_column("x2", Integer, nullable=True),
+                    mapped_column("y2", Integer, nullable=True),
+                    active_history=active_history,
+                )
+
+            decl_base.metadata.create_all(testing.db)
+
+            return Point, Edge
+
+        return go
+
+    @testing.variation("active_history", [True, False])
+    @testing.variation("hist_on_mapping", [True, False])
+    def test_event_listener_no_value_to_set(
+        self, point_fixture, active_history, hist_on_mapping
+    ):
+        if hist_on_mapping:
+            config_active_history = bool(active_history)
+        else:
+            config_active_history = False
+
+        Point, Edge = point_fixture(config_active_history)
+
+        if not hist_on_mapping and active_history:
+            Edge.start.impl.active_history = True
+
+        m1 = mock.Mock()
+
+        event.listen(Edge.start, "set", m1)
+
+        e1 = Edge()
+        e1.start = Point(5, 6)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call(
+                    e1,
+                    Point(5, 6),
+                    (
+                        LoaderCallableStatus.NO_VALUE
+                        if not active_history
+                        else None
+                    ),
+                    Edge.start.impl,
+                )
+            ],
+        )
+
+        eq_(
+            inspect(e1).attrs.start.history,
+            ([Point(5, 6)], (), [Point(None, None)]),
+        )
+
+    @testing.variation("active_history", [True, False])
+    @testing.variation("hist_on_mapping", [True, False])
+    def test_event_listener_set_to_new(
+        self, point_fixture, active_history, hist_on_mapping
+    ):
+        if hist_on_mapping:
+            config_active_history = bool(active_history)
+        else:
+            config_active_history = False
+
+        Point, Edge = point_fixture(config_active_history)
+
+        if not hist_on_mapping and active_history:
+            Edge.start.impl.active_history = True
+
+        e1 = Edge()
+        e1.start = Point(5, 6)
+
+        sess = fixture_session()
+
+        sess.add(e1)
+        sess.commit()
+        assert "start" not in e1.__dict__
+
+        m1 = mock.Mock()
+
+        event.listen(Edge.start, "set", m1)
+
+        e1.start = Point(7, 8)
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call(
+                    e1,
+                    Point(7, 8),
+                    (
+                        LoaderCallableStatus.NO_VALUE
+                        if not active_history
+                        else Point(5, 6)
+                    ),
+                    Edge.start.impl,
+                )
+            ],
+        )
+
+        if active_history:
+            eq_(
+                inspect(e1).attrs.start.history,
+                ([Point(7, 8)], (), [Point(5, 6)]),
+            )
+        else:
+            eq_(
+                inspect(e1).attrs.start.history,
+                ([Point(7, 8)], (), [Point(None, None)]),
+            )
+
+    @testing.variation("active_history", [True, False])
+    @testing.variation("hist_on_mapping", [True, False])
+    def test_event_listener_set_to_deleted(
+        self, point_fixture, active_history, hist_on_mapping
+    ):
+        if hist_on_mapping:
+            config_active_history = bool(active_history)
+        else:
+            config_active_history = False
+
+        Point, Edge = point_fixture(config_active_history)
+
+        if not hist_on_mapping and active_history:
+            Edge.start.impl.active_history = True
+
+        e1 = Edge()
+        e1.start = Point(5, 6)
+
+        sess = fixture_session()
+
+        sess.add(e1)
+        sess.commit()
+        assert "start" not in e1.__dict__
+
+        m1 = mock.Mock()
+
+        event.listen(Edge.start, "remove", m1)
+
+        del e1.start
+
+        eq_(
+            m1.mock_calls,
+            [
+                mock.call(
+                    e1,
+                    (
+                        LoaderCallableStatus.NO_VALUE
+                        if not active_history
+                        else Point(5, 6)
+                    ),
+                    Edge.start.impl,
+                )
+            ],
+        )
+
+        if active_history:
+            eq_(
+                inspect(e1).attrs.start.history,
+                ([Point(None, None)], (), [Point(5, 6)]),
+            )
+        else:
+            eq_(
+                inspect(e1).attrs.start.history,
+                ([Point(None, None)], (), [Point(None, None)]),
+            )
 
 
 class PrimaryKeyTest(fixtures.MappedTest):
@@ -617,6 +1146,33 @@ class PrimaryKeyTest(fixtures.MappedTest):
         sess.commit()
         g2 = sess.query(Graph).filter_by(version=Version(2, None)).one()
         eq_(g.version, g2.version)
+
+
+class PrimaryKeyTestDataclasses(PrimaryKeyTest):
+    @classmethod
+    def setup_mappers(cls):
+        graphs = cls.tables.graphs
+
+        @dataclasses.dataclass
+        class Version:
+            id: int
+            version: int
+
+        cls.classes.Version = Version
+
+        class Graph(cls.Comparable):
+            def __init__(self, version):
+                self.version = version
+
+        cls.mapper_registry.map_imperatively(
+            Graph,
+            graphs,
+            properties={
+                "version": sa.orm.composite(
+                    Version, graphs.c.id, graphs.c.version_id
+                )
+            },
+        )
 
 
 class DefaultsTest(fixtures.MappedTest):
@@ -1105,7 +1661,7 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
 
         if custom:
 
-            class CustomComparator(sa.orm.CompositeProperty.Comparator):
+            class CustomComparator(sa.orm.Composite.Comparator):
                 def near(self, other, d):
                     clauses = self.__clause_element__().clauses
                     diff_x = clauses[0] - other.x
@@ -1135,35 +1691,76 @@ class ComparatorTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
                 },
             )
 
-    def test_comparator_behavior_default(self):
-        self._fixture(False)
-        self._test_comparator_behavior()
+    @testing.combinations(True, False, argnames="custom")
+    @testing.combinations(
+        (operator.lt, "<", ">"),
+        (operator.gt, ">", "<"),
+        (operator.eq, "=", "="),
+        (operator.ne, "!=", "!="),
+        (operator.le, "<=", ">="),
+        (operator.ge, ">=", "<="),
+        argnames="operator, fwd_op, rev_op",
+    )
+    def test_comparator_behavior(self, custom, operator, fwd_op, rev_op):
+        self._fixture(custom)
+        Edge, Point = self.classes("Edge", "Point")
 
-    def test_comparator_behavior_custom(self):
-        self._fixture(True)
-        self._test_comparator_behavior()
+        self.assert_compile(
+            select(Edge).filter(operator(Edge.start, Point(3, 4))),
+            "SELECT edge.id, edge.x1, edge.y1, edge.x2, edge.y2 FROM edge "
+            f"WHERE edge.x1 {fwd_op} :x1_1 AND edge.y1 {fwd_op} :y1_1",
+            checkparams={"x1_1": 3, "y1_1": 4},
+        )
 
-    def _test_comparator_behavior(self):
-        Edge, Point = (self.classes.Edge, self.classes.Point)
+        self.assert_compile(
+            select(Edge).filter(~operator(Edge.start, Point(3, 4))),
+            "SELECT edge.id, edge.x1, edge.y1, edge.x2, edge.y2 FROM edge "
+            f"WHERE NOT (edge.x1 {fwd_op} :x1_1 AND edge.y1 {fwd_op} :y1_1)",
+            checkparams={"x1_1": 3, "y1_1": 4},
+        )
 
-        sess = fixture_session()
-        e1 = Edge(Point(3, 4), Point(5, 6))
-        e2 = Edge(Point(14, 5), Point(2, 7))
-        sess.add_all([e1, e2])
-        sess.commit()
+    @testing.combinations(True, False, argnames="custom")
+    @testing.combinations(
+        (operator.lt, "<", ">"),
+        (operator.gt, ">", "<"),
+        (operator.eq, "=", "="),
+        (operator.ne, "!=", "!="),
+        (operator.le, "<=", ">="),
+        (operator.ge, ">=", "<="),
+        argnames="op, fwd_op, rev_op",
+    )
+    def test_comparator_null(self, custom, op, fwd_op, rev_op):
+        self._fixture(custom)
+        Edge, Point = self.classes("Edge", "Point")
 
-        assert sess.query(Edge).filter(Edge.start == Point(3, 4)).one() is e1
-
-        assert sess.query(Edge).filter(Edge.start != Point(3, 4)).first() is e2
-
-        eq_(sess.query(Edge).filter(Edge.start == None).all(), [])  # noqa
+        if op is operator.eq:
+            self.assert_compile(
+                select(Edge).filter(op(Edge.start, None)),
+                "SELECT edge.id, edge.x1, edge.y1, edge.x2, edge.y2 FROM edge "
+                "WHERE edge.x1 IS NULL AND edge.y1 IS NULL",
+                checkparams={},
+            )
+        elif op is operator.ne:
+            self.assert_compile(
+                select(Edge).filter(op(Edge.start, None)),
+                "SELECT edge.id, edge.x1, edge.y1, edge.x2, edge.y2 FROM edge "
+                "WHERE edge.x1 IS NOT NULL AND edge.y1 IS NOT NULL",
+                checkparams={},
+            )
+        else:
+            with expect_raises_message(
+                sa.exc.ArgumentError,
+                r"Only '=', '!=', .* operators can be used "
+                r"with None/True/False",
+            ):
+                select(Edge).filter(op(Edge.start, None))
 
     def test_default_comparator_factory(self):
         self._fixture(False)
         Edge = self.classes.Edge
         start_prop = Edge.start.property
 
-        assert start_prop.comparator_factory is CompositeProperty.Comparator
+        assert start_prop.comparator_factory is Composite.Comparator
 
     def test_custom_comparator_factory(self):
         self._fixture(True)

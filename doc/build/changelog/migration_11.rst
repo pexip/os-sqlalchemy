@@ -366,7 +366,9 @@ query is against a subquery expression such as an exists::
 
     session.query(q).all()
 
-Produces::
+Produces:
+
+.. sourcecode:: sql
 
     SELECT EXISTS (SELECT 1
     FROM widget
@@ -469,7 +471,9 @@ removed would be lost, and the flush would incorrectly raise an error::
     s.add(A(id=1))
     s.commit()
 
-The above program would raise::
+The above program would raise:
+
+.. sourcecode:: text
 
     FlushError: New instance <User at 0x7f0287eca4d0> with identity key
     (<class 'test.orm.test_transaction.User'>, ('u1',)) conflicts
@@ -558,10 +562,12 @@ for the table itself::
     session.delete(some_b)
     session.commit()
 
-Will emit SQL as::
+Will emit SQL as:
+
+.. sourcecode:: sql
 
     DELETE FROM a WHERE a.id = %(id)s
-    {'id': 1}
+    -- {'id': 1}
     COMMIT
 
 As always, the target database must have foreign key support with
@@ -845,13 +851,17 @@ are part of the "correlate" for the subquery.  Assuming the
 ``Person/Manager/Engineer->Company`` setup from the mapping documentation,
 using with_polymorphic::
 
-    sess.query(Person.name)
-                .filter(
-                    sess.query(Company.name).
-                    filter(Company.company_id == Person.company_id).
-                    correlate(Person).as_scalar() == "Elbonia, Inc.")
+    sess.query(Person.name).filter(
+        sess.query(Company.name)
+        .filter(Company.company_id == Person.company_id)
+        .correlate(Person)
+        .as_scalar()
+        == "Elbonia, Inc."
+    )
 
-The above query now produces::
+The above query now produces:
+
+.. sourcecode:: sql
 
     SELECT people.name AS people_name
     FROM people
@@ -863,7 +873,9 @@ The above query now produces::
 
 Before the fix, the call to ``correlate(Person)`` would inadvertently
 attempt to correlate to the join of ``Person``, ``Engineer`` and ``Manager``
-as a single unit, so ``Person`` wouldn't be correlated::
+as a single unit, so ``Person`` wouldn't be correlated:
+
+.. sourcecode:: sql
 
     -- old, incorrect query
     SELECT people.name AS people_name
@@ -885,11 +897,13 @@ from it first::
     # aliasing.
 
     paliased = aliased(Person)
-    sess.query(paliased.name)
-                .filter(
-                    sess.query(Company.name).
-                    filter(Company.company_id == paliased.company_id).
-                    correlate(paliased).as_scalar() == "Elbonia, Inc.")
+    sess.query(paliased.name).filter(
+        sess.query(Company.name)
+        .filter(Company.company_id == paliased.company_id)
+        .correlate(paliased)
+        .as_scalar()
+        == "Elbonia, Inc."
+    )
 
 The :func:`.aliased` construct guarantees that the "polymorphic selectable"
 is wrapped in a subquery.  By referring to it explicitly in the correlated
@@ -972,7 +986,9 @@ deep use case that's hard to reproduce, but the general idea is as follows::
     q = q.join(c_alias_2, A.c)
     q = q.options(contains_eager(A.c, alias=c_alias_2))
 
-The above query emits SQL like this::
+The above query emits SQL like this:
+
+.. sourcecode:: sql
 
     SELECT
         d.id AS d_id,
@@ -1155,11 +1171,17 @@ render the CTE at the top of the entire statement, rather than nested
 in the SELECT statement as was the case in 1.0.
 
 Below is an example that renders UPDATE, INSERT and SELECT all in one
-statement::
+statement:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import table, column, select, literal, exists
     >>> orders = table(
-    ...     "orders", column("region"), column("amount"), column("product"), column("quantity")
+    ...     "orders",
+    ...     column("region"),
+    ...     column("amount"),
+    ...     column("product"),
+    ...     column("quantity"),
     ... )
     >>>
     >>> upsert = (
@@ -1177,8 +1199,8 @@ statement::
     ...     ),
     ... )
     >>>
-    >>> print(insert)  # note formatting added for clarity
-    WITH upsert AS
+    >>> print(insert)  # Note: formatting added for clarity
+    {printsql}WITH upsert AS
     (UPDATE orders SET amount=:amount, product=:product, quantity=:quantity
      WHERE orders.region = :region_1
      RETURNING orders.region, orders.amount, orders.product, orders.quantity
@@ -1201,18 +1223,20 @@ Support for RANGE and ROWS specification within window functions
 ----------------------------------------------------------------
 
 New :paramref:`.expression.over.range_` and :paramref:`.expression.over.rows` parameters allow
-RANGE and ROWS expressions for window functions::
+RANGE and ROWS expressions for window functions:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import func
 
     >>> print(func.row_number().over(order_by="x", range_=(-5, 10)))
-    row_number() OVER (ORDER BY x RANGE BETWEEN :param_1 PRECEDING AND :param_2 FOLLOWING)
+    {printsql}row_number() OVER (ORDER BY x RANGE BETWEEN :param_1 PRECEDING AND :param_2 FOLLOWING){stop}
 
     >>> print(func.row_number().over(order_by="x", rows=(None, 0)))
-    row_number() OVER (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+    {printsql}row_number() OVER (ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW){stop}
 
     >>> print(func.row_number().over(order_by="x", range_=(-2, None)))
-    row_number() OVER (ORDER BY x RANGE BETWEEN :param_1 PRECEDING AND UNBOUNDED FOLLOWING)
+    {printsql}row_number() OVER (ORDER BY x RANGE BETWEEN :param_1 PRECEDING AND UNBOUNDED FOLLOWING){stop}
 
 :paramref:`.expression.over.range_` and :paramref:`.expression.over.rows` are specified as
 2-tuples and indicate negative and positive values for specific ranges,
@@ -1234,7 +1258,9 @@ and greater, however as it is part of the SQL standard support for this keyword
 is added to Core.   The implementation of :meth:`_expression.Select.lateral` employs
 special logic beyond just rendering the LATERAL keyword to allow for
 correlation of tables that are derived from the same FROM clause as the
-selectable, e.g. lateral correlation::
+selectable, e.g. lateral correlation:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import table, column, select, true
     >>> people = table("people", column("people_id"), column("age"), column("name"))
@@ -1245,7 +1271,7 @@ selectable, e.g. lateral correlation::
     ...     .lateral("book_subq")
     ... )
     >>> print(select([people]).select_from(people.join(subq, true())))
-    SELECT people.people_id, people.age, people.name
+    {printsql}SELECT people.people_id, people.age, people.name
     FROM people JOIN LATERAL (SELECT books.book_id AS book_id
     FROM books WHERE books.owner_id = people.people_id)
     AS book_subq ON true
@@ -1276,7 +1302,9 @@ construct similar to an alias::
     stmt = select([selectable.c.people_id])
 
 Assuming ``people`` with a column ``people_id``, the above
-statement would render as::
+statement would render as:
+
+.. sourcecode:: sql
 
     SELECT alias.people_id FROM
     people AS alias TABLESAMPLE bernoulli(:bernoulli_1)
@@ -1343,7 +1371,9 @@ have autoincrement set up; given a table such as::
         Column("y", Integer, primary_key=True),
     )
 
-An INSERT emitted with no values for this table will produce this warning::
+An INSERT emitted with no values for this table will produce this warning:
+
+.. sourcecode:: text
 
     SAWarning: Column 'b.x' is marked as a member of the primary
     key for table 'b', but has no Python-side or server-side default
@@ -1395,22 +1425,28 @@ Support for IS DISTINCT FROM and IS NOT DISTINCT FROM
 
 New operators :meth:`.ColumnOperators.is_distinct_from` and
 :meth:`.ColumnOperators.isnot_distinct_from` allow the IS DISTINCT
-FROM and IS NOT DISTINCT FROM sql operation::
+FROM and IS NOT DISTINCT FROM sql operation:
+
+.. sourcecode:: pycon+sql
 
     >>> print(column("x").is_distinct_from(None))
-    x IS DISTINCT FROM NULL
+    {printsql}x IS DISTINCT FROM NULL{stop}
 
-Handling is provided for NULL, True and False::
+Handling is provided for NULL, True and False:
+
+.. sourcecode:: pycon+sql
 
     >>> print(column("x").isnot_distinct_from(False))
-    x IS NOT DISTINCT FROM false
+    {printsql}x IS NOT DISTINCT FROM false{stop}
 
 For SQLite, which doesn't have this operator, "IS" / "IS NOT" is rendered,
-which on SQLite works for NULL unlike other backends::
+which on SQLite works for NULL unlike other backends:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy.dialects import sqlite
     >>> print(column("x").is_distinct_from(None).compile(dialect=sqlite.dialect()))
-    x IS NOT NULL
+    {printsql}x IS NOT NULL{stop}
 
 .. _change_1957:
 
@@ -1501,7 +1537,9 @@ as well.   Given a statement like the following::
     ua = users.alias("ua")
     stmt = select([users.c.user_id, ua.c.user_id])
 
-The above statement will compile to::
+The above statement will compile to:
+
+.. sourcecode:: sql
 
     SELECT users.user_id, ua.user_id FROM users, users AS ua
 
@@ -1684,7 +1722,7 @@ within logging, exception reporting, as well as ``repr()`` of the row itself::
     >>> e = create_engine("sqlite://", echo="debug")
     >>> some_value = "".join(chr(random.randint(52, 85)) for i in range(5000))
     >>> row = e.execute("select ?", [some_value]).first()
-    ... (lines are wrapped for clarity) ...
+    ... # (lines are wrapped for clarity) ...
     2016-02-17 13:23:03,027 INFO sqlalchemy.engine.base.Engine select ?
     2016-02-17 13:23:03,027 INFO sqlalchemy.engine.base.Engine
     ('E6@?>9HPOJB<<BHR:@=TS:5ILU=;JLM<4?B9<S48PTNG9>:=TSTLA;9K;9FPM4M8M@;NM6GU
@@ -1912,7 +1950,9 @@ A PostgreSQL element for an aggregate ORDER BY is also added via
     expr = func.array_agg(aggregate_order_by(table.c.a, table.c.b.desc()))
     stmt = select([expr])
 
-Producing::
+Producing:
+
+.. sourcecode:: sql
 
     SELECT array_agg(table1.a ORDER BY table1.b DESC) AS array_agg_1 FROM table1
 
@@ -1937,7 +1977,9 @@ Additionally, functions like ``percentile_cont()``, ``percentile_disc()``,
         ]
     )
 
-The above statement would produce SQL similar to::
+The above statement would produce SQL similar to:
+
+.. sourcecode:: sql
 
   SELECT department.id, percentile_cont(0.5)
   WITHIN GROUP (ORDER BY department.salary DESC)
@@ -2023,12 +2065,14 @@ different schema each time::
 Calling ``str()`` on a Core SQL construct will now produce a string
 in more cases than before, supporting various SQL constructs not normally
 present in default SQL such as RETURNING, array indexes, and non-standard
-datatypes::
+datatypes:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import table, column
     t>>> t = table('x', column('a'), column('b'))
     >>> print(t.insert().returning(t.c.a, t.c.b))
-    INSERT INTO x (a, b) VALUES (:a, :b) RETURNING x.a, x.b
+    {printsql}INSERT INTO x (a, b) VALUES (:a, :b) RETURNING x.a, x.b
 
 The ``str()`` function now calls upon an entirely separate dialect / compiler
 intended just for plain string printing without a specific dialect set up,
@@ -2085,7 +2129,7 @@ table to an integer "id" column on the other::
         pets = relationship(
             "Pets",
             primaryjoin=(
-                "foreign(Pets.person_id)" "==cast(type_coerce(Person.id, Integer), Integer)"
+                "foreign(Pets.person_id)==cast(type_coerce(Person.id, Integer), Integer)"
             ),
         )
 
@@ -2102,7 +2146,9 @@ our ``StringAsInt`` type which maintains the value as an integer in
 Python. We are then using :func:`.cast` so that as a SQL expression,
 the VARCHAR "id"  column will be CAST to an integer for a regular non-
 converted join as with :meth:`_query.Query.join` or :func:`_orm.joinedload`.
-That is, a joinedload of ``.pets`` looks like::
+That is, a joinedload of ``.pets`` looks like:
+
+.. sourcecode:: sql
 
     SELECT person.id AS person_id, pets_1.id AS pets_1_id,
            pets_1.person_id AS pets_1_person_id
@@ -2117,12 +2163,14 @@ The lazyload case of ``.pets`` relies upon replacing
 the ``Person.id`` column at load time with a bound parameter, which receives
 a Python-loaded value.  This replacement is specifically where the intent
 of our :func:`.type_coerce` function would be lost.  Prior to the change,
-this lazy load comes out as::
+this lazy load comes out as:
+
+.. sourcecode:: sql
 
     SELECT pets.id AS pets_id, pets.person_id AS pets_person_id
     FROM pets
     WHERE pets.person_id = CAST(CAST(%(param_1)s AS VARCHAR) AS INTEGER)
-    {'param_1': 5}
+    -- {'param_1': 5}
 
 Where above, we see that our in-Python value of ``5`` is CAST first
 to a VARCHAR, then back to an INTEGER in SQL; a double CAST which works,
@@ -2130,12 +2178,14 @@ but is nevertheless not what we asked for.
 
 With the change, the :func:`.type_coerce` function maintains a wrapper
 even after the column is swapped out for a bound parameter, and the query now
-looks like::
+looks like:
+
+.. sourcecode:: sql
 
     SELECT pets.id AS pets_id, pets.person_id AS pets_person_id
     FROM pets
     WHERE pets.person_id = CAST(%(param_1)s AS INTEGER)
-    {'param_1': 5}
+    -- {'param_1': 5}
 
 Where our outer CAST that's in our primaryjoin still takes effect, but the
 needless CAST that's in part of the ``StringAsInt`` custom type is removed
@@ -2206,13 +2256,17 @@ that are missing from the SELECT list, without duplicates::
         .order_by(User.id, User.name, User.fullname)
     )
 
-Produces::
+Produces:
+
+.. sourcecode:: sql
 
     SELECT DISTINCT user.id AS a_id, user.name AS name,
      user.fullname AS a_fullname
     FROM a ORDER BY user.id, user.name, user.fullname
 
-Previously, it would produce::
+Previously, it would produce:
+
+.. sourcecode:: sql
 
     SELECT DISTINCT user.id AS a_id, user.name AS name, user.name AS a_name,
       user.fullname AS a_fullname
@@ -2260,9 +2314,12 @@ last defined validator::
 
     configure_mappers()
 
-Will raise::
+Will raise:
 
-    sqlalchemy.exc.InvalidRequestError: A validation function for mapped attribute 'data' on mapper Mapper|A|a already exists.
+.. sourcecode:: text
+
+    sqlalchemy.exc.InvalidRequestError: A validation function for mapped attribute 'data'
+    on mapper Mapper|A|a already exists.
 
 :ticket:`3776`
 
@@ -2325,14 +2382,15 @@ String server_default now literal quoted
 
 A server default passed to :paramref:`_schema.Column.server_default` as a plain
 Python string that has quotes embedded is now
-passed through the literal quoting system::
+passed through the literal quoting system:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy.schema import MetaData, Table, Column, CreateTable
     >>> from sqlalchemy.types import String
     >>> t = Table("t", MetaData(), Column("x", String(), server_default="hi ' there"))
     >>> print(CreateTable(t))
-
-    CREATE TABLE t (
+    {printsql}CREATE TABLE t (
         x VARCHAR DEFAULT 'hi '' there'
     )
 
@@ -2351,7 +2409,9 @@ A UNION or similar of SELECTs with LIMIT/OFFSET/ORDER BY now parenthesizes the e
 An issue that, like others, was long driven by SQLite's lack of capabilities
 has now been enhanced to work on all supporting backends.   We refer to a query that
 is a UNION of SELECT statements that themselves contain row-limiting or ordering
-features which include LIMIT, OFFSET, and/or ORDER BY::
+features which include LIMIT, OFFSET, and/or ORDER BY:
+
+.. sourcecode:: sql
 
     (SELECT x FROM table1 ORDER BY y LIMIT 1) UNION
     (SELECT x FROM table2 ORDER BY y LIMIT 2)
@@ -2418,17 +2478,17 @@ supported by PostgreSQL 9.5 in this area::
 
     from sqlalchemy.dialects.postgresql import insert
 
-    insert_stmt = insert(my_table). \\
-        values(id='some_id', data='some data to insert')
+    insert_stmt = insert(my_table).values(id="some_id", data="some data to insert")
 
     do_update_stmt = insert_stmt.on_conflict_do_update(
-        index_elements=[my_table.c.id],
-        set_=dict(data='some data to update')
+        index_elements=[my_table.c.id], set_=dict(data="some data to update")
     )
 
     conn.execute(do_update_stmt)
 
-The above will render::
+The above will render:
+
+.. sourcecode:: sql
 
     INSERT INTO my_table (id, data)
     VALUES (:id, :data)
@@ -2565,7 +2625,9 @@ as expected::
     e = create_engine("postgresql://scott:tiger@localhost/test", echo=True)
     Base.metadata.create_all(e)
 
-emits::
+emits:
+
+.. sourcecode:: sql
 
     CREATE TYPE work_place_roles AS ENUM (
         'manager', 'place_admin', 'carwash_admin', 'parking_admin',
@@ -2709,7 +2771,9 @@ not the first column, e.g.::
         mysql_engine="InnoDB",
     )
 
-DDL such as the following would be generated::
+DDL such as the following would be generated:
+
+.. sourcecode:: sql
 
     CREATE TABLE some_table (
         x INTEGER NOT NULL,
@@ -2723,7 +2787,9 @@ found its way into the dialect many years ago in response to the issue that
 the AUTO_INCREMENT would otherwise fail on InnoDB without this additional KEY.
 
 This workaround has been removed and replaced with the much better system
-of just stating the AUTO_INCREMENT column *first* within the primary key::
+of just stating the AUTO_INCREMENT column *first* within the primary key:
+
+.. sourcecode:: sql
 
     CREATE TABLE some_table (
         x INTEGER NOT NULL,
@@ -2939,11 +3005,13 @@ given a table such as::
     )
 
 The legacy mode of behavior will attempt to turn a schema-qualified table
-name into an alias::
+name into an alias:
+
+.. sourcecode:: pycon+sql
 
     >>> eng = create_engine("mssql+pymssql://mydsn", legacy_schema_aliasing=True)
     >>> print(account_table.select().compile(eng))
-    SELECT account_1.id, account_1.info
+    {printsql}SELECT account_1.id, account_1.info
     FROM customer_schema.account AS account_1
 
 However, this aliasing has been shown to be unnecessary and in many cases

@@ -3,4 +3,6 @@ Depends:
  python3-all,
  python3-greenlet,
  python3-pytest,
+ python3-pytest-xdist,
+ python3-typing-extensions,
 Restrictions: allow-stderr

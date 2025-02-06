@@ -99,7 +99,9 @@ Consider the following example against the usual ``User`` mapping::
         .filter(User.name == "ed")
     )
 
-The above statement predictably renders SQL like the following::
+The above statement predictably renders SQL like the following:
+
+.. sourcecode:: sql
 
     SELECT "user".id AS user_id, "user".name AS user_name
     FROM "user" JOIN (SELECT "user".id AS id, "user".name AS name
@@ -120,7 +122,9 @@ JOIN, the documentation would lead us to believe we could use
 
 However, in version 0.8 and earlier, the above use of :meth:`_query.Query.select_from`
 would apply the ``select_stmt`` to **replace** the ``User`` entity, as it
-selects from the ``user`` table which is compatible with ``User``::
+selects from the ``user`` table which is compatible with ``User``:
+
+.. sourcecode:: sql
 
     -- SQLAlchemy 0.8 and earlier...
     SELECT anon_1.id AS anon_1_id, anon_1.name AS anon_1_name
@@ -144,7 +148,9 @@ to selecting from a customized :func:`.aliased` construct::
     q = session.query(user_from_stmt).filter(user_from_stmt.name == "ed")
 
 So with SQLAlchemy 0.9, our query that selects from ``select_stmt`` produces
-the SQL we expect::
+the SQL we expect:
+
+.. sourcecode:: sql
 
     -- SQLAlchemy 0.9
     SELECT "user".id AS user_id, "user".name AS user_name
@@ -254,7 +260,9 @@ Up through 0.8, a query like the following::
 
     s.query(A).filter(A.b_value == None).all()
 
-would produce::
+would produce:
+
+.. sourcecode:: sql
 
     SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a
@@ -262,7 +270,9 @@ would produce::
     FROM b
     WHERE b.id = a.b_id AND b.value IS NULL)
 
-In 0.9, it now produces::
+In 0.9, it now produces:
+
+.. sourcecode:: sql
 
     SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a
@@ -276,7 +286,9 @@ results versus prior versions, for a system that uses this type of
 comparison where some parent rows have no association row.
 
 More critically, a correct expression is emitted for ``A.b_value != None``.
-In 0.8, this would return ``True`` for ``A`` rows that had no ``b``::
+In 0.8, this would return ``True`` for ``A`` rows that had no ``b``:
+
+.. sourcecode:: sql
 
     SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a
@@ -286,7 +298,9 @@ In 0.8, this would return ``True`` for ``A`` rows that had no ``b``::
 
 Now in 0.9, the check has been reworked so that it ensures
 the A.b_id row is present, in addition to ``B.value`` being
-non-NULL::
+non-NULL:
+
+.. sourcecode:: sql
 
     SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a
@@ -301,7 +315,9 @@ being present or not::
 
     s.query(A).filter(A.b_value.has()).all()
 
-output::
+output:
+
+.. sourcecode:: sql
 
     SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a
@@ -444,8 +460,9 @@ arguments which were silently ignored::
 
 This was a very old bug for which a deprecation warning was added to the
 0.8 series, but because nobody ever runs Python with the "-W" flag, it
-was mostly never seen::
+was mostly never seen:
 
+.. sourcecode:: text
 
     $ python -W always::DeprecationWarning ~/dev/sqlalchemy/test.py
     /Users/classic/dev/sqlalchemy/test.py:5: SADeprecationWarning: Passing arguments to
@@ -546,7 +563,9 @@ in that it escaped spaces as plus signs.  The stringification of a URL
 now only encodes ":", "@", or "/" and nothing else, and is now applied to both the
 ``username`` and ``password`` fields (previously it only applied to the
 password).   On parsing, encoded characters are converted, but plus signs and
-spaces are passed through as is::
+spaces are passed through as is:
+
+.. sourcecode:: text
 
     # password: "pass word + other:words"
     dbtype://user:pass word + other%3Awords@host/dbname
@@ -572,14 +591,18 @@ Previously, an expression like the following::
 
     print((column("x") == "somevalue").collate("en_EN"))
 
-would produce an expression like this::
+would produce an expression like this:
+
+.. sourcecode:: sql
 
     -- 0.8 behavior
     (x = :x_1) COLLATE en_EN
 
 The above is misunderstood by MSSQL and is generally not the syntax suggested
 for any database.  The expression will now produce the syntax illustrated
-by that of most database documentation::
+by that of most database documentation:
+
+.. sourcecode:: sql
 
     -- 0.9 behavior
     x = :x_1 COLLATE en_EN
@@ -590,27 +613,33 @@ column, as follows::
 
     print(column("x") == literal("somevalue").collate("en_EN"))
 
-In 0.8, this produces::
+In 0.8, this produces:
+
+.. sourcecode:: sql
 
     x = :param_1 COLLATE en_EN
 
 However in 0.9, will now produce the more accurate, but probably not what you
-want, form of::
+want, form of:
+
+.. sourcecode:: sql
 
     x = (:param_1 COLLATE en_EN)
 
 The :meth:`.ColumnOperators.collate` operator now works more appropriately within an
 ``ORDER BY`` expression as well, as a specific precedence has been given to the
 ``ASC`` and ``DESC`` operators which will again ensure no parentheses are
-generated::
+generated:
+
+.. sourcecode:: pycon+sql
 
     >>> # 0.8
     >>> print(column("x").collate("en_EN").desc())
-    (x COLLATE en_EN) DESC
+    {printsql}(x COLLATE en_EN) DESC{stop}
 
     >>> # 0.9
     >>> print(column("x").collate("en_EN").desc())
-    x COLLATE en_EN DESC
+    {printsql}x COLLATE en_EN DESC{stop}
 
 :ticket:`2879`
 
@@ -622,13 +651,15 @@ PostgreSQL CREATE TYPE <x> AS ENUM now applies quoting to values
 ----------------------------------------------------------------
 
 The :class:`_postgresql.ENUM` type will now apply escaping to single quote
-signs within the enumerated values::
+signs within the enumerated values:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy.dialects import postgresql
     >>> type = postgresql.ENUM("one", "two", "three's", name="myenum")
     >>> from sqlalchemy.dialects.postgresql import base
     >>> print(base.CreateEnumType(type).compile(dialect=postgresql.dialect()))
-    CREATE TYPE myenum AS ENUM ('one','two','three''s')
+    {printsql}CREATE TYPE myenum AS ENUM ('one','two','three''s')
 
 Existing workarounds which already escape single quote signs will need to be
 modified, else they will now double-escape.
@@ -721,12 +752,9 @@ Only those elements in the path that actually need :meth:`.PropComparator.of_typ
 need to be set as a class-bound attribute, string-based names can be resumed
 afterwards::
 
-    session.query(Company).\
-        options(
-            subqueryload(Company.employees.of_type(Engineer)).
-            subqueryload("machines")
-            )
-        )
+    session.query(Company).options(
+        subqueryload(Company.employees.of_type(Engineer)).subqueryload("machines")
+    )
 
 **Old Way**
 
@@ -822,17 +850,16 @@ The :func:`_expression.text` construct gains new methods:
   to be set flexibly::
 
       # setup values
-      stmt = text("SELECT id, name FROM user "
-            "WHERE name=:name AND timestamp=:timestamp").\
-            bindparams(name="ed", timestamp=datetime(2012, 11, 10, 15, 12, 35))
+      stmt = text(
+          "SELECT id, name FROM user WHERE name=:name AND timestamp=:timestamp"
+      ).bindparams(name="ed", timestamp=datetime(2012, 11, 10, 15, 12, 35))
 
       # setup types and/or values
-      stmt = text("SELECT id, name FROM user "
-            "WHERE name=:name AND timestamp=:timestamp").\
-            bindparams(
-                bindparam("name", value="ed"),
-                bindparam("timestamp", type_=DateTime()
-            ).bindparam(timestamp=datetime(2012, 11, 10, 15, 12, 35))
+      stmt = (
+          text("SELECT id, name FROM user WHERE name=:name AND timestamp=:timestamp")
+          .bindparams(bindparam("name", value="ed"), bindparam("timestamp", type_=DateTime()))
+          .bindparam(timestamp=datetime(2012, 11, 10, 15, 12, 35))
+      )
 
 * :meth:`_expression.TextClause.columns` supersedes the ``typemap`` option
   of :func:`_expression.text`, returning a new construct :class:`.TextAsFrom`::
@@ -865,13 +892,15 @@ After literally years of pointless procrastination this relatively minor
 syntactical feature has been added, and is also backported to 0.8.3,
 so technically isn't "new" in 0.9.   A :func:`_expression.select` construct or other
 compatible construct can be passed to the new method :meth:`_expression.Insert.from_select`
-where it will be used to render an ``INSERT .. SELECT`` construct::
+where it will be used to render an ``INSERT .. SELECT`` construct:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy.sql import table, column
     >>> t1 = table("t1", column("a"), column("b"))
     >>> t2 = table("t2", column("x"), column("y"))
     >>> print(t1.insert().from_select(["a", "b"], t2.select().where(t2.c.y == 5)))
-    INSERT INTO t1 (a, b) SELECT t2.x, t2.y
+    {printsql}INSERT INTO t1 (a, b) SELECT t2.x, t2.y
     FROM t2
     WHERE t2.y = :y_1
 
@@ -882,7 +911,9 @@ and :class:`_query.Query` objects::
     q = s.query(User.id, User.name).filter_by(name="ed")
     ins = insert(Address).from_select((Address.id, Address.email_address), q)
 
-rendering::
+rendering:
+
+.. sourcecode:: sql
 
     INSERT INTO addresses (id, email_address)
     SELECT users.id AS users_id, users.name AS users_name
@@ -905,7 +936,9 @@ string codes::
 
     stmt = select([table]).with_for_update(read=True, nowait=True, of=table)
 
-On Posgtresql the above statement might render like::
+On Posgtresql the above statement might render like:
+
+.. sourcecode:: sql
 
     SELECT table.a, table.b FROM table FOR SHARE OF table NOWAIT
 
@@ -1115,7 +1148,7 @@ can be dropped in using callable functions.
 
 It is hoped that the :class:`.AutomapBase` system provides a quick
 and modernized solution to the problem that the very famous
-`SQLSoup <https://sqlsoup.readthedocs.io/en/latest/>`_
+`SQLSoup <https://pypi.org/project/sqlsoup/>`_
 also tries to solve, that of generating a quick and rudimentary object
 model from an existing database on the fly.  By addressing the issue strictly
 at the mapper configuration level, and integrating fully with existing
@@ -1141,11 +1174,15 @@ Many JOIN and LEFT OUTER JOIN expressions will no longer be wrapped in (SELECT *
 
 For many years, the SQLAlchemy ORM has been held back from being able to nest
 a JOIN inside the right side of an existing JOIN (typically a LEFT OUTER JOIN,
-as INNER JOINs could always be flattened)::
+as INNER JOINs could always be flattened):
+
+.. sourcecode:: sql
 
     SELECT a.*, b.*, c.* FROM a LEFT OUTER JOIN (b JOIN c ON b.id = c.id) ON a.id
 
-This was due to the fact that SQLite up until version **3.7.16** cannot parse a statement of the above format::
+This was due to the fact that SQLite up until version **3.7.16** cannot parse a statement of the above format:
+
+.. sourcecode:: text
 
     SQLite version 3.7.15.2 2013-01-09 11:53:05
     Enter ".help" for instructions
@@ -1158,7 +1195,9 @@ This was due to the fact that SQLite up until version **3.7.16** cannot parse a 
 
 Right-outer-joins are of course another way to work around right-side
 parenthesization; this would be significantly complicated and visually unpleasant
-to implement, but fortunately SQLite doesn't support RIGHT OUTER JOIN either :)::
+to implement, but fortunately SQLite doesn't support RIGHT OUTER JOIN either :):
+
+.. sourcecode:: sql
 
     sqlite> select a.id, b.id, c.id from b join c on b.id=c.id
        ...> right outer join a on b.id=a.id;
@@ -1169,7 +1208,9 @@ but today it seems clear every database tested except SQLite now supports it
 (Oracle 8, a very old database, doesn't support the JOIN keyword at all,
 but SQLAlchemy has always had a simple rewriting scheme in place for Oracle's syntax).
 To make matters worse, SQLAlchemy's usual workaround of applying a
-SELECT often degrades performance on platforms like PostgreSQL and MySQL::
+SELECT often degrades performance on platforms like PostgreSQL and MySQL:
+
+.. sourcecode:: sql
 
     SELECT a.*, anon_1.* FROM a LEFT OUTER JOIN (
                     SELECT b.id AS b_id, c.id AS c_id
@@ -1188,7 +1229,9 @@ where special criteria is present in the ON clause. Consider an eager load join 
     session.query(Order).outerjoin(Order.items)
 
 Assuming a many-to-many from ``Order`` to ``Item`` which actually refers to a subclass
-like ``Subitem``, the SQL for the above would look like::
+like ``Subitem``, the SQL for the above would look like:
+
+.. sourcecode:: sql
 
     SELECT order.id, order.name
     FROM order LEFT OUTER JOIN order_item ON order.id = order_item.order_id
@@ -1206,7 +1249,9 @@ JOIN (which currently is only SQLite - if other backends have this issue please
 let us know!).
 
 So a regular ``query(Parent).join(Subclass)`` will now usually produce a simpler
-expression::
+expression:
+
+.. sourcecode:: sql
 
     SELECT parent.id AS parent_id
     FROM parent JOIN (
@@ -1214,7 +1259,9 @@ expression::
             ON base_table.id = subclass_table.id) ON parent.id = base_table.parent_id
 
 Joined eager loads like ``query(Parent).options(joinedload(Parent.subclasses))``
-will alias the individual tables instead of wrapping in an ``ANON_1``::
+will alias the individual tables instead of wrapping in an ``ANON_1``:
+
+.. sourcecode:: sql
 
     SELECT parent.*, base_table_1.*, subclass_table_1.* FROM parent
         LEFT OUTER JOIN (
@@ -1222,7 +1269,9 @@ will alias the individual tables instead of wrapping in an ``ANON_1``::
             ON base_table_1.id = subclass_table_1.id)
             ON parent.id = base_table_1.parent_id
 
-Many-to-many joins and eagerloads will right nest the "secondary" and "right" tables::
+Many-to-many joins and eagerloads will right nest the "secondary" and "right" tables:
+
+.. sourcecode:: sql
 
     SELECT order.id, order.name
     FROM order LEFT OUTER JOIN
@@ -1235,7 +1284,9 @@ are candidates for "join rewriting", which is the process of rewriting all those
 joins into nested SELECT statements, while maintaining the identical labeling used by
 the :class:`_expression.Select`.  So SQLite, the one database that won't support this very
 common SQL syntax even in 2013, shoulders the extra complexity itself,
-with the above queries rewritten as::
+with the above queries rewritten as:
+
+.. sourcecode:: sql
 
     -- sqlite only!
     SELECT parent.id AS parent_id
@@ -1286,7 +1337,9 @@ without any subqueries generated::
         or_(Engineer.primary_language == "python", Manager.manager_name == "dilbert")
     )
 
-Generates (everywhere except SQLite)::
+Generates (everywhere except SQLite):
+
+.. sourcecode:: sql
 
     SELECT companies.company_id AS companies_company_id, companies.name AS companies_name
     FROM companies JOIN (
@@ -1317,11 +1370,15 @@ Normally, a joined eager load chain like the following::
 Would not produce an inner join; because of the LEFT OUTER JOIN from user->order,
 joined eager loading could not use an INNER join from order->items without changing
 the user rows that are returned, and would instead ignore the "chained" ``innerjoin=True``
-directive.  How 0.9.0 should have delivered this would be that instead of::
+directive.  How 0.9.0 should have delivered this would be that instead of:
+
+.. sourcecode:: sql
 
     FROM users LEFT OUTER JOIN orders ON <onclause> LEFT OUTER JOIN items ON <onclause>
 
-the new "right-nested joins are OK" logic would kick in, and we'd get::
+the new "right-nested joins are OK" logic would kick in, and we'd get:
+
+.. sourcecode:: sql
 
     FROM users LEFT OUTER JOIN (orders JOIN items ON <onclause>) ON <onclause>
 
@@ -1370,7 +1427,9 @@ DISTINCT keyword will be applied to the innermost SELECT when the join is
 targeting columns that do not comprise the primary key, as in when loading
 along a many to one.
 
-That is, when subquery loading on a many-to-one from A->B::
+That is, when subquery loading on a many-to-one from A->B:
+
+.. sourcecode:: sql
 
     SELECT b.id AS b_id, b.name AS b_name, anon_1.b_id AS a_b_id
     FROM (SELECT DISTINCT a_b_id FROM a) AS anon_1
@@ -1544,47 +1603,57 @@ Starting with a table such as this::
     t1 = Table("t", MetaData(), Column("x", Boolean()), Column("y", Integer))
 
 A select construct will now render the boolean column as a binary expression
-on backends that don't feature ``true``/``false`` constant behavior::
+on backends that don't feature ``true``/``false`` constant behavior:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import select, and_, false, true
     >>> from sqlalchemy.dialects import mysql, postgresql
 
     >>> print(select([t1]).where(t1.c.x).compile(dialect=mysql.dialect()))
-    SELECT t.x, t.y  FROM t WHERE t.x = 1
+    {printsql}SELECT t.x, t.y  FROM t WHERE t.x = 1
 
 The :func:`.and_` and :func:`.or_` constructs will now exhibit quasi
 "short circuit" behavior, that is truncating a rendered expression, when a
-:func:`.true` or :func:`.false` constant is present::
+:func:`.true` or :func:`.false` constant is present:
+
+.. sourcecode:: pycon+sql
 
     >>> print(
     ...     select([t1]).where(and_(t1.c.y > 5, false())).compile(dialect=postgresql.dialect())
     ... )
-    SELECT t.x, t.y FROM t WHERE false
+    {printsql}SELECT t.x, t.y FROM t WHERE false
 
-:func:`.true` can be used as the base to build up an expression::
+:func:`.true` can be used as the base to build up an expression:
+
+.. sourcecode:: pycon+sql
 
     >>> expr = true()
     >>> expr = expr & (t1.c.y > 5)
     >>> print(select([t1]).where(expr))
-    SELECT t.x, t.y FROM t WHERE t.y > :y_1
+    {printsql}SELECT t.x, t.y FROM t WHERE t.y > :y_1
 
 The boolean constants :func:`.true` and :func:`.false` themselves render as
-``0 = 1`` and ``1 = 1`` for a backend with no boolean constants::
+``0 = 1`` and ``1 = 1`` for a backend with no boolean constants:
+
+.. sourcecode:: pycon+sql
 
     >>> print(select([t1]).where(and_(t1.c.y > 5, false())).compile(dialect=mysql.dialect()))
-    SELECT t.x, t.y FROM t WHERE 0 = 1
+    {printsql}SELECT t.x, t.y FROM t WHERE 0 = 1
 
 Interpretation of ``None``, while not particularly valid SQL, is at least
-now consistent::
+now consistent:
+
+.. sourcecode:: pycon+sql
 
     >>> print(select([t1.c.x]).where(None))
-    SELECT t.x FROM t WHERE NULL
+    {printsql}SELECT t.x FROM t WHERE NULL{stop}
 
     >>> print(select([t1.c.x]).where(None).where(None))
-    SELECT t.x FROM t WHERE NULL AND NULL
+    {printsql}SELECT t.x FROM t WHERE NULL AND NULL{stop}
 
     >>> print(select([t1.c.x]).where(and_(None, None)))
-    SELECT t.x FROM t WHERE NULL AND NULL
+    {printsql}SELECT t.x FROM t WHERE NULL AND NULL{stop}
 
 :ticket:`2804`
 
@@ -1609,12 +1678,16 @@ E.g. an example like::
 
     print(stmt)
 
-Prior to 0.9 would render as::
+Prior to 0.9 would render as:
+
+.. sourcecode:: sql
 
     SELECT foo(t.c1) + t.c2 AS expr
     FROM t ORDER BY foo(t.c1) + t.c2
 
-And now renders as::
+And now renders as:
+
+.. sourcecode:: sql
 
     SELECT foo(t.c1) + t.c2 AS expr
     FROM t ORDER BY expr

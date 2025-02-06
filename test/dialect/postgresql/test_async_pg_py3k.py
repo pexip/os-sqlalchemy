@@ -1,4 +1,5 @@
 import random
+import uuid
 
 from sqlalchemy import Column
 from sqlalchemy import exc
@@ -9,11 +10,14 @@ from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
+from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.dialects.postgresql import ENUM
 from sqlalchemy.testing import async_test
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
+from sqlalchemy.util import greenlet_spawn
 
 
 class AsyncPgTest(fixtures.TestBase):
@@ -76,7 +80,6 @@ class AsyncPgTest(fixtures.TestBase):
                 r"will now invalidate all prepared caches in response "
                 r"to this exception\)",
             ):
-
                 result = await conn.execute(
                     t1.select()
                     .where(t1.c.name.like("some name%"))
@@ -120,7 +123,7 @@ class AsyncPgTest(fixtures.TestBase):
                 "name",
                 ENUM(
                     *("beans", "means", "keens", "faux", "beau", "flow"),
-                    name="my_enum"
+                    name="my_enum",
                 ),
             ),
         )
@@ -165,9 +168,114 @@ class AsyncPgTest(fixtures.TestBase):
                 ],
             )
 
+    @testing.combinations(
+        None,
+        "read committed",
+        "repeatable read",
+        "serializable",
+        argnames="isolation_level",
+    )
+    @async_test
+    async def test_honor_server_level_iso_setting(
+        self, async_testing_engine, isolation_level
+    ):
+        """test for #12159"""
+
+        engine = async_testing_engine()
+
+        arg, kw = engine.dialect.create_connect_args(engine.url)
+
+        # 1. create an asyncpg.connection directly, set a session level
+        #    isolation level on it (this is similar to server default isolation
+        #    level)
+        raw_asyncpg_conn = await engine.dialect.dbapi.asyncpg.connect(
+            *arg, **kw
+        )
+
+        if isolation_level:
+            await raw_asyncpg_conn.execute(
+                f"set SESSION CHARACTERISTICS AS TRANSACTION "
+                f"isolation level {isolation_level}"
+            )
+
+        # 2. fetch it, confirm the setting took and matches
+        raw_iso_level = (
+            await raw_asyncpg_conn.fetchrow("show transaction isolation level")
+        )[0]
+        if isolation_level:
+            eq_(raw_iso_level, isolation_level.lower())
+
+        # 3.build our pep-249 wrapper around asyncpg.connection
+        dbapi_conn = asyncpg_dialect.AsyncAdapt_asyncpg_connection(
+            engine.dialect.dbapi,
+            raw_asyncpg_conn,
+        )
+
+        # 4. show the isolation level inside of a query.  this will
+        #    call asyncpg.connection.transaction() in order to run the
+        #    statement.
+        cursor = await greenlet_spawn(dbapi_conn.cursor)
+        await greenlet_spawn(
+            cursor.execute, "show transaction isolation level"
+        )
+        row = cursor.fetchone()
+
+        # 5. see that the raw iso level is maintained
+        eq_(row[0], raw_iso_level)
+
+        await greenlet_spawn(dbapi_conn.close)
+
+    @testing.variation("trans", ["commit", "rollback"])
+    @async_test
+    async def test_dont_reset_open_transaction(
+        self, trans, async_testing_engine
+    ):
+        """test for #11819"""
+
+        engine = async_testing_engine()
+
+        control_conn = await engine.connect()
+        await control_conn.execution_options(isolation_level="AUTOCOMMIT")
+
+        conn = await engine.connect()
+        txid_current = (
+            await conn.exec_driver_sql("select txid_current()")
+        ).scalar()
+
+        with expect_raises(exc.MissingGreenlet):
+            if trans.commit:
+                conn.sync_connection.connection.dbapi_connection.commit()
+            elif trans.rollback:
+                conn.sync_connection.connection.dbapi_connection.rollback()
+            else:
+                trans.fail()
+
+        trans_exists = (
+            await control_conn.exec_driver_sql(
+                f"SELECT count(*) FROM pg_stat_activity "
+                f"where backend_xid={txid_current}"
+            )
+        ).scalar()
+        eq_(trans_exists, 1)
+
+        if trans.commit:
+            await conn.commit()
+        elif trans.rollback:
+            await conn.rollback()
+        else:
+            trans.fail()
+
+        trans_exists = (
+            await control_conn.exec_driver_sql(
+                f"SELECT count(*) FROM pg_stat_activity "
+                f"where backend_xid={txid_current}"
+            )
+        ).scalar()
+        eq_(trans_exists, 0)
+        await engine.dispose()
+
     @async_test
     async def test_failed_commit_recover(self, metadata, async_testing_engine):
-
         Table("t1", metadata, Column("id", Integer, primary_key=True))
 
         t2 = Table(
@@ -201,11 +309,9 @@ class AsyncPgTest(fixtures.TestBase):
     async def test_rollback_twice_no_problem(
         self, metadata, async_testing_engine
     ):
-
         engine = async_testing_engine()
 
         async with engine.connect() as conn:
-
             trans = await conn.begin()
 
             await trans.rollback()
@@ -214,7 +320,6 @@ class AsyncPgTest(fixtures.TestBase):
 
     @async_test
     async def test_closed_during_execute(self, metadata, async_testing_engine):
-
         engine = async_testing_engine()
 
         async with engine.connect() as conn:
@@ -231,7 +336,6 @@ class AsyncPgTest(fixtures.TestBase):
     async def test_failed_rollback_recover(
         self, metadata, async_testing_engine
     ):
-
         engine = async_testing_engine()
 
         async with engine.connect() as conn:
@@ -268,7 +372,23 @@ class AsyncPgTest(fixtures.TestBase):
         engine = async_testing_engine()
         with mock.patch.object(engine.dialect, methname) as codec_meth:
             conn = await engine.connect()
-            adapted_conn = (await conn.get_raw_connection()).connection
+            adapted_conn = (await conn.get_raw_connection()).dbapi_connection
             await conn.close()
 
         eq_(codec_meth.mock_calls, [mock.call(adapted_conn)])
+
+    @async_test
+    async def test_name_connection_func(self, metadata, async_testing_engine):
+        cache = []
+
+        def name_f():
+            name = str(uuid.uuid4())
+            cache.append(name)
+            return name
+
+        engine = async_testing_engine(
+            options={"connect_args": {"prepared_statement_name_func": name_f}},
+        )
+        async with engine.begin() as conn:
+            await conn.execute(select(1))
+            assert len(cache) > 0

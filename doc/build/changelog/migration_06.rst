@@ -86,11 +86,10 @@ sign "+":
 Important Dialect Links:
 
 * Documentation on connect arguments:
-  https://www.sqlalchemy.org/docs/06/dbengine.html#create-
-  engine-url-arguments.
+  https://www.sqlalchemy.org/docs/06/dbengine.html#create-engine-url-arguments.
 
-* Reference documentation for individual dialects: https://ww
-  w.sqlalchemy.org/docs/06/reference/dialects/index.html
+* Reference documentation for individual dialects:
+  https://www.sqlalchemy.org/docs/06/reference/dialects/index.html.
 
 * The tips and tricks at DatabaseNotes.
 
@@ -360,7 +359,7 @@ fetching 50,000 rows looks like with SQLite, using mostly
 direct SQLite access, a ``ResultProxy``, and a simple mapped
 ORM object:
 
-::
+.. sourcecode:: text
 
     sqlite select/native: 0.260s
 
@@ -1037,7 +1036,7 @@ Many-to-one Enhancements
 
   would produce SQL like:
 
-  ::
+  .. sourcecode:: sql
 
       SELECT * FROM
         (SELECT * FROM addresses LIMIT 10) AS anon_1
@@ -1053,7 +1052,7 @@ Many-to-one Enhancements
   eager loaders represent many-to-ones, in which case the
   eager joins don't affect the rowcount:
 
-  ::
+  .. sourcecode:: sql
 
       SELECT * FROM addresses LEFT OUTER JOIN users AS users_1 ON users_1.id = addresses.user_id LIMIT 10
 
@@ -1223,8 +1222,8 @@ SQLSoup
 
 SQLSoup has been modernized and updated to reflect common
 0.5/0.6 capabilities, including well defined session
-integration.  Please read the new docs at [https://www.sqlalc
-hemy.org/docs/06/reference/ext/sqlsoup.html].
+integration.  Please read the new docs at
+[https://www.sqlalchemy.org/docs/06/reference/ext/sqlsoup.html].
 
 Declarative
 -----------

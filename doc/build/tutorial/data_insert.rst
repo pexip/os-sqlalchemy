@@ -5,28 +5,34 @@
 
 .. include:: tutorial_nav_include.rst
 
-
-.. rst-class:: core-header
-
+.. rst-class:: core-header, orm-addin
 
 .. _tutorial_core_insert:
 
-Inserting Rows with Core
--------------------------
+Using INSERT Statements
+-----------------------
 
-When using Core, a SQL INSERT statement is generated using the
-:func:`_sql.insert` function - this function generates a new instance of
-:class:`_sql.Insert` which represents an INSERT statement in SQL, that adds
-new data into a table.
+When using Core as well as when using the ORM for bulk operations, a SQL INSERT
+statement is generated directly using the :func:`_sql.insert` function - this
+function generates a new instance of :class:`_sql.Insert` which represents an
+INSERT statement in SQL, that adds new data into a table.
 
 .. container:: orm-header
 
-    **ORM Readers** - The way that rows are INSERTed into the database from an ORM
-    perspective makes use of object-centric APIs on the :class:`_orm.Session` object known as the
-    :term:`unit of work` process,
-    and is fairly different from the Core-only approach described here.
-    The more ORM-focused sections later starting at :ref:`tutorial_inserting_orm`
-    subsequent to the Expression Language sections introduce this.
+    **ORM Readers** -
+
+    This section details the Core means of generating an individual SQL INSERT
+    statement in order to add new rows to a table. When using the ORM, we
+    normally use another tool that rides on top of this called the
+    :term:`unit of work`, which will automate the production of many INSERT
+    statements at once. However, understanding how the Core handles data
+    creation and manipulation is very useful even when the ORM is running
+    it for us.  Additionally, the ORM supports direct use of INSERT
+    using a feature called :ref:`tutorial_orm_bulk`.
+
+    To skip directly to how to INSERT rows with the ORM using normal
+    unit of work patterns, see :ref:`tutorial_inserting_orm`.
+
 
 The insert() SQL Expression Construct
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -42,7 +48,7 @@ SQL expressions can be stringified in place as a means to see the general
 form of what's being produced::
 
     >>> print(stmt)
-    {opensql}INSERT INTO user_account (name, fullname) VALUES (:name, :fullname)
+    {printsql}INSERT INTO user_account (name, fullname) VALUES (:name, :fullname)
 
 The stringified form is created by producing a :class:`_engine.Compiled` form
 of the object which includes a database-specific string SQL representation of
@@ -59,6 +65,7 @@ available from the :class:`_engine.Compiled` construct as well::
     >>> compiled.params
     {'name': 'spongebob', 'fullname': 'Spongebob Squarepants'}
 
+
 Executing the Statement
 ^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -71,7 +78,7 @@ SQL logging:
     >>> with engine.connect() as conn:
     ...     result = conn.execute(stmt)
     ...     conn.commit()
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     INSERT INTO user_account (name, fullname) VALUES (?, ?)
     [...] ('spongebob', 'Spongebob Squarepants')
     COMMIT
@@ -107,13 +114,23 @@ INSERT usually generates the "values" clause automatically
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The example above made use of the :meth:`_sql.Insert.values` method to
-explicitly create the VALUES clause of the SQL INSERT statement.   This method
-in fact has some variants that allow for special forms such as multiple rows in
-one statement and insertion of SQL expressions.   However the usual way that
-:class:`_sql.Insert` is used is such that the VALUES clause is generated
-automatically from the parameters passed to the
-:meth:`_future.Connection.execute` method; below we INSERT two more rows to
-illustrate this:
+explicitly create the VALUES clause of the SQL INSERT statement.   If
+we don't actually use :meth:`_sql.Insert.values` and just print out an "empty"
+statement, we get an INSERT for every column in the table::
+
+    >>> print(insert(user_table))
+    {printsql}INSERT INTO user_account (id, name, fullname) VALUES (:id, :name, :fullname)
+
+If we take an :class:`_sql.Insert` construct that has not had
+:meth:`_sql.Insert.values` called upon it and execute it
+rather than print it, the statement will be compiled to a string based
+on the parameters that we passed to the :meth:`_engine.Connection.execute`
+method, and only include columns relevant to the parameters that were
+passed.   This is actually the usual way that
+:class:`_sql.Insert` is used to insert rows without having to type out
+an explicit VALUES clause.   The example below illustrates a two-column
+INSERT statement being executed with a list of parameters at once:
+
 
 .. sourcecode:: pycon+sql
 
@@ -126,17 +143,17 @@ illustrate this:
     ...         ],
     ...     )
     ...     conn.commit()
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     INSERT INTO user_account (name, fullname) VALUES (?, ?)
-    [...] (('sandy', 'Sandy Cheeks'), ('patrick', 'Patrick Star'))
+    [...] [('sandy', 'Sandy Cheeks'), ('patrick', 'Patrick Star')]
     COMMIT{stop}
 
 The execution above features "executemany" form first illustrated at
 :ref:`tutorial_multiple_parameters`, however unlike when using the
 :func:`_sql.text` construct, we didn't have to spell out any SQL.
-By passing a dictionary or list of dictionaries to the :meth:`_future.Connection.execute`
+By passing a dictionary or list of dictionaries to the :meth:`_engine.Connection.execute`
 method in conjunction with the :class:`_sql.Insert` construct, the
-:class:`_future.Connection` ensures that the column names which are passed
+:class:`_engine.Connection` ensures that the column names which are passed
 will be expressed in the VALUES clause of the :class:`_sql.Insert`
 construct automatically.
 
@@ -176,37 +193,34 @@ construct automatically.
         ...     result = conn.execute(
         ...         insert(address_table).values(user_id=scalar_subq),
         ...         [
-        ...             {"username": "spongebob", "email_address": "spongebob@sqlalchemy.org"},
+        ...             {
+        ...                 "username": "spongebob",
+        ...                 "email_address": "spongebob@sqlalchemy.org",
+        ...             },
         ...             {"username": "sandy", "email_address": "sandy@sqlalchemy.org"},
         ...             {"username": "sandy", "email_address": "sandy@squirrelpower.org"},
         ...         ],
         ...     )
         ...     conn.commit()
-        {opensql}BEGIN (implicit)
+        {execsql}BEGIN (implicit)
         INSERT INTO address (user_id, email_address) VALUES ((SELECT user_account.id
         FROM user_account
         WHERE user_account.name = ?), ?)
-        [...] (('spongebob', 'spongebob@sqlalchemy.org'), ('sandy', 'sandy@sqlalchemy.org'),
-        ('sandy', 'sandy@squirrelpower.org'))
+        [...] [('spongebob', 'spongebob@sqlalchemy.org'), ('sandy', 'sandy@sqlalchemy.org'),
+        ('sandy', 'sandy@squirrelpower.org')]
         COMMIT{stop}
 
-.. _tutorial_insert_from_select:
+    With that, we have some more interesting data in our tables that we will
+    make use of in the upcoming sections.
 
-INSERT...FROM SELECT
-^^^^^^^^^^^^^^^^^^^^^
+.. tip:: A true "empty" INSERT that inserts only the "defaults" for a table
+   without including any explicit values at all is generated if we indicate
+   :meth:`_sql.Insert.values` with no arguments; not every database backend
+   supports this, but here's what SQLite produces::
 
-The :class:`_sql.Insert` construct can compose
-an INSERT that gets rows directly from a SELECT using the :meth:`_sql.Insert.from_select`
-method::
+    >>> print(insert(user_table).values().compile(engine))
+    {printsql}INSERT INTO user_account DEFAULT VALUES
 
-    >>> select_stmt = select(user_table.c.id, user_table.c.name + "@aol.com")
-    >>> insert_stmt = insert(address_table).from_select(
-    ...     ["user_id", "email_address"], select_stmt
-    ... )
-    >>> print(insert_stmt)
-    {opensql}INSERT INTO address (user_id, email_address)
-    SELECT user_account.id, user_account.name || :name_1 AS anon_1
-    FROM user_account
 
 .. _tutorial_insert_returning:
 
@@ -225,7 +239,7 @@ can be fetched::
     ...     address_table.c.id, address_table.c.email_address
     ... )
     >>> print(insert_stmt)
-    {opensql}INSERT INTO address (id, user_id, email_address)
+    {printsql}INSERT INTO address (id, user_id, email_address)
     VALUES (:id, :user_id, :email_address)
     RETURNING address.id, address.email_address
 
@@ -238,7 +252,7 @@ as in the example below that builds upon the example stated in
     ...     ["user_id", "email_address"], select_stmt
     ... )
     >>> print(insert_stmt.returning(address_table.c.id, address_table.c.email_address))
-    {opensql}INSERT INTO address (user_id, email_address)
+    {printsql}INSERT INTO address (user_id, email_address)
     SELECT user_account.id, user_account.name || :name_1 AS anon_1
     FROM user_account RETURNING address.id, address.email_address
 
@@ -246,21 +260,47 @@ as in the example below that builds upon the example stated in
 
     The RETURNING feature is also supported by UPDATE and DELETE statements,
     which will be introduced later in this tutorial.
-    The RETURNING feature is generally [1]_ only
-    supported for statement executions that use a single set of bound
-    parameters; that is, it wont work with the "executemany" form introduced
-    at :ref:`tutorial_multiple_parameters`.    Additionally, some dialects
-    such as the Oracle dialect only allow RETURNING to return a single row
-    overall, meaning it won't work with "INSERT..FROM SELECT" nor will it
-    work with multiple row :class:`_sql.Update` or :class:`_sql.Delete`
-    forms.
 
-    .. [1] There is internal support for the
-       :mod:`_postgresql.psycopg2` dialect to INSERT many rows at once
-       and also support RETURNING, which is leveraged by the SQLAlchemy
-       ORM.   However this feature has not been generalized to all dialects
-       and is not yet part of SQLAlchemy's regular API.
+    For INSERT statements, the RETURNING feature may be used
+    both for single-row statements as well as for statements that INSERT
+    multiple rows at once.  Support for multiple-row INSERT with RETURNING
+    is dialect specific, however is supported for all the dialects
+    that are included in SQLAlchemy which support RETURNING.  See the section
+    :ref:`engine_insertmanyvalues` for background on this feature.
 
+.. seealso::
+
+    Bulk INSERT with or without RETURNING is also supported by the ORM.  See
+    :ref:`orm_queryguide_bulk_insert` for reference documentation.
+
+
+
+.. _tutorial_insert_from_select:
+
+INSERT...FROM SELECT
+^^^^^^^^^^^^^^^^^^^^^
+
+A less used feature of :class:`_sql.Insert`, but here for completeness, the
+:class:`_sql.Insert` construct can compose an INSERT that gets rows directly
+from a SELECT using the :meth:`_sql.Insert.from_select` method.
+This method accepts a :func:`_sql.select` construct, which is discussed in the
+next section, along with a list of column names to be targeted in the
+actual INSERT.  In the example below, rows are added to the ``address``
+table which are derived from rows in the ``user_account`` table, giving each
+user a free email address at ``aol.com``::
+
+    >>> select_stmt = select(user_table.c.id, user_table.c.name + "@aol.com")
+    >>> insert_stmt = insert(address_table).from_select(
+    ...     ["user_id", "email_address"], select_stmt
+    ... )
+    >>> print(insert_stmt)
+    {printsql}INSERT INTO address (user_id, email_address)
+    SELECT user_account.id, user_account.name || :name_1 AS anon_1
+    FROM user_account
+
+This construct is used when one wants to copy data from
+some other part of the database directly into a new set of rows, without
+actually fetching and re-sending the data from the client.
 
 
 .. seealso::

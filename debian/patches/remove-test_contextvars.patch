@@ -5,23 +5,19 @@ Subject: Remove failing test: test_contextvars()
 Forwarded: not-needed
 Last-Update: 2021-11-01
 ---
- test/base/test_concurrency_py3k.py | 54 --------------------------------------
- 1 file changed, 54 deletions(-)
+ test/base/test_concurrency_py3k.py | 50 --------------------------------------
+ 1 file changed, 50 deletions(-)
 
 diff --git a/test/base/test_concurrency_py3k.py b/test/base/test_concurrency_py3k.py
-index de7157c..0b9f093 100644
+index 63a9f85..4826f79 100644
 --- a/test/base/test_concurrency_py3k.py
 +++ b/test/base/test_concurrency_py3k.py
-@@ -143,60 +143,6 @@ class TestAsyncioCompat(fixtures.TestBase):
- 
-         await to_await
+@@ -149,56 +149,6 @@ class TestAsyncioCompat(fixtures.TestBase):
+         with expect_raises(RuntimeError):
+             await to_await
  
 -    @async_test
--    @testing.requires.python37
 -    async def test_contextvars(self):
--        import asyncio
--        import contextvars
--
 -        var = contextvars.ContextVar("var")
 -        concurrency = 500
 -

@@ -286,7 +286,7 @@ class ConstraintGenTest(fixtures.TestBase, AssertsExecutionResults):
         if auto:
             fk_assertions.append(
                 CompiledSQL(
-                    "ALTER TABLE a ADD " "FOREIGN KEY(bid) REFERENCES b (id)"
+                    "ALTER TABLE a ADD FOREIGN KEY(bid) REFERENCES b (id)"
                 )
             )
         assertions.append(AllOf(*fk_assertions))
@@ -409,10 +409,10 @@ class ConstraintGenTest(fixtures.TestBase, AssertsExecutionResults):
             ),
             AllOf(
                 CompiledSQL(
-                    "ALTER TABLE b ADD " "FOREIGN KEY(aid) REFERENCES a (id)"
+                    "ALTER TABLE b ADD FOREIGN KEY(aid) REFERENCES a (id)"
                 ),
                 CompiledSQL(
-                    "ALTER TABLE a ADD " "FOREIGN KEY(bid) REFERENCES b (id)"
+                    "ALTER TABLE a ADD FOREIGN KEY(bid) REFERENCES b (id)"
                 ),
             ),
         ]
@@ -705,15 +705,13 @@ class ConstraintGenTest(fixtures.TestBase, AssertsExecutionResults):
         Index("idx_winners", events.c.winner)
 
         eq_(
-            set(ix.name for ix in events.indexes),
-            set(
-                [
-                    "ix_events_name",
-                    "ix_events_location",
-                    "sport_announcer",
-                    "idx_winners",
-                ]
-            ),
+            {ix.name for ix in events.indexes},
+            {
+                "ix_events_name",
+                "ix_events_location",
+                "sport_announcer",
+                "idx_winners",
+            },
         )
 
         self.assert_sql_execution(
@@ -722,10 +720,10 @@ class ConstraintGenTest(fixtures.TestBase, AssertsExecutionResults):
             RegexSQL("^CREATE TABLE events"),
             AllOf(
                 CompiledSQL(
-                    "CREATE UNIQUE INDEX ix_events_name ON events " "(name)"
+                    "CREATE UNIQUE INDEX ix_events_name ON events (name)"
                 ),
                 CompiledSQL(
-                    "CREATE INDEX ix_events_location ON events " "(location)"
+                    "CREATE INDEX ix_events_location ON events (location)"
                 ),
                 CompiledSQL(
                     "CREATE UNIQUE INDEX sport_announcer ON events "
@@ -765,6 +763,14 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
         i = Index("xyz", t.c.x)
         self.assert_compile(schema.CreateIndex(i), "CREATE INDEX xyz ON t (x)")
 
+    def test_create_index_if_not_exists(self):
+        t = Table("t", MetaData(), Column("x", Integer))
+        i = Index("xyz", t.c.x)
+        self.assert_compile(
+            schema.CreateIndex(i, if_not_exists=True),
+            "CREATE INDEX IF NOT EXISTS xyz ON t (x)",
+        )
+
     def test_drop_index_plain_unattached(self):
         self.assert_compile(
             schema.DropIndex(Index(name="xyz")), "DROP INDEX xyz"
@@ -773,6 +779,12 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_drop_index_plain(self):
         self.assert_compile(
             schema.DropIndex(Index(name="xyz")), "DROP INDEX xyz"
+        )
+
+    def test_drop_index_if_exists(self):
+        self.assert_compile(
+            schema.DropIndex(Index(name="xyz"), if_exists=True),
+            "DROP INDEX IF EXISTS xyz",
         )
 
     def test_create_index_schema(self):
@@ -798,7 +810,6 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
                 ("sometable", "this_name_is_too_long", "ix_sometable_t_09aa"),
                 ("sometable", "this_name_alsois_long", "ix_sometable_t_3cf1"),
             ]:
-
                 t1 = Table(
                     tname, MetaData(), Column(cname, Integer, index=True)
                 )
@@ -806,7 +817,7 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
 
                 self.assert_compile(
                     schema.CreateIndex(ix1),
-                    "CREATE INDEX %s " "ON %s (%s)" % (exp, tname, cname),
+                    "CREATE INDEX %s ON %s (%s)" % (exp, tname, cname),
                     dialect=dialect,
                 )
 
@@ -862,6 +873,8 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
         ]:
             x.append_constraint(idx)
             self.assert_compile(schema.CreateIndex(idx), ddl)
+
+            x.to_metadata(MetaData())
 
     def test_index_against_text_separate(self):
         metadata = MetaData()
@@ -1026,7 +1039,7 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
             Column("a", Integer),
             Column("b", Integer),
             Column("c", Integer),
-            *fkcs
+            *fkcs,
         )
         Table("remote", m, Column("id", Integer, primary_key=True))
 
@@ -1206,7 +1219,11 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
             "CHECK (a < b) DEFERRABLE INITIALLY DEFERRED",
         )
 
-    def test_external_ck_constraint_cancels_internal(self):
+    @testing.variation("isolate", [True, False])
+    @testing.variation("type_", ["add", "drop"])
+    def test_external_ck_constraint_cancels_internal(
+        self, isolate: testing.Variation, type_: testing.Variation
+    ):
         t, t2 = self._constraint_create_fixture()
 
         constraint = CheckConstraint(
@@ -1217,15 +1234,27 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
             table=t,
         )
 
-        schema.AddConstraint(constraint)
+        if type_.add:
+            cls = schema.AddConstraint
+        elif type_.drop:
+            cls = schema.DropConstraint
+        else:
+            type_.fail()
 
-        # once we make an AddConstraint,
-        # inline compilation of the CONSTRAINT
-        # is disabled
-        self.assert_compile(
-            schema.CreateTable(t),
-            "CREATE TABLE tbl (" "a INTEGER, " "b INTEGER" ")",
-        )
+        if not isolate:
+            cls(constraint, isolate_from_table=False)
+            self.assert_compile(
+                schema.CreateTable(t),
+                "CREATE TABLE tbl (a INTEGER, b INTEGER, "
+                "CONSTRAINT my_test_constraint CHECK (a < b) "
+                "DEFERRABLE INITIALLY DEFERRED)",
+            )
+        else:
+            cls(constraint)
+            self.assert_compile(
+                schema.CreateTable(t),
+                "CREATE TABLE tbl (a INTEGER, b INTEGER)",
+            )
 
     def test_render_drop_constraint(self):
         t, t2 = self._constraint_create_fixture()
@@ -1257,6 +1286,16 @@ class ConstraintCompilationTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             schema.DropConstraint(constraint, cascade=True),
             "ALTER TABLE tbl DROP CONSTRAINT my_test_constraint CASCADE",
+        )
+
+    def test_render_drop_constraint_if_exists(self):
+        t, t2 = self._constraint_create_fixture()
+
+        constraint = CheckConstraint("a = 1", name="a1", table=t)
+
+        self.assert_compile(
+            schema.DropConstraint(constraint, if_exists=True),
+            "ALTER TABLE tbl DROP CONSTRAINT IF EXISTS a1",
         )
 
     def test_render_add_fk_constraint_stringcol(self):

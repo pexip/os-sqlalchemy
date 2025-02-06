@@ -12,6 +12,7 @@ from sqlalchemy import table
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import update
+from sqlalchemy import values
 from sqlalchemy.schema import DDL
 from sqlalchemy.schema import Sequence
 from sqlalchemy.sql import ClauseElement
@@ -41,7 +42,7 @@ m = MetaData()
 t = Table("t", m, Column("q", Integer))
 
 
-class NotAThing1(object):
+class NotAThing1:
     pass
 
 
@@ -55,7 +56,7 @@ class NotAThing2(ClauseElement):
 not_a_thing2 = NotAThing2()
 
 
-class NotAThing3(object):
+class NotAThing3:
     def __clause_element__(self):
         return not_a_thing2
 
@@ -189,6 +190,22 @@ class RoleTest(fixtures.TestBase):
                 select(column("q")).alias(),
             )
 
+    def test_values_advice(self):
+        value_expr = values(
+            column("id", Integer), column("name", String), name="my_values"
+        ).data([(1, "name1"), (2, "name2"), (3, "name3")])
+
+        assert_raises_message(
+            exc.ArgumentError,
+            r"SQL expression element expected, got <.*Values.*my_values>. To "
+            r"create a "
+            r"column expression from a VALUES clause, "
+            r"use the .scalar_values\(\) method.",
+            expect,
+            roles.ExpressionElementRole,
+            value_expr,
+        )
+
     def test_table_valued_advice(self):
         msg = (
             r"SQL expression element expected, got %s. To create a "
@@ -215,7 +232,7 @@ class RoleTest(fixtures.TestBase):
         def some_function():
             pass
 
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return some_function
 
@@ -226,15 +243,13 @@ class RoleTest(fixtures.TestBase):
         ):
             expect(roles.ExpressionElementRole, Thing())
 
-    def test_statement_text_coercion(self):
-        with testing.expect_deprecated_20(
-            "Using plain strings to indicate SQL statements"
+    def test_no_statement_text_coercion(self):
+        with testing.expect_raises_message(
+            exc.ArgumentError,
+            r"Textual SQL expression 'select \* from table' should be "
+            "explicitly declared",
         ):
-            is_true(
-                expect(roles.StatementRole, "select * from table").compare(
-                    text("select * from table")
-                )
-            )
+            expect(roles.StatementRole, "select * from table")
 
     def test_select_statement_no_text_coercion(self):
         assert_raises_message(
@@ -405,7 +420,6 @@ class SubqueryCoercionsTest(fixtures.TestBase, AssertsCompiledSQL):
             is_true(coerced.compare(stmt.scalar_subquery().label(None)))
 
     def test_scalar_select(self):
-
         with testing.expect_warnings(
             "implicitly coercing SELECT object to scalar subquery"
         ):

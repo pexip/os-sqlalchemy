@@ -26,6 +26,7 @@ already stored in the path itself. Updates require going through all
 descendants and changing the prefix.
 
 """
+
 from sqlalchemy import Column
 from sqlalchemy import create_engine
 from sqlalchemy import func
@@ -86,7 +87,7 @@ class Node(Base):
         return len(self.path.split(".")) - 1
 
     def __repr__(self):
-        return "Node(id={})".format(self.id)
+        return f"Node(id={self.id})"
 
     def __str__(self):
         root_depth = self.depth
@@ -106,7 +107,7 @@ class Node(Base):
 
 if __name__ == "__main__":
     engine = create_engine(
-        "postgresql://scott:tiger@localhost/test", echo=True
+        "postgresql+psycopg2://scott:tiger@localhost/test", echo=True
     )
     Base.metadata.create_all(engine)
 

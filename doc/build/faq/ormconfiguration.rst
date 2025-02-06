@@ -62,7 +62,9 @@ flag on those columns::
 
 All tables in a relational database should have primary keys.   Even a many-to-many
 association table - the primary key would be the composite of the two association
-columns::
+columns:
+
+.. sourcecode:: sql
 
     CREATE TABLE my_association (
       user_id INTEGER REFERENCES user(id),
@@ -232,6 +234,7 @@ The same idea applies to all the other arguments, such as ``foreign_keys``::
     # also correct !
     foo = relationship(Dest, foreign_keys=[Dest.foo_id, Dest.bar_id])
 
+
     # if you're using columns from the class that you're inside of, just use the column objects !
     class MyClass(Base):
         foo_id = Column(...)
@@ -263,14 +266,14 @@ SQLAlchemy implements :func:`_orm.subqueryload` by issuing a separate query,
 the results of which are matched up to the results from the first query.
 We see two queries emitted like this:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
-    >>> session.query(User).options(subqueryload(User.addresses)).all()
-    {opensql}-- the "main" query
+    >>> session.scalars(select(User).options(subqueryload(User.addresses))).all()
+    {execsql}-- the "main" query
     SELECT users.id AS users_id
     FROM users
     {stop}
-    {opensql}-- the "load" query issued by subqueryload
+    {execsql}-- the "load" query issued by subqueryload
     SELECT addresses.id AS addresses_id,
            addresses.user_id AS addresses_user_id,
            anon_1.users_id AS anon_1_users_id
@@ -282,15 +285,17 @@ The second query embeds the first query as a source of rows.
 When the inner query uses ``OFFSET`` and/or ``LIMIT`` without ordering,
 the two queries may not see the same results:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
-    >>> user = session.query(User).options(subqueryload(User.addresses)).first()
-    {opensql}-- the "main" query
+    >>> user = session.scalars(
+    ...     select(User).options(subqueryload(User.addresses)).limit(1)
+    ... ).first()
+    {execsql}-- the "main" query
     SELECT users.id AS users_id
     FROM users
      LIMIT 1
     {stop}
-    {opensql}-- the "load" query issued by subqueryload
+    {execsql}-- the "load" query issued by subqueryload
     SELECT addresses.id AS addresses_id,
            addresses.user_id AS addresses_user_id,
            anon_1.users_id AS anon_1_users_id
@@ -299,7 +304,9 @@ the two queries may not see the same results:
     ORDER BY anon_1.users_id
 
 Depending on database specifics, there is
-a chance we may get a result like the following for the two queries::
+a chance we may get a result like the following for the two queries:
+
+.. sourcecode:: text
 
     -- query #1
     +--------+
@@ -326,10 +333,12 @@ won't see that anything actually went wrong.
 
 The solution to this problem is to always specify a deterministic sort order,
 so that the main query always returns the same set of rows. This generally
-means that you should :meth:`_query.Query.order_by` on a unique column on the table.
+means that you should :meth:`_sql.Select.order_by` on a unique column on the table.
 The primary key is a good choice for this::
 
-    session.query(User).options(subqueryload(User.addresses)).order_by(User.id).first()
+    session.scalars(
+        select(User).options(subqueryload(User.addresses)).order_by(User.id).limit(1)
+    ).first()
 
 Note that the :func:`_orm.joinedload` eager loader strategy does not suffer from
 the same problem because only one query is ever issued, so the load query
@@ -339,4 +348,95 @@ loads directly to primary key values just loaded.
 
 .. seealso::
 
-    :ref:`subqueryload_ordering`
+    :ref:`subquery_eager_loading`
+
+.. _defaults_default_factory_insert_default:
+
+What are ``default``, ``default_factory`` and ``insert_default`` and what should I use?
+---------------------------------------------------------------------------------------
+
+There's a bit of a clash in SQLAlchemy's API here due to the addition of PEP-681
+dataclass transforms, which is strict about its naming conventions. PEP-681 comes
+into play if you are using :class:`_orm.MappedAsDataclass` as shown in :ref:`orm_declarative_native_dataclasses`.
+If you are not using MappedAsDataclass, then it does not apply.
+
+Part One - Classic SQLAlchemy that is not using dataclasses
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When **not** using :class:`_orm.MappedAsDataclass`, as has been the case for many years
+in SQLAlchemy, the :func:`_orm.mapped_column` (and :class:`_schema.Column`)
+construct supports a parameter :paramref:`_orm.mapped_column.default`.
+This indicates a Python-side default (as opposed to a server side default that
+would be part of your database's schema definition) that will take place when
+an ``INSERT`` statement is emitted. This default can be **any** of a static Python value
+like a string, **or** a Python callable function, **or** a SQLAlchemy SQL construct.
+Full documentation for :paramref:`_orm.mapped_column.default` is at
+:ref:`defaults_client_invoked_sql`.
+
+When using :paramref:`_orm.mapped_column.default` with an ORM mapping that is **not**
+using :class:`_orm.MappedAsDataclass`, this default value /callable **does not show
+up on your object when you first construct it**. It only takes place when SQLAlchemy
+works up an ``INSERT`` statement for your object.
+
+A very important thing to note is that when using :func:`_orm.mapped_column`
+(and :class:`_schema.Column`), the classic :paramref:`_orm.mapped_column.default`
+parameter is also available under a new name, called
+:paramref:`_orm.mapped_column.insert_default`. If you build a
+:func:`_orm.mapped_column` and you are **not** using :class:`_orm.MappedAsDataclass`, the
+:paramref:`_orm.mapped_column.default` and :paramref:`_orm.mapped_column.insert_default`
+parameters are **synonymous**.
+
+Part Two - Using Dataclasses support with MappedAsDataclass
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When you **are** using :class:`_orm.MappedAsDataclass`, that is, the specific form
+of mapping used at :ref:`orm_declarative_native_dataclasses`, the meaning of the
+:paramref:`_orm.mapped_column.default` keyword changes. We recognize that it's not
+ideal that this name changes its behavior, however there was no alternative as
+PEP-681 requires :paramref:`_orm.mapped_column.default` to take on this meaning.
+
+When dataclasses are used, the :paramref:`_orm.mapped_column.default` parameter must
+be used the way it's described at
+`Python Dataclasses <https://docs.python.org/3/library/dataclasses.html>`_ - it refers
+to a constant value like a string or a number, and **is applied to your object
+immediately when constructed**. It is also at the moment also applied to the
+:paramref:`_orm.mapped_column.default` parameter of :class:`_schema.Column` where
+it would be used in an ``INSERT`` statement automatically even if not present
+on the object. If you instead want to use a callable for your dataclass,
+which will be applied to the object when constructed, you would use
+:paramref:`_orm.mapped_column.default_factory`.
+
+To get access to the ``INSERT``-only behavior of :paramref:`_orm.mapped_column.default`
+that is described in part one above, you would use the
+:paramref:`_orm.mapped_column.insert_default` parameter instead.
+:paramref:`_orm.mapped_column.insert_default` when dataclasses are used continues
+to be a direct route to the Core-level "default" process where the parameter can
+be a static value or callable.
+
+.. list-table:: Summary Chart
+   :header-rows: 1
+
+   * - Construct
+     - Works with dataclasses?
+     - Works without dataclasses?
+     - Accepts scalar?
+     - Accepts callable?
+     - Populates object immediately?
+   * - :paramref:`_orm.mapped_column.default`
+     - ✔
+     - ✔
+     - ✔
+     - Only if no dataclasses
+     - Only if dataclasses
+   * - :paramref:`_orm.mapped_column.insert_default`
+     - ✔
+     - ✔
+     - ✔
+     - ✔
+     - ✖
+   * - :paramref:`_orm.mapped_column.default_factory`
+     - ✔
+     - ✖
+     - ✖
+     - ✔
+     - Only if dataclasses

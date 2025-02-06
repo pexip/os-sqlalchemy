@@ -263,8 +263,8 @@ class LikeQueryTest(BakedTest):
 
         # original query still works
         eq_(
-            set([(u.id, u.name) for u in bq(sess).all()]),
-            set([(8, "ed"), (9, "fred")]),
+            {(u.id, u.name) for u in bq(sess).all()},
+            {(8, "ed"), (9, "fred")},
         )
 
     def test_count_with_bindparams(self):
@@ -280,19 +280,19 @@ class LikeQueryTest(BakedTest):
         # calling with *args
         eq_(bq(sess).params(uname="fred").count(), 1)
         # with multiple params, the **kwargs will be used
-        bq += lambda q: q.filter(User.id == bindparam("anid"))
-        eq_(bq(sess).params(uname="fred", anid=9).count(), 1)
+        bq += lambda q: q.filter(User.id == bindparam("an_id"))
+        eq_(bq(sess).params(uname="fred", an_id=9).count(), 1)
 
         eq_(
             # wrong id, so 0 results:
-            bq(sess).params(uname="fred", anid=8).count(),
+            bq(sess).params(uname="fred", an_id=8).count(),
             0,
         )
 
     def test_get_pk_w_null(self):
         """test the re-implementation of logic to do get with IS NULL."""
 
-        class AddressUser(object):
+        class AddressUser:
             pass
 
         self.mapper_registry.map_imperatively(
@@ -422,7 +422,6 @@ class ResultPostCriteriaTest(BakedTest):
 
     def test_spoiled(self):
         with self._fixture() as (sess, bq):
-
             result = bq.spoil()(sess).with_post_criteria(
                 lambda q: q.execution_options(yes=True)
             )
@@ -647,7 +646,9 @@ class ResultTest(BakedTest):
 
         bq = self.bakery(lambda s: s.query(User.id, User.name))
 
-        bq += lambda q: q._from_self().with_entities(func.count(User.id))
+        bq += lambda q: q._legacy_from_self().with_entities(
+            func.count(User.id)
+        )
 
         for i in range(3):
             session = fixture_session()
@@ -682,7 +683,7 @@ class ResultTest(BakedTest):
                     bq += lambda q: q.filter(User.name == "jack")
 
                 if cond4:
-                    bq += lambda q: q._from_self().with_entities(
+                    bq += lambda q: q._legacy_from_self().with_entities(
                         func.count(User.id)
                     )
                 sess = fixture_session()
@@ -744,7 +745,7 @@ class ResultTest(BakedTest):
                 result = bq(sess).all()
 
                 if cond1:
-                    eq_(result, [(8, u"ed"), (9, u"fred"), (10, u"chuck")])
+                    eq_(result, [(8, "ed"), (9, "fred"), (10, "chuck")])
                 else:
                     eq_(result, [(7, "jack")])
 
@@ -991,7 +992,7 @@ class CustomIntegrationTest(testing.AssertsCompiledSQL, BakedTest):
                     Address,
                     order_by=self.tables.addresses.c.id,
                     lazy=lazy,
-                    **kw
+                    **kw,
                 )
             },
         )

@@ -1,11 +1,14 @@
 from sqlalchemy import Column
 from sqlalchemy import delete
+from sqlalchemy import exc
 from sqlalchemy import Integer
 from sqlalchemy import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy import MetaData
 from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import text
+from sqlalchemy import true
+from sqlalchemy import union_all
 from sqlalchemy import update
 from sqlalchemy.dialects import mssql
 from sqlalchemy.engine import default
@@ -16,6 +19,7 @@ from sqlalchemy.sql import column
 from sqlalchemy.sql import cte
 from sqlalchemy.sql import exists
 from sqlalchemy.sql import func
+from sqlalchemy.sql import insert
 from sqlalchemy.sql import literal
 from sqlalchemy.sql import select
 from sqlalchemy.sql import table
@@ -25,11 +29,11 @@ from sqlalchemy.sql.visitors import cloned_traverse
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
 
 
 class CTETest(fixtures.TestBase, AssertsCompiledSQL):
-
     __dialect__ = "default_enhanced"
 
     def test_nonrecursive(self):
@@ -55,7 +59,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             .where(
                 regional_sales.c.total_sales
                 > select(
-                    func.sum(regional_sales.c.total_sales) / 10
+                    func.sum(regional_sales.c.total_sales) // 10
                 ).scalar_subquery()
             )
             .cte("top_regions")
@@ -293,7 +297,9 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
     def test_recursive_union_no_alias_two(self):
         """
 
-        pg's example::
+        pg's example:
+
+        .. sourcecode:: sql
 
             WITH RECURSIVE t(n) AS (
                 VALUES (1)
@@ -487,14 +493,20 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     @testing.combinations(True, False, argnames="identical")
-    @testing.combinations(True, False, argnames="use_clone")
-    def test_conflicting_names(self, identical, use_clone):
+    @testing.variation("clone_type", ["none", "clone", "annotated"])
+    def test_conflicting_names(self, identical, clone_type):
         """test a flat out name conflict."""
 
         s1 = select(1)
         c1 = s1.cte(name="cte1", recursive=True)
-        if use_clone:
+        if clone_type.clone:
             c2 = c1._clone()
+            if not identical:
+                c2 = c2.union(select(2))
+        elif clone_type.annotated:
+            # this does not seem to trigger the issue that was fixed in
+            # #12364 howver is still a worthy test
+            c2 = c1._annotate({"foo": "bar"})
             if not identical:
                 c2 = c2.union(select(2))
         else:
@@ -506,18 +518,52 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
 
         s = select(c1, c2)
 
-        if use_clone and identical:
+        if clone_type.clone and identical:
             self.assert_compile(
                 s,
                 'WITH RECURSIVE cte1("1") AS (SELECT 1) SELECT cte1.1, '
                 'cte1.1 AS "1_1" FROM cte1',
             )
+        elif clone_type.annotated and identical:
+            # annotated seems to have a slightly different rendering
+            # scheme here
+            self.assert_compile(
+                s,
+                'WITH RECURSIVE cte1("1") AS (SELECT 1) SELECT cte1.1, '
+                'cte1.1 AS "1__1" FROM cte1',
+            )
         else:
             assert_raises_message(
                 CompileError,
-                "Multiple, unrelated CTEs found " "with the same name: 'cte1'",
+                "Multiple, unrelated CTEs found with the same name: 'cte1'",
                 s.compile,
             )
+
+    @testing.variation("annotated", [True, False])
+    def test_cte_w_annotated(self, annotated):
+        """test #12364"""
+
+        A = table("a", column("i"), column("j"))
+        B = table("b", column("i"), column("j"))
+
+        a = select(A).where(A.c.i > A.c.j).cte("filtered_a")
+
+        if annotated:
+            a = a._annotate({"foo": "bar"})
+
+        a1 = select(a.c.i, literal(1).label("j"))
+        b = select(B).join(a, a.c.i == B.c.i).where(B.c.j.is_not(None))
+
+        query = union_all(a1, b)
+        self.assert_compile(
+            query,
+            "WITH filtered_a AS "
+            "(SELECT a.i AS i, a.j AS j FROM a WHERE a.i > a.j) "
+            "SELECT filtered_a.i, :param_1 AS j FROM filtered_a "
+            "UNION ALL SELECT b.i, b.j "
+            "FROM b JOIN filtered_a ON filtered_a.i = b.i "
+            "WHERE b.j IS NOT NULL",
+        )
 
     def test_with_recursive_no_name_currently_buggy(self):
         s1 = select(1)
@@ -610,7 +656,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
                 stmt,
                 "WITH anon_1 AS (SELECT test.a AS b FROM test %s b) "
                 "SELECT (SELECT anon_1.b FROM anon_1) AS c"
-                % ("ORDER BY" if order_by == "order_by" else "GROUP BY")
+                % ("ORDER BY" if order_by == "order_by" else "GROUP BY"),
                 # prior to the fix, the use_object version came out as:
                 # "WITH anon_1 AS (SELECT test.a AS b FROM test "
                 # "ORDER BY test.a) "
@@ -990,20 +1036,20 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             s,
             'WITH regional_sales AS (SELECT orders."order" '
-            'AS "order", :1 AS anon_2 FROM orders) SELECT '
-            'regional_sales."order", :2 AS anon_1 FROM regional_sales',
-            checkpositional=("x", "y"),
+            'AS "order", :2 AS anon_2 FROM orders) SELECT '
+            'regional_sales."order", :1 AS anon_1 FROM regional_sales',
+            checkpositional=("y", "x"),
             dialect=dialect,
         )
 
         self.assert_compile(
             s.union(s),
             'WITH regional_sales AS (SELECT orders."order" '
-            'AS "order", :1 AS anon_2 FROM orders) SELECT '
-            'regional_sales."order", :2 AS anon_1 FROM regional_sales '
-            'UNION SELECT regional_sales."order", :3 AS anon_1 '
+            'AS "order", :2 AS anon_2 FROM orders) SELECT '
+            'regional_sales."order", :1 AS anon_1 FROM regional_sales '
+            'UNION SELECT regional_sales."order", :1 AS anon_1 '
             "FROM regional_sales",
-            checkpositional=("x", "y", "y"),
+            checkpositional=("y", "x"),
             dialect=dialect,
         )
 
@@ -1054,8 +1100,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             s3,
             'WITH regional_sales_1 AS (SELECT orders."order" AS "order" '
-            'FROM orders WHERE orders."order" = :1), regional_sales_2 AS '
-            '(SELECT orders."order" = :2 AS anon_1, '
+            'FROM orders WHERE orders."order" = :2), regional_sales_2 AS '
+            '(SELECT orders."order" = :1 AS anon_1, '
             'anon_2."order" AS "order", '
             'orders."order" AS order_1, '
             'regional_sales_1."order" AS order_2 FROM orders, '
@@ -1064,7 +1110,7 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             'WHERE orders."order" = :3) SELECT regional_sales_2.anon_1, '
             'regional_sales_2."order", regional_sales_2.order_1, '
             "regional_sales_2.order_2 FROM regional_sales_2",
-            checkpositional=("x", "y", "z"),
+            checkpositional=("y", "x", "z"),
             dialect=dialect,
         )
 
@@ -1201,6 +1247,37 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             dialect="postgresql",
         )
 
+    def test_recursive_dml_syntax(self):
+        orders = table(
+            "orders",
+            column("region"),
+            column("amount"),
+            column("product"),
+            column("quantity"),
+        )
+
+        upsert = (
+            orders.update()
+            .where(orders.c.region == "Region1")
+            .values(amount=1.0, product="Product1", quantity=1)
+            .returning(*(orders.c._all_columns))
+            .cte("upsert", recursive=True)
+        )
+        stmt = select(upsert)
+
+        # This statement probably makes no sense, just want to see that the
+        # column generation aspect needed by RECURSIVE works (new in 2.0)
+        self.assert_compile(
+            stmt,
+            "WITH RECURSIVE upsert(region, amount, product, quantity) "
+            "AS (UPDATE orders SET amount=:param_1, product=:param_2, "
+            "quantity=:param_3 WHERE orders.region = :region_1 "
+            "RETURNING orders.region, orders.amount, orders.product, "
+            "orders.quantity) "
+            "SELECT upsert.region, upsert.amount, upsert.product, "
+            "upsert.quantity FROM upsert",
+        )
+
     def test_upsert_from_select(self):
         orders = table(
             "orders",
@@ -1286,6 +1363,102 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
     @testing.combinations(
         ("default_enhanced",),
         ("postgresql",),
+        ("postgresql+asyncpg",),
+    )
+    def test_insert_w_cte_in_scalar_subquery(self, dialect):
+        """test #9173"""
+
+        customer = table(
+            "customer",
+            column("id"),
+            column("name"),
+        )
+        order = table(
+            "order",
+            column("id"),
+            column("price"),
+            column("customer_id"),
+        )
+
+        inst = (
+            customer.insert()
+            .values(name="John")
+            .returning(customer.c.id)
+            .cte("inst")
+        )
+
+        stmt = (
+            order.insert()
+            .values(
+                price=1,
+                customer_id=select(inst.c.id).scalar_subquery(),
+            )
+            .add_cte(inst)
+        )
+
+        if dialect == "default_enhanced":
+            self.assert_compile(
+                stmt,
+                "WITH inst AS (INSERT INTO customer (name) VALUES (:param_1) "
+                'RETURNING customer.id) INSERT INTO "order" '
+                "(price, customer_id) VALUES "
+                "(:price, (SELECT inst.id FROM inst))",
+                dialect=dialect,
+            )
+        elif dialect == "postgresql":
+            self.assert_compile(
+                stmt,
+                "WITH inst AS (INSERT INTO customer (name) "
+                "VALUES (%(param_1)s) "
+                'RETURNING customer.id) INSERT INTO "order" '
+                "(price, customer_id) "
+                "VALUES (%(price)s, (SELECT inst.id FROM inst))",
+                dialect=dialect,
+            )
+        elif dialect == "postgresql+asyncpg":
+            self.assert_compile(
+                stmt,
+                "WITH inst AS (INSERT INTO customer (name) VALUES ($2) "
+                'RETURNING customer.id) INSERT INTO "order" '
+                "(price, customer_id) VALUES ($1, (SELECT inst.id FROM inst))",
+                dialect=dialect,
+            )
+        else:
+            assert False
+
+    @testing.variation("operation", ["insert", "update", "delete"])
+    def test_stringify_standalone_dml_cte(self, operation):
+        """test issue discovered as part of #10753"""
+
+        t1 = table("table_1", column("id"), column("val"))
+
+        if operation.insert:
+            stmt = t1.insert()
+            expected = (
+                "INSERT INTO table_1 (id, val) VALUES (:id, :val) "
+                "RETURNING table_1.id, table_1.val"
+            )
+        elif operation.update:
+            stmt = t1.update()
+            expected = (
+                "UPDATE table_1 SET id=:id, val=:val "
+                "RETURNING table_1.id, table_1.val"
+            )
+        elif operation.delete:
+            stmt = t1.delete()
+            expected = "DELETE FROM table_1 RETURNING table_1.id, table_1.val"
+        else:
+            operation.fail()
+
+        stmt = stmt.returning(t1.c.id, t1.c.val)
+
+        cte = stmt.cte()
+
+        self.assert_compile(cte, expected)
+
+    @testing.combinations(
+        ("default_enhanced",),
+        ("postgresql",),
     )
     def test_select_from_delete_cte(self, dialect):
         t1 = table("table_1", column("id"), column("val"))
@@ -1318,6 +1491,31 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
                 "SELECT delete_cte.id, delete_cte.val FROM delete_cte",
                 dialect=dialect,
             )
+
+    def test_insert_update_w_add_cte(self):
+        """test #10408"""
+        a = table(
+            "a", column("id"), column("x"), column("y"), column("next_id")
+        )
+
+        insert_a_cte = (insert(a).values(x=10, y=15).returning(a.c.id)).cte(
+            "insert_a_cte"
+        )
+
+        update_query = (
+            update(a)
+            .values(next_id=insert_a_cte.c.id)
+            .where(a.c.id == 10)
+            .add_cte(insert_a_cte)
+        )
+
+        self.assert_compile(
+            update_query,
+            "WITH insert_a_cte AS (INSERT INTO a (x, y) "
+            "VALUES (:param_1, :param_2) RETURNING a.id) "
+            "UPDATE a SET next_id=insert_a_cte.id "
+            "FROM insert_a_cte WHERE a.id = :id_1",
+        )
 
     def test_anon_update_cte(self):
         orders = table("orders", column("region"))
@@ -1417,8 +1615,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             .cte("t")
         )
         stmt = t.select()
-        assert "autocommit" not in stmt._execution_options
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -1432,7 +1628,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(stmt.compile().isupdate, False)
 
     def test_pg_example_three(self):
-
         parts = table("parts", column("part"), column("sub_part"))
 
         included_parts = (
@@ -1479,9 +1674,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
 
         stmt = select(cte)
 
-        assert "autocommit" not in stmt._execution_options
-        eq_(stmt.compile().execution_options["autocommit"], True)
-
         self.assert_compile(
             stmt,
             "WITH pd AS "
@@ -1497,10 +1689,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         products = table("products", column("id"), column("price"))
 
         cte = products.select().cte("pd")
-        assert "autocommit" not in cte.select()._execution_options
 
         stmt = products.update().where(products.c.price == cte.c.price)
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -1521,10 +1711,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         products = table("products", column("id"), column("price"))
 
         cte = products.select().cte("pd")
-        assert "autocommit" not in cte.select()._execution_options
 
         stmt = update(cte)
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -1543,10 +1731,8 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         products = table("products", column("id"), column("price"))
 
         cte = products.select().cte("pd")
-        assert "autocommit" not in cte.select()._execution_options
 
         stmt = delete(cte)
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -1572,7 +1758,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
         cte = q.cte("deldup")
         stmt = delete(cte).where(text("RN > 1"))
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -1659,7 +1844,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_textual_select_uses_independent_cte_two(self):
-
         foo = table("foo", column("id"))
         bar = table("bar", column("id"), column("attr"), column("foo_id"))
         s1 = select(foo.c.id)
@@ -1715,6 +1899,37 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
             "INSERT INTO products (id, price) VALUES (:id, :price)",
             checkparams={"id": 1, "price": 20, "param_1": 10, "price_1": 50},
         )
+
+    @testing.variation("num_ctes", ["one", "two"])
+    def test_multiple_multivalues_inserts(self, num_ctes):
+        """test #12363"""
+
+        t1 = table("table1", column("id"), column("a"), column("b"))
+
+        t2 = table("table2", column("id"), column("a"), column("b"))
+
+        if num_ctes.one:
+            self.assert_compile(
+                insert(t1)
+                .values([{"a": 1}, {"a": 2}])
+                .add_cte(insert(t2).values([{"a": 5}, {"a": 6}]).cte()),
+                "WITH anon_1 AS "
+                "(INSERT INTO table2 (a) VALUES (:param_1), (:param_2)) "
+                "INSERT INTO table1 (a) VALUES (:a_m0), (:a_m1)",
+            )
+
+        elif num_ctes.two:
+            self.assert_compile(
+                insert(t1)
+                .values([{"a": 1}, {"a": 2}])
+                .add_cte(insert(t1).values([{"b": 5}, {"b": 6}]).cte())
+                .add_cte(insert(t2).values([{"a": 5}, {"a": 6}]).cte()),
+                "WITH anon_1 AS "
+                "(INSERT INTO table1 (b) VALUES (:param_1), (:param_2)), "
+                "anon_2 AS "
+                "(INSERT INTO table2 (a) VALUES (:param_3), (:param_4)) "
+                "INSERT INTO table1 (a) VALUES (:a_m0), (:a_m1)",
+            )
 
     def test_insert_from_select_uses_independent_cte(self):
         """test #7036"""
@@ -1902,7 +2117,6 @@ class CTETest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
-
     __dialect__ = "default_enhanced"
 
     def test_select_with_nesting_cte_in_cte(self):
@@ -1911,6 +2125,21 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
         stmt = select(
             select(nesting_cte.c.inner_cte.label("outer_cte")).cte("cte")
+        )
+
+        self.assert_compile(
+            stmt,
+            "WITH cte AS (WITH nesting AS (SELECT :param_1 AS inner_cte) "
+            "SELECT nesting.inner_cte AS outer_cte FROM nesting) "
+            "SELECT cte.outer_cte FROM cte",
+        )
+
+    def test_select_with_nesting_cte_in_cte_w_add_cte(self):
+        nesting_cte = select(literal(1).label("inner_cte")).cte("nesting")
+        stmt = select(
+            select(nesting_cte.c.inner_cte.label("outer_cte"))
+            .add_cte(nesting_cte, nest_here=True)
+            .cte("cte")
         )
 
         self.assert_compile(
@@ -1938,6 +2167,25 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT cte.outer_cte FROM cte",
         )
 
+    def test_select_with_aliased_nesting_cte_in_cte_w_add_cte(self):
+        inner_nesting_cte = select(literal(1).label("inner_cte")).cte(
+            "nesting"
+        )
+        outer_cte = select().add_cte(inner_nesting_cte, nest_here=True)
+        nesting_cte = inner_nesting_cte.alias("aliased_nested")
+        outer_cte = outer_cte.add_columns(
+            nesting_cte.c.inner_cte.label("outer_cte")
+        ).cte("cte")
+        stmt = select(outer_cte)
+
+        self.assert_compile(
+            stmt,
+            "WITH cte AS (WITH nesting AS (SELECT :param_1 AS inner_cte) "
+            "SELECT aliased_nested.inner_cte AS outer_cte "
+            "FROM nesting AS aliased_nested) "
+            "SELECT cte.outer_cte FROM cte",
+        )
+
     def test_nesting_cte_in_cte_with_same_name(self):
         nesting_cte = select(literal(1).label("inner_cte")).cte(
             "some_cte", nesting=True
@@ -1955,12 +2203,43 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT some_cte.outer_cte FROM some_cte",
         )
 
+    def test_nesting_cte_in_cte_with_same_name_w_add_cte(self):
+        nesting_cte = select(literal(1).label("inner_cte")).cte("some_cte")
+        stmt = select(
+            select(nesting_cte.c.inner_cte.label("outer_cte"))
+            .add_cte(nesting_cte, nest_here=True)
+            .cte("some_cte")
+        )
+
+        self.assert_compile(
+            stmt,
+            "WITH some_cte AS (WITH some_cte AS "
+            "(SELECT :param_1 AS inner_cte) "
+            "SELECT some_cte.inner_cte AS outer_cte "
+            "FROM some_cte) "
+            "SELECT some_cte.outer_cte FROM some_cte",
+        )
+
     def test_nesting_cte_at_top_level(self):
         nesting_cte = select(literal(1).label("val")).cte(
             "nesting_cte", nesting=True
         )
         cte = select(literal(2).label("val")).cte("cte")
         stmt = select(nesting_cte.c.val, cte.c.val)
+
+        self.assert_compile(
+            stmt,
+            "WITH nesting_cte AS (SELECT :param_1 AS val)"
+            ", cte AS (SELECT :param_2 AS val)"
+            " SELECT nesting_cte.val, cte.val AS val_1 FROM nesting_cte, cte",
+        )
+
+    def test_nesting_cte_at_top_level_w_add_cte(self):
+        nesting_cte = select(literal(1).label("val")).cte("nesting_cte")
+        cte = select(literal(2).label("val")).cte("cte")
+        stmt = select(nesting_cte.c.val, cte.c.val).add_cte(
+            nesting_cte, nest_here=True
+        )
 
         self.assert_compile(
             stmt,
@@ -1988,6 +2267,36 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
                 select_1_cte.c.inner_cte.label("outer_1"),
                 select_2_cte.c.inner_cte.label("outer_2"),
             ).cte("cte")
+        )
+
+        self.assert_compile(
+            stmt,
+            "WITH cte AS ("
+            "WITH nesting_1 AS (SELECT :param_1 AS inner_cte)"
+            ", nesting_2 AS (SELECT :param_2 AS inner_cte)"
+            " SELECT nesting_1.inner_cte AS outer_1"
+            ", nesting_2.inner_cte AS outer_2"
+            " FROM nesting_1, nesting_2"
+            ") SELECT cte.outer_1, cte.outer_2 FROM cte",
+        )
+
+    def test_double_nesting_cte_in_cte_w_add_cte(self):
+        """
+        Validate that the SELECT in the 2nd nesting CTE does not render
+        the 1st CTE.
+
+        It implies that nesting CTE level is taken in account.
+        """
+        select_1_cte = select(literal(1).label("inner_cte")).cte("nesting_1")
+        select_2_cte = select(literal(2).label("inner_cte")).cte("nesting_2")
+
+        stmt = select(
+            select(
+                select_1_cte.c.inner_cte.label("outer_1"),
+                select_2_cte.c.inner_cte.label("outer_2"),
+            )
+            .add_cte(select_1_cte, select_2_cte, nest_here=True)
+            .cte("cte")
         )
 
         self.assert_compile(
@@ -2042,6 +2351,32 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
             ", nesting_1.inner_cte_1 AS inner_cte_1"
             " FROM nesting_2, nesting_1"
             ") SELECT cte.inner_cte_2, cte.inner_cte_1 FROM cte",
+        )
+
+    def test_double_nesting_cte_with_cross_reference_in_cte_w_add_cte(self):
+        select_1_cte = select(literal(1).label("inner_cte_1")).cte("nesting_1")
+        select_2_cte = select(
+            (select_1_cte.c.inner_cte_1 + 1).label("inner_cte_2")
+        ).cte("nesting_2")
+
+        # 1 next 2
+
+        nesting_cte_1_2 = (
+            select(select_1_cte, select_2_cte)
+            .add_cte(select_1_cte, select_2_cte, nest_here=True)
+            .cte("cte")
+        )
+        stmt_1_2 = select(nesting_cte_1_2)
+        self.assert_compile(
+            stmt_1_2,
+            "WITH cte AS ("
+            "WITH nesting_1 AS (SELECT :param_1 AS inner_cte_1)"
+            ", nesting_2 AS (SELECT nesting_1.inner_cte_1 + :inner_cte_1_1"
+            " AS inner_cte_2 FROM nesting_1)"
+            " SELECT nesting_1.inner_cte_1 AS inner_cte_1"
+            ", nesting_2.inner_cte_2 AS inner_cte_2"
+            " FROM nesting_1, nesting_2"
+            ") SELECT cte.inner_cte_1, cte.inner_cte_2 FROM cte",
         )
 
     def test_nesting_cte_in_nesting_cte_in_cte(self):
@@ -2115,7 +2450,6 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
     def test_nesting_cte_in_recursive_cte_positional(
         self, nesting_cte_in_recursive_cte
     ):
-
         self.assert_compile(
             nesting_cte_in_recursive_cte,
             "WITH RECURSIVE rec_cte(outer_cte) AS (WITH nesting AS "
@@ -2359,6 +2693,109 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
             },
         )
 
+    def test_add_cte_dont_nest_in_two_places(self):
+        nesting_cte_used_twice = select(literal(1).label("inner_cte_1")).cte(
+            "nesting_cte"
+        )
+        select_add_cte = select(
+            (nesting_cte_used_twice.c.inner_cte_1 + 1).label("next_value")
+        ).cte("nesting_2")
+
+        union_cte = (
+            select(
+                (nesting_cte_used_twice.c.inner_cte_1 - 1).label("next_value")
+            )
+            .add_cte(nesting_cte_used_twice, nest_here=True)
+            .union(
+                select(select_add_cte).add_cte(select_add_cte, nest_here=True)
+            )
+            .cte("wrapper")
+        )
+
+        stmt = (
+            select(union_cte)
+            .add_cte(nesting_cte_used_twice, nest_here=True)
+            .union(select(nesting_cte_used_twice))
+        )
+        with expect_raises_message(
+            exc.CompileError,
+            "CTE is stated as 'nest_here' in more than one location",
+        ):
+            stmt.compile()
+
+    @testing.fixture
+    def same_nested_cte_is_not_generated_twice_w_add_cte(self):
+        # Same = name and query
+        nesting_cte_used_twice = select(literal(1).label("inner_cte_1")).cte(
+            "nesting_cte"
+        )
+        select_add_cte = select(
+            (nesting_cte_used_twice.c.inner_cte_1 + 2).label("next_value")
+        ).cte("nesting_2")
+
+        union_cte = (
+            select(
+                (nesting_cte_used_twice.c.inner_cte_1 - 3).label("next_value")
+            )
+            .add_cte(nesting_cte_used_twice)
+            .union(
+                select(select_add_cte).add_cte(select_add_cte, nest_here=True)
+            )
+            .cte("wrapper")
+        )
+
+        stmt = (
+            select(union_cte)
+            .add_cte(nesting_cte_used_twice, nest_here=True)
+            .union(select(nesting_cte_used_twice))
+        )
+        return stmt
+
+    def test_same_nested_cte_is_not_generated_twice_w_add_cte_positional(
+        self, same_nested_cte_is_not_generated_twice_w_add_cte
+    ):
+        self.assert_compile(
+            same_nested_cte_is_not_generated_twice_w_add_cte,
+            "WITH nesting_cte AS (SELECT ? AS inner_cte_1)"
+            ", wrapper AS (WITH nesting_2 AS "
+            "(SELECT nesting_cte.inner_cte_1 + ? "
+            "AS next_value FROM nesting_cte)"
+            " SELECT nesting_cte.inner_cte_1 - ? "
+            "AS next_value "
+            "FROM nesting_cte UNION "
+            "SELECT nesting_2.next_value AS next_value "
+            "FROM nesting_2)"
+            " SELECT wrapper.next_value "
+            "FROM wrapper UNION SELECT nesting_cte.inner_cte_1 "
+            "FROM nesting_cte",
+            checkpositional=(1, 2, 3),
+            dialect="default_qmark",
+        )
+
+    def test_same_nested_cte_is_not_generated_twice_w_add_cte(
+        self, same_nested_cte_is_not_generated_twice_w_add_cte
+    ):
+        self.assert_compile(
+            same_nested_cte_is_not_generated_twice_w_add_cte,
+            "WITH nesting_cte AS (SELECT :param_1 AS inner_cte_1)"
+            ", wrapper AS (WITH nesting_2 AS "
+            "(SELECT nesting_cte.inner_cte_1 + :inner_cte_1_2 "
+            "AS next_value FROM nesting_cte)"
+            " SELECT nesting_cte.inner_cte_1 - :inner_cte_1_1 "
+            "AS next_value "
+            "FROM nesting_cte UNION "
+            "SELECT nesting_2.next_value AS next_value "
+            "FROM nesting_2)"
+            " SELECT wrapper.next_value "
+            "FROM wrapper UNION SELECT nesting_cte.inner_cte_1 "
+            "FROM nesting_cte",
+            checkparams={
+                "param_1": 1,
+                "inner_cte_1_2": 2,
+                "inner_cte_1_1": 3,
+            },
+        )
+
     @testing.fixture
     def recursive_nesting_cte_in_recursive_cte(self):
         nesting_cte = select(literal(1).label("inner_cte")).cte(
@@ -2383,7 +2820,6 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
     def test_recursive_nesting_cte_in_recursive_cte_positional(
         self, recursive_nesting_cte_in_recursive_cte
     ):
-
         self.assert_compile(
             recursive_nesting_cte_in_recursive_cte,
             "WITH RECURSIVE rec_cte(outer_cte) AS ("
@@ -2434,10 +2870,6 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
         stmt = select(cte)
-
-        assert "autocommit" not in stmt._execution_options
-
-        eq_(stmt.compile().execution_options["autocommit"], True)
 
         self.assert_compile(
             stmt,
@@ -2522,6 +2954,36 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
             .union(select(select_2_cte))
             # Generate "select_2_cte" first
             .add_cte(select_2_cte)
+            .subquery()
+        )
+
+        stmt = select(
+            select(nesting_cte.c.inner_cte.label("outer_cte")).cte("cte")
+        )
+
+        self.assert_compile(
+            stmt,
+            "WITH cte AS ("
+            "SELECT anon_1.inner_cte AS outer_cte FROM ("
+            "WITH nesting_2 AS (SELECT :param_1 AS inner_cte)"
+            ", nesting_1 AS (SELECT :param_2 AS inner_cte)"
+            " SELECT nesting_1.inner_cte AS inner_cte FROM nesting_1"
+            " UNION"
+            " SELECT nesting_2.inner_cte AS inner_cte FROM nesting_2"
+            ") AS anon_1"
+            ") SELECT cte.outer_cte FROM cte",
+        )
+
+    def test_compound_select_with_nesting_cte_in_custom_order_w_add_cte(self):
+        select_1_cte = select(literal(1).label("inner_cte")).cte("nesting_1")
+        select_2_cte = select(literal(2).label("inner_cte")).cte("nesting_2")
+
+        nesting_cte = (
+            select(select_1_cte)
+            .add_cte(select_1_cte, nest_here=True)
+            .union(select(select_2_cte))
+            # Generate "select_2_cte" first
+            .add_cte(select_2_cte, nest_here=True)
             .subquery()
         )
 
@@ -2662,4 +3124,44 @@ class NestingCTETest(fixtures.TestBase, AssertsCompiledSQL):
                 "the_value_1": 2,
                 "the_value_3": 3,
             },
+        )
+
+    @testing.combinations(True, False)
+    def test_correlated_cte_in_lateral_w_add_cte(self, reverse_direction):
+        """this is the original use case that led to #7759"""
+        contracts = table("contracts", column("id"))
+
+        invoices = table("invoices", column("id"), column("contract_id"))
+
+        contracts_alias = contracts.alias()
+        cte1 = (
+            select(contracts_alias)
+            .where(contracts_alias.c.id == contracts.c.id)
+            .correlate(contracts)
+            .cte(name="cte1")
+        )
+        cte2 = (
+            select(invoices)
+            .join(cte1, invoices.c.contract_id == cte1.c.id)
+            .cte(name="cte2")
+        )
+
+        if reverse_direction:
+            subq = select(cte1, cte2).add_cte(cte2, cte1, nest_here=True)
+        else:
+            subq = select(cte1, cte2).add_cte(cte1, cte2, nest_here=True)
+        stmt = select(contracts).outerjoin(subq.lateral(), true())
+
+        self.assert_compile(
+            stmt,
+            "SELECT contracts.id FROM contracts LEFT OUTER JOIN LATERAL "
+            "(WITH cte1 AS (SELECT contracts_1.id AS id "
+            "FROM contracts AS contracts_1 "
+            "WHERE contracts_1.id = contracts.id), "
+            "cte2 AS (SELECT invoices.id AS id, "
+            "invoices.contract_id AS contract_id FROM invoices "
+            "JOIN cte1 ON invoices.contract_id = cte1.id) "
+            "SELECT cte1.id AS id, cte2.id AS id_1, "
+            "cte2.contract_id AS contract_id "
+            "FROM cte1, cte2) AS anon_1 ON true",
         )

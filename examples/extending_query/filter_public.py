@@ -14,10 +14,18 @@ that should be applied on a per-request basis, etc.
 
 from sqlalchemy import Boolean
 from sqlalchemy import Column
+from sqlalchemy import create_engine
 from sqlalchemy import event
+from sqlalchemy import ForeignKey
+from sqlalchemy import Integer
 from sqlalchemy import orm
+from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import true
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker
 
 
 @event.listens_for(Session, "do_orm_execute")
@@ -50,20 +58,13 @@ def _add_filtering_criteria(execute_state):
         )
 
 
-class HasPrivate(object):
+class HasPrivate:
     """Mixin that identifies a class as having private entities"""
 
     public = Column(Boolean, nullable=False)
 
 
 if __name__ == "__main__":
-
-    from sqlalchemy import Integer, Column, String, ForeignKey, Boolean
-    from sqlalchemy import select
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import relationship, sessionmaker
-    from sqlalchemy.ext.declarative import declarative_base
-
     Base = declarative_base()
 
     class User(HasPrivate, Base):
@@ -85,7 +86,7 @@ if __name__ == "__main__":
     engine = create_engine("sqlite://", echo=True)
     Base.metadata.create_all(engine)
 
-    Session = sessionmaker(bind=engine, future=True)
+    Session = sessionmaker(bind=engine)
 
     sess = Session()
 

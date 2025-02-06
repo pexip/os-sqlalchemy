@@ -81,9 +81,6 @@ as long as the names match up::
 Above, the presence of ``**kw`` tells :func:`.listens_for` that
 arguments should be passed to the function by name, rather than positionally.
 
-.. versionadded:: 0.9.0 Added optional ``named`` argument dispatch to
-   event calling.
-
 Targets
 -------
 
@@ -106,7 +103,7 @@ and objects::
 
 
     my_pool = QueuePool(connect)
-    my_engine = create_engine("postgresql://ed@localhost/test")
+    my_engine = create_engine("postgresql+psycopg2://ed@localhost/test")
 
     # associate listener with all instances of Pool
     listen(Pool, "connect", my_on_connect)
@@ -142,6 +139,33 @@ this value can be supported::
     # setup listener on UserContact.phone attribute, instructing
     # it to use the return value
     listen(UserContact.phone, "set", validate_phone, retval=True)
+
+Events and Multiprocessing
+--------------------------
+
+SQLAlchemy's event hooks are implemented with Python functions and objects,
+so events propagate via Python function calls.
+Python multiprocessing follows the
+same way we think about OS multiprocessing,
+such as a parent process forking a child process,
+thus we can describe the SQLAlchemy event system's behavior using the same model.
+
+Event hooks registered in a parent process
+will be present in new child processes
+that are forked from that parent after the hooks have been registered,
+since the child process starts with
+a copy of all existing Python structures from the parent when spawned.
+Child processes that already exist before the hooks are registered
+will not receive those new event hooks,
+as changes made to Python structures in a parent process
+do not propagate to child processes.
+
+For the events themselves, these are Python function calls,
+which do not have any ability to propagate between processes.
+SQLAlchemy's event system does not implement any inter-process communication.
+It is possible to implement event hooks
+that use Python inter-process messaging within them,
+however this would need to be implemented by the user.
 
 Event Reference
 ---------------

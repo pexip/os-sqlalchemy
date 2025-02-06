@@ -1,3 +1,88 @@
+sqlalchemy (2.0.40+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+  * Run tests in parrallel (closes: 1079700)
+  * Drop python3-mypy from autopkgtest's dep. (closes: 1086031)
+
+ -- Piotr Ożarowski <piotr@debian.org>  Thu, 06 Feb 2025 12:19:07 +0100
+
+sqlalchemy (2.0.32+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+  * Disable deprecated mypy plugin tests (test_plugin_files) closes: 1076928
+
+ -- Piotr Ożarowski <piotr@debian.org>  Fri, 23 Aug 2024 09:52:58 +0200
+
+sqlalchemy (2.0.31+ds1-2) unstable; urgency=medium
+
+  * Disable deprecated mypy plugin tests (test_plugin_files)
+    and remove python3-mypy from Build-Depends closes: 1076928
+
+ -- Piotr Ożarowski <piotr@debian.org>  Fri, 23 Aug 2024 09:49:25 +0200
+
+sqlalchemy (2.0.31+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 24 Jun 2024 11:48:18 +0200
+
+sqlalchemy (2.0.30+ds1-3) unstable; urgency=medium
+
+  * Add python3-mypy to dependencies needed during autopkgtest
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 10 Jun 2024 11:35:12 +0200
+
+sqlalchemy (2.0.30+ds1-2) unstable; urgency=medium
+
+  * Set minimum required version for python3-pg8000 package to 1.29.1
+    (closes: 1001078)
+  * Set minimum required version for python3-typing-extensions package to 4.6.0
+    (closes: 1071987)
+  * Update list of suggested DB drivers (in Suggests and README.Debian)
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 27 May 2024 10:09:37 +0200
+
+sqlalchemy (2.0.30+ds1-1) unstable; urgency=medium
+
+  * Upload to unstable
+  * New upstream release (closes: 1030164, 1057443, 1058102, 1058265)
+  * Require Sphinx >= 5.0.1 (closes: 1004945)
+  * Suggest python3-pg8000 for PostgreSQL support (closes: 592267)
+  * Drop Debian Python Team from Uploaders
+  * Update standards version to 4.7.0, no changes needed.
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 13 May 2024 22:18:04 +0200
+
+sqlalchemy (2.0.19+ds1-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Fri, 21 Jul 2023 13:51:22 +0200
+
+sqlalchemy (2.0.18+ds1-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 10 Jul 2023 15:05:37 +0200
+
+sqlalchemy (2.0.17+ds1-1) experimental; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Mon, 26 Jun 2023 11:05:49 +0200
+
+sqlalchemy (1.4.48+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Fri, 12 May 2023 21:51:33 +0200
+
+sqlalchemy (1.4.47+ds1-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Piotr Ożarowski <piotr@debian.org>  Thu, 30 Mar 2023 13:41:30 +0200
+
 sqlalchemy (1.4.46+ds1-1) unstable; urgency=medium
 
   * New upstream release

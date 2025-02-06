@@ -3,6 +3,11 @@ These are generally tests derived from specific user issues.
 
 """
 
+from __future__ import annotations
+
+from typing import Optional
+
+from sqlalchemy import and_
 from sqlalchemy import exists
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
@@ -17,20 +22,28 @@ from sqlalchemy.orm import aliased
 from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import column_property
 from sqlalchemy.orm import contains_eager
+from sqlalchemy.orm import immediateload
 from sqlalchemy.orm import join
 from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm import with_polymorphic
 from sqlalchemy.orm.interfaces import MANYTOONE
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
+from sqlalchemy.testing import config
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
-from sqlalchemy.testing.fixtures import ComparableEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
+from sqlalchemy.testing.provision import normalize_sequence
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -48,7 +61,9 @@ class RelationshipTest1(fixtures.MappedTest):
             Column(
                 "person_id",
                 Integer,
-                Sequence("person_id_seq", optional=True),
+                normalize_sequence(
+                    config, Sequence("person_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column(
@@ -249,7 +264,7 @@ class RelationshipTest2(fixtures.MappedTest):
 
         if usedata:
 
-            class Data(object):
+            class Data:
                 def __init__(self, data):
                     self.data = data
 
@@ -553,7 +568,7 @@ class RelationshipTest4(fixtures.MappedTest):
         how to alias the primaryjoin to the polymorphic union ?"""
 
         # class definitions
-        class Person(object):
+        class Person:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -572,7 +587,7 @@ class RelationshipTest4(fixtures.MappedTest):
                     self.longer_status,
                 )
 
-        class Car(object):
+        class Car:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -731,7 +746,7 @@ class RelationshipTest5(fixtures.MappedTest):
         """test parent object with child relationship to an inheriting mapper,
         using eager loads, works when there are no child objects present"""
 
-        class Person(object):
+        class Person:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -750,7 +765,7 @@ class RelationshipTest5(fixtures.MappedTest):
                     self.longer_status,
                 )
 
-        class Car(object):
+        class Car:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -943,7 +958,7 @@ class RelationshipTest7(fixtures.MappedTest):
         """test that lazy load clause to a polymorphic child mapper generates
         correctly [ticket:493]"""
 
-        class PersistentObject(object):
+        class PersistentObject:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -1069,7 +1084,7 @@ class RelationshipTest8(fixtures.MappedTest):
         )
 
     def test_selfref_onjoined(self):
-        class Taggable(fixtures.ComparableEntity):
+        class Taggable(ComparableEntity):
             pass
 
         class User(Taggable):
@@ -1123,7 +1138,6 @@ class ColPropWAliasJoinedToBaseTest(
         Base = cls.DeclarativeBasic
 
         class Content(Base):
-
             __tablename__ = "content"
 
             id = Column(Integer, primary_key=True)
@@ -1133,7 +1147,6 @@ class ColPropWAliasJoinedToBaseTest(
             __mapper_args__ = {"polymorphic_on": type}
 
         class Folder(Content):
-
             __tablename__ = "folder"
 
             id = Column(ForeignKey("content.id"), primary_key=True)
@@ -1408,7 +1421,6 @@ class GenerativeTest(fixtures.MappedTest, AssertsExecutionResults):
             "Status", "Person", "Engineer", "Manager", "Car"
         )
         with sessionmaker(connection).begin() as session:
-
             active = Status(name="active")
             dead = Status(name="dead")
 
@@ -1535,7 +1547,7 @@ class MultiLevelTest(fixtures.MappedTest):
         )
 
     def test_threelevels(self):
-        class Employee(object):
+        class Employee:
             def set(me, **kargs):
                 for k, v in kargs.items():
                     setattr(me, k, v)
@@ -1617,8 +1629,8 @@ class MultiLevelTest(fixtures.MappedTest):
         session.add(b)
         session.add(c)
         session.flush()
-        assert set(session.query(Employee).all()) == set([a, b, c])
-        assert set(session.query(Engineer).all()) == set([b, c])
+        assert set(session.query(Employee).all()) == {a, b, c}
+        assert set(session.query(Engineer).all()) == {b, c}
         assert session.query(Manager).all() == [c]
 
 
@@ -1666,13 +1678,13 @@ class ManyToManyPolyTest(fixtures.MappedTest):
         aren't attempted to be matched to the target polymorphic
         selectable"""
 
-        class BaseItem(object):
+        class BaseItem:
             pass
 
         class Item(BaseItem):
             pass
 
-        class Collection(object):
+        class Collection:
             pass
 
         item_join = polymorphic_union(
@@ -1735,7 +1747,7 @@ class CustomPKTest(fixtures.MappedTest):
         """test that the primary_key attribute is propagated to the
         polymorphic mapper"""
 
-        class T1(object):
+        class T1:
             pass
 
         class T2(T1):
@@ -1783,7 +1795,7 @@ class CustomPKTest(fixtures.MappedTest):
         """test that a composite primary key attribute formed by a join
         is "collapsed" into its minimal columns"""
 
-        class T1(object):
+        class T1:
             pass
 
         class T2(T1):
@@ -1869,14 +1881,14 @@ class InheritingEagerTest(fixtures.MappedTest):
         """test that Query uses the full set of mapper._eager_loaders
         when generating SQL"""
 
-        class Person(fixtures.ComparableEntity):
+        class Person(ComparableEntity):
             pass
 
         class Employee(Person):
             def __init__(self, name="bob"):
                 self.name = name
 
-        class Tag(fixtures.ComparableEntity):
+        class Tag(ComparableEntity):
             def __init__(self, label):
                 self.label = label
 
@@ -2266,7 +2278,7 @@ class ColSubclassTest(
         s = fixture_session()
         with testing.expect_warnings(
             "An alias is being generated automatically "
-            "against joined entity mapped class B->b due to overlapping"
+            r"against joined entity Mapper\[B\(b\)\] due to overlapping"
         ):
             self.assert_compile(
                 s.query(A).join(B).filter(B.x == "test"),
@@ -2298,7 +2310,6 @@ class CorrelateExceptWPolyAdaptTest(
     __dialect__ = "default"
 
     def _fixture(self, use_correlate_except):
-
         Base = self.DeclarativeBasic
 
         class Superclass(Base):
@@ -2395,3 +2406,920 @@ class CorrelateExceptWPolyAdaptTest(
             "LEFT OUTER JOIN s2 ON s1.id = s2.id "
             "JOIN c ON c.id = s1.common_id WHERE c.id = :id_1",
         )
+
+
+class Issue8168Test(AssertsCompiledSQL, fixtures.TestBase):
+    """tests for #8168 which was fixed by #8456"""
+
+    __dialect__ = "default"
+
+    @testing.fixture
+    def mapping(self, decl_base):
+        Base = decl_base
+
+        def go(scenario, use_poly, use_poly_on_retailer):
+            class Customer(Base):
+                __tablename__ = "customer"
+                id = Column(Integer, primary_key=True)
+                type = Column(String(20))
+
+                __mapper_args__ = {
+                    "polymorphic_on": "type",
+                    "polymorphic_identity": "customer",
+                }
+
+            class Store(Customer):
+                __tablename__ = "store"
+                id = Column(
+                    Integer, ForeignKey("customer.id"), primary_key=True
+                )
+                retailer_id = Column(Integer, ForeignKey("retailer.id"))
+                retailer = relationship(
+                    "Retailer",
+                    back_populates="stores",
+                    foreign_keys=[retailer_id],
+                )
+
+                __mapper_args__ = {
+                    "polymorphic_identity": "store",
+                    "polymorphic_load": "inline" if use_poly else None,
+                }
+
+            class Retailer(Customer):
+                __tablename__ = "retailer"
+                id = Column(
+                    Integer, ForeignKey("customer.id"), primary_key=True
+                )
+                stores = relationship(
+                    "Store",
+                    back_populates="retailer",
+                    foreign_keys=[Store.retailer_id],
+                )
+
+                if scenario.mapped_cls:
+                    store_tgt = corr_except = Store
+
+                elif scenario.table:
+                    corr_except = Store.__table__
+                    store_tgt = Store.__table__.c
+                elif scenario.table_alias:
+                    corr_except = Store.__table__.alias()
+                    store_tgt = corr_except.c
+                else:
+                    scenario.fail()
+
+                store_count = column_property(
+                    select(func.count(store_tgt.id))
+                    .where(store_tgt.retailer_id == id)
+                    .correlate_except(corr_except)
+                    .scalar_subquery()
+                )
+
+                __mapper_args__ = {
+                    "polymorphic_identity": "retailer",
+                    "polymorphic_load": (
+                        "inline" if use_poly_on_retailer else None
+                    ),
+                }
+
+            return Customer, Store, Retailer
+
+        yield go
+
+    @testing.variation("scenario", ["mapped_cls", "table", "table_alias"])
+    @testing.variation("use_poly", [True, False])
+    @testing.variation("use_poly_on_retailer", [True, False])
+    def test_select_attr_only(
+        self, scenario, use_poly, use_poly_on_retailer, mapping
+    ):
+        Customer, Store, Retailer = mapping(
+            scenario, use_poly, use_poly_on_retailer
+        )
+
+        if scenario.mapped_cls:
+            self.assert_compile(
+                select(Retailer.store_count).select_from(Retailer),
+                "SELECT (SELECT count(store.id) AS count_1 "
+                "FROM customer JOIN store ON customer.id = store.id "
+                "WHERE store.retailer_id = retailer.id) AS anon_1 "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        elif scenario.table:
+            self.assert_compile(
+                select(Retailer.store_count).select_from(Retailer),
+                "SELECT (SELECT count(store.id) AS count_1 "
+                "FROM store "
+                "WHERE store.retailer_id = retailer.id) AS anon_1 "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        elif scenario.table_alias:
+            self.assert_compile(
+                select(Retailer.store_count).select_from(Retailer),
+                "SELECT (SELECT count(store_1.id) AS count_1 FROM store "
+                "AS store_1 "
+                "WHERE store_1.retailer_id = retailer.id) AS anon_1 "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        else:
+            scenario.fail()
+
+    @testing.variation("scenario", ["mapped_cls", "table", "table_alias"])
+    @testing.variation("use_poly", [True, False])
+    @testing.variation("use_poly_on_retailer", [True, False])
+    def test_select_cls(
+        self, scenario, mapping, use_poly, use_poly_on_retailer
+    ):
+        Customer, Store, Retailer = mapping(
+            scenario, use_poly, use_poly_on_retailer
+        )
+
+        if scenario.mapped_cls:
+            self.assert_compile(
+                select(Retailer),
+                "SELECT (SELECT count(store.id) AS count_1 FROM customer "
+                "JOIN store ON customer.id = store.id "
+                "WHERE store.retailer_id = retailer.id) AS anon_1, "
+                "retailer.id, customer.id AS id_1, customer.type "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        elif scenario.table:
+            self.assert_compile(
+                select(Retailer),
+                "SELECT (SELECT count(store.id) AS count_1 FROM store "
+                "WHERE store.retailer_id = retailer.id) AS anon_1, "
+                "retailer.id, customer.id AS id_1, customer.type "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        elif scenario.table_alias:
+            self.assert_compile(
+                select(Retailer),
+                "SELECT (SELECT count(store_1.id) AS count_1 "
+                "FROM store AS store_1 WHERE store_1.retailer_id = "
+                "retailer.id) AS anon_1, retailer.id, customer.id AS id_1, "
+                "customer.type "
+                "FROM customer JOIN retailer ON customer.id = retailer.id",
+            )
+        else:
+            scenario.fail()
+
+
+class PolyIntoSelfReferentialTest(
+    fixtures.DeclarativeMappedTest, AssertsExecutionResults
+):
+    """test for #9715"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(Base):
+            __tablename__ = "a"
+
+            id: Mapped[int] = mapped_column(
+                primary_key=True, autoincrement=True
+            )
+
+            rel_id: Mapped[int] = mapped_column(ForeignKey("related.id"))
+
+            related = relationship("Related")
+
+        class Related(Base):
+            __tablename__ = "related"
+
+            id: Mapped[int] = mapped_column(
+                primary_key=True, autoincrement=True
+            )
+            rel_data: Mapped[str]
+            type: Mapped[str] = mapped_column()
+
+            other_related_id: Mapped[int] = mapped_column(
+                ForeignKey("other_related.id")
+            )
+
+            other_related = relationship("OtherRelated")
+
+            __mapper_args__ = {
+                "polymorphic_identity": "related",
+                "polymorphic_on": type,
+            }
+
+        class SubRelated(Related):
+            __tablename__ = "sub_related"
+
+            id: Mapped[int] = mapped_column(
+                ForeignKey("related.id"), primary_key=True
+            )
+            sub_rel_data: Mapped[str]
+
+            __mapper_args__ = {"polymorphic_identity": "sub_related"}
+
+        class OtherRelated(Base):
+            __tablename__ = "other_related"
+
+            id: Mapped[int] = mapped_column(
+                primary_key=True, autoincrement=True
+            )
+            name: Mapped[str]
+
+            parent_id: Mapped[Optional[int]] = mapped_column(
+                ForeignKey("other_related.id")
+            )
+            parent = relationship("OtherRelated", lazy="raise", remote_side=id)
+
+    @classmethod
+    def insert_data(cls, connection):
+        A, SubRelated, OtherRelated = cls.classes(
+            "A", "SubRelated", "OtherRelated"
+        )
+
+        with Session(connection) as sess:
+            grandparent_otherrel1 = OtherRelated(name="GP1")
+            grandparent_otherrel2 = OtherRelated(name="GP2")
+
+            parent_otherrel1 = OtherRelated(
+                name="P1", parent=grandparent_otherrel1
+            )
+            parent_otherrel2 = OtherRelated(
+                name="P2", parent=grandparent_otherrel2
+            )
+
+            otherrel1 = OtherRelated(name="A1", parent=parent_otherrel1)
+            otherrel3 = OtherRelated(name="A2", parent=parent_otherrel2)
+
+            address1 = SubRelated(
+                rel_data="ST1", other_related=otherrel1, sub_rel_data="w1"
+            )
+            address3 = SubRelated(
+                rel_data="ST2", other_related=otherrel3, sub_rel_data="w2"
+            )
+
+            a1 = A(related=address1)
+            a2 = A(related=address3)
+
+            sess.add_all([a1, a2])
+            sess.commit()
+
+    def _run_load(self, *opt):
+        A = self.classes.A
+        stmt = select(A).options(*opt)
+
+        sess = fixture_session()
+        all_a = sess.scalars(stmt).all()
+
+        sess.close()
+
+        with self.assert_statement_count(testing.db, 0):
+            for a1 in all_a:
+                d1 = a1.related
+                d2 = d1.other_related
+                d3 = d2.parent
+                d4 = d3.parent
+                assert d4.name in ("GP1", "GP2")
+
+    @testing.variation("use_workaround", [True, False])
+    def test_workaround(self, use_workaround):
+        A, Related, SubRelated, OtherRelated = self.classes(
+            "A", "Related", "SubRelated", "OtherRelated"
+        )
+
+        related = with_polymorphic(Related, [SubRelated], flat=True)
+
+        opt = [
+            (
+                joinedload(A.related.of_type(related))
+                .joinedload(related.other_related)
+                .joinedload(
+                    OtherRelated.parent,
+                )
+            )
+        ]
+        if use_workaround:
+            opt.append(
+                joinedload(
+                    A.related,
+                    Related.other_related,
+                    OtherRelated.parent,
+                    OtherRelated.parent,
+                )
+            )
+        else:
+            opt[0] = opt[0].joinedload(OtherRelated.parent)
+
+        self._run_load(*opt)
+
+    @testing.combinations(
+        (("joined", "joined", "joined", "joined"),),
+        (("selectin", "selectin", "selectin", "selectin"),),
+        (("selectin", "selectin", "joined", "joined"),),
+        (("selectin", "selectin", "joined", "selectin"),),
+        (("joined", "selectin", "joined", "selectin"),),
+        # TODO: immediateload (and lazyload) do not support the target item
+        # being a with_polymorphic.  this seems to be a limitation in the
+        # current_path logic
+        # (("immediate", "joined", "joined", "joined"),),
+        argnames="loaders",
+    )
+    @testing.variation("use_wpoly", [True, False])
+    def test_all_load(self, loaders, use_wpoly):
+        A, Related, SubRelated, OtherRelated = self.classes(
+            "A", "Related", "SubRelated", "OtherRelated"
+        )
+
+        if use_wpoly:
+            related = with_polymorphic(Related, [SubRelated], flat=True)
+        else:
+            related = SubRelated
+
+        opt = None
+        for i, (load_type, element) in enumerate(
+            zip(
+                loaders,
+                [
+                    A.related.of_type(related),
+                    related.other_related,
+                    OtherRelated.parent,
+                    OtherRelated.parent,
+                ],
+            )
+        ):
+            if i == 0:
+                if load_type == "joined":
+                    opt = joinedload(element)
+                elif load_type == "selectin":
+                    opt = selectinload(element)
+                elif load_type == "immediate":
+                    opt = immediateload(element)
+                else:
+                    assert False
+            else:
+                assert opt is not None
+                if load_type == "joined":
+                    opt = opt.joinedload(element)
+                elif load_type == "selectin":
+                    opt = opt.selectinload(element)
+                elif load_type == "immediate":
+                    opt = opt.immediateload(element)
+                else:
+                    assert False
+
+        self._run_load(opt)
+
+
+class AdaptExistsSubqTest(fixtures.DeclarativeMappedTest):
+    """test for #9777"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class Discriminator(Base):
+            __tablename__ = "discriminator"
+            id = Column(Integer, primary_key=True, autoincrement=False)
+            value = Column(String(50))
+
+        class Entity(Base):
+            __tablename__ = "entity"
+            __mapper_args__ = {"polymorphic_on": "type"}
+
+            id = Column(Integer, primary_key=True, autoincrement=False)
+            type = Column(String(50))
+
+            discriminator_id = Column(
+                ForeignKey("discriminator.id"), nullable=False
+            )
+            discriminator = relationship(
+                "Discriminator", foreign_keys=discriminator_id
+            )
+
+        class Parent(Entity):
+            __tablename__ = "parent"
+            __mapper_args__ = {"polymorphic_identity": "parent"}
+
+            id = Column(Integer, ForeignKey("entity.id"), primary_key=True)
+            some_data = Column(String(30))
+
+        class Child(Entity):
+            __tablename__ = "child"
+            __mapper_args__ = {"polymorphic_identity": "child"}
+
+            id = Column(Integer, ForeignKey("entity.id"), primary_key=True)
+
+            some_data = Column(String(30))
+            parent_id = Column(ForeignKey("parent.id"), nullable=False)
+            parent = relationship(
+                "Parent",
+                foreign_keys=parent_id,
+                backref="children",
+            )
+
+    @classmethod
+    def insert_data(cls, connection):
+        Parent, Child, Discriminator = cls.classes(
+            "Parent", "Child", "Discriminator"
+        )
+
+        with Session(connection) as sess:
+            discriminator_zero = Discriminator(id=1, value="zero")
+            discriminator_one = Discriminator(id=2, value="one")
+            discriminator_two = Discriminator(id=3, value="two")
+
+            parent = Parent(id=1, discriminator=discriminator_zero)
+            child_1 = Child(
+                id=2,
+                discriminator=discriminator_one,
+                parent=parent,
+                some_data="c1data",
+            )
+            child_2 = Child(
+                id=3,
+                discriminator=discriminator_two,
+                parent=parent,
+                some_data="c2data",
+            )
+            sess.add_all([parent, child_1, child_2])
+            sess.commit()
+
+    def test_explicit_aliasing(self):
+        Parent, Child, Discriminator = self.classes(
+            "Parent", "Child", "Discriminator"
+        )
+
+        parent_id = 1
+        discriminator_one_id = 2
+
+        session = fixture_session()
+        c_alias = aliased(Child, flat=True)
+        retrieved = (
+            session.query(Parent)
+            .filter_by(id=parent_id)
+            .outerjoin(
+                Parent.children.of_type(c_alias).and_(
+                    c_alias.discriminator.has(
+                        and_(
+                            Discriminator.id == discriminator_one_id,
+                            c_alias.some_data == "c1data",
+                        )
+                    )
+                )
+            )
+            .options(contains_eager(Parent.children.of_type(c_alias)))
+            .populate_existing()
+            .one()
+        )
+        eq_(len(retrieved.children), 1)
+
+    def test_implicit_aliasing(self):
+        Parent, Child, Discriminator = self.classes(
+            "Parent", "Child", "Discriminator"
+        )
+
+        parent_id = 1
+        discriminator_one_id = 2
+
+        session = fixture_session()
+        q = (
+            session.query(Parent)
+            .filter_by(id=parent_id)
+            .outerjoin(
+                Parent.children.and_(
+                    Child.discriminator.has(
+                        and_(
+                            Discriminator.id == discriminator_one_id,
+                            Child.some_data == "c1data",
+                        )
+                    )
+                )
+            )
+            .options(contains_eager(Parent.children))
+            .populate_existing()
+        )
+
+        with expect_warnings("An alias is being generated automatically"):
+            retrieved = q.one()
+
+        eq_(len(retrieved.children), 1)
+
+    @testing.combinations(joinedload, selectinload, argnames="loader")
+    def test_eager_loaders(self, loader):
+        Parent, Child, Discriminator = self.classes(
+            "Parent", "Child", "Discriminator"
+        )
+
+        parent_id = 1
+        discriminator_one_id = 2
+
+        session = fixture_session()
+        retrieved = (
+            session.query(Parent)
+            .filter_by(id=parent_id)
+            .options(
+                loader(
+                    Parent.children.and_(
+                        Child.discriminator.has(
+                            and_(
+                                Discriminator.id == discriminator_one_id,
+                                Child.some_data == "c1data",
+                            )
+                        )
+                    )
+                )
+            )
+            .populate_existing()
+            .one()
+        )
+
+        eq_(len(retrieved.children), 1)
+
+
+@testing.combinations(
+    ("single",),
+    ("joined",),
+    id_="s",
+    argnames="inheritance_type",
+)
+class MultiOfTypeContainsEagerTest(fixtures.DeclarativeMappedTest):
+    """test for #10006"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        employee_m2m = Table(
+            "employee_m2m",
+            Base.metadata,
+            Column(
+                "left", Integer, ForeignKey("employee.id"), primary_key=True
+            ),
+            Column(
+                "right", Integer, ForeignKey("employee.id"), primary_key=True
+            ),
+        )
+
+        class Property(ComparableEntity, Base):
+            __tablename__ = "property"
+            id: Mapped[int] = mapped_column(primary_key=True)
+            value: Mapped[str] = mapped_column(name="value")
+            user_id: Mapped[int] = mapped_column(ForeignKey("employee.id"))
+
+        class Employee(ComparableEntity, Base):
+            __tablename__ = "employee"
+            id: Mapped[int] = mapped_column(primary_key=True)
+            name: Mapped[str]
+            type: Mapped[str]
+            prop1 = relationship(Property, lazy="raise", uselist=False)
+
+            colleagues = relationship(
+                "Employee",
+                secondary=employee_m2m,
+                primaryjoin=lambda: Employee.id == employee_m2m.c.left,
+                secondaryjoin=lambda: Employee.id == employee_m2m.c.right,
+                lazy="raise",
+                collection_class=set,
+            )
+
+            __mapper_args__ = {
+                "polymorphic_on": "type",
+                "polymorphic_identity": "employee",
+            }
+
+        class Manager(Employee):
+            if cls.inheritance_type == "joined":
+                __tablename__ = "manager"
+                id: Mapped[int] = mapped_column(  # noqa: A001
+                    ForeignKey("employee.id"), primary_key=True
+                )
+            __mapper_args__ = {"polymorphic_identity": "manager"}
+
+        class Engineer(Employee):
+            if cls.inheritance_type == "joined":
+                __tablename__ = "engineer"
+                id: Mapped[int] = mapped_column(  # noqa: A001
+                    ForeignKey("employee.id"), primary_key=True
+                )
+            __mapper_args__ = {"polymorphic_identity": "engineer"}
+
+        class Clerk(Employee):
+            if cls.inheritance_type == "joined":
+                __tablename__ = "clerk"
+                id: Mapped[int] = mapped_column(  # noqa: A001
+                    ForeignKey("employee.id"), primary_key=True
+                )
+            __mapper_args__ = {"polymorphic_identity": "clerk"}
+
+        class UnitHead(Employee):
+            if cls.inheritance_type == "joined":
+                __tablename__ = "unithead"
+                id: Mapped[int] = mapped_column(  # noqa: A001
+                    ForeignKey("employee.id"), primary_key=True
+                )
+            managers = relationship(
+                "Manager",
+                secondary=employee_m2m,
+                primaryjoin=lambda: Employee.id == employee_m2m.c.left,
+                secondaryjoin=lambda: (
+                    and_(
+                        Employee.id == employee_m2m.c.right,
+                        Employee.type == "manager",
+                    )
+                ),
+                viewonly=True,
+                lazy="raise",
+                collection_class=set,
+            )
+            __mapper_args__ = {"polymorphic_identity": "unithead"}
+
+    @classmethod
+    def insert_data(cls, connection):
+        UnitHead, Manager, Engineer, Clerk, Property = cls.classes(
+            "UnitHead", "Manager", "Engineer", "Clerk", "Property"
+        )
+
+        with Session(connection) as sess:
+            unithead = UnitHead(
+                type="unithead",
+                name="unithead1",
+                prop1=Property(value="val unithead"),
+            )
+            manager = Manager(
+                type="manager",
+                name="manager1",
+                prop1=Property(value="val manager"),
+            )
+            other_manager = Manager(
+                type="manager",
+                name="manager2",
+                prop1=Property(value="val other manager"),
+            )
+            engineer = Engineer(
+                type="engineer",
+                name="engineer1",
+                prop1=Property(value="val engineer"),
+            )
+            clerk = Clerk(
+                type="clerk", name="clerk1", prop1=Property(value="val clerk")
+            )
+            unithead.colleagues.update([manager, other_manager])
+            manager.colleagues.update([engineer, clerk])
+            sess.add_all([unithead, manager, other_manager, engineer, clerk])
+            sess.commit()
+
+    @testing.variation("query_type", ["joinedload", "contains_eager"])
+    @testing.variation("use_criteria", [True, False])
+    def test_big_query(self, query_type, use_criteria):
+        Employee, UnitHead, Manager, Engineer, Clerk, Property = self.classes(
+            "Employee", "UnitHead", "Manager", "Engineer", "Clerk", "Property"
+        )
+
+        if query_type.contains_eager:
+            mgr = aliased(Manager)
+            clg = aliased(Employee)
+            clgs_prop1 = aliased(Property, name="clgs_prop1")
+
+            query = (
+                select(UnitHead)
+                .options(
+                    contains_eager(UnitHead.managers.of_type(mgr))
+                    .contains_eager(mgr.colleagues.of_type(clg))
+                    .contains_eager(clg.prop1.of_type(clgs_prop1)),
+                )
+                .outerjoin(UnitHead.managers.of_type(mgr))
+                .outerjoin(mgr.colleagues.of_type(clg))
+                .outerjoin(clg.prop1.of_type(clgs_prop1))
+            )
+            if use_criteria:
+                ma_prop1 = aliased(Property)
+                uhead_prop1 = aliased(Property)
+                query = (
+                    query.outerjoin(UnitHead.prop1.of_type(uhead_prop1))
+                    .outerjoin(mgr.prop1.of_type(ma_prop1))
+                    .where(
+                        uhead_prop1.value == "val unithead",
+                        ma_prop1.value == "val manager",
+                        clgs_prop1.value == "val engineer",
+                    )
+                )
+        elif query_type.joinedload:
+            if use_criteria:
+                query = (
+                    select(UnitHead)
+                    .options(
+                        joinedload(
+                            UnitHead.managers.and_(
+                                Manager.prop1.has(value="val manager")
+                            )
+                        )
+                        .joinedload(
+                            Manager.colleagues.and_(
+                                Employee.prop1.has(value="val engineer")
+                            )
+                        )
+                        .joinedload(Employee.prop1),
+                    )
+                    .where(UnitHead.prop1.has(value="val unithead"))
+                )
+            else:
+                query = select(UnitHead).options(
+                    joinedload(UnitHead.managers)
+                    .joinedload(Manager.colleagues)
+                    .joinedload(Employee.prop1),
+                )
+
+        session = fixture_session()
+        head = session.scalars(query).unique().one()
+
+        if use_criteria:
+            expected_managers = {
+                Manager(
+                    name="manager1",
+                    colleagues={Engineer(name="engineer1", prop1=Property())},
+                )
+            }
+        else:
+            expected_managers = {
+                Manager(
+                    name="manager1",
+                    colleagues={
+                        Engineer(name="engineer1", prop1=Property()),
+                        Clerk(name="clerk1"),
+                    },
+                ),
+                Manager(name="manager2"),
+            }
+        eq_(
+            head,
+            UnitHead(managers=expected_managers),
+        )
+
+
+@testing.combinations(
+    (2,),
+    (3,),
+    id_="s",
+    argnames="num_levels",
+)
+@testing.combinations(
+    ("with_poly_star",),
+    ("inline",),
+    ("selectin",),
+    ("none",),
+    id_="s",
+    argnames="wpoly_type",
+)
+class SubclassWithPolyEagerLoadTest(fixtures.DeclarativeMappedTest):
+    """test #11446"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class B(Base):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+
+        class A(Base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            type = Column(String(10))
+            bs = relationship("B")
+
+            if cls.wpoly_type == "selectin":
+                __mapper_args__ = {"polymorphic_on": "type"}
+            elif cls.wpoly_type == "inline":
+                __mapper_args__ = {"polymorphic_on": "type"}
+            elif cls.wpoly_type == "with_poly_star":
+                __mapper_args__ = {
+                    "with_polymorphic": "*",
+                    "polymorphic_on": "type",
+                }
+            else:
+                __mapper_args__ = {"polymorphic_on": "type"}
+
+        class ASub(A):
+            __tablename__ = "asub"
+            id = Column(ForeignKey("a.id"), primary_key=True)
+            sub_data = Column(String(10))
+
+            if cls.wpoly_type == "selectin":
+                __mapper_args__ = {
+                    "polymorphic_load": "selectin",
+                    "polymorphic_identity": "asub",
+                }
+            elif cls.wpoly_type == "inline":
+                __mapper_args__ = {
+                    "polymorphic_load": "inline",
+                    "polymorphic_identity": "asub",
+                }
+            elif cls.wpoly_type == "with_poly_star":
+                __mapper_args__ = {
+                    "with_polymorphic": "*",
+                    "polymorphic_identity": "asub",
+                }
+            else:
+                __mapper_args__ = {"polymorphic_identity": "asub"}
+
+        if cls.num_levels == 3:
+
+            class ASubSub(ASub):
+                __tablename__ = "asubsub"
+                id = Column(ForeignKey("asub.id"), primary_key=True)
+                sub_sub_data = Column(String(10))
+
+                if cls.wpoly_type == "selectin":
+                    __mapper_args__ = {
+                        "polymorphic_load": "selectin",
+                        "polymorphic_identity": "asubsub",
+                    }
+                elif cls.wpoly_type == "inline":
+                    __mapper_args__ = {
+                        "polymorphic_load": "inline",
+                        "polymorphic_identity": "asubsub",
+                    }
+                elif cls.wpoly_type == "with_poly_star":
+                    __mapper_args__ = {
+                        "with_polymorphic": "*",
+                        "polymorphic_identity": "asubsub",
+                    }
+                else:
+                    __mapper_args__ = {"polymorphic_identity": "asubsub"}
+
+    @classmethod
+    def insert_data(cls, connection):
+        if cls.num_levels == 3:
+            ASubSub, B = cls.classes("ASubSub", "B")
+
+            with Session(connection) as sess:
+                sess.add_all(
+                    [
+                        ASubSub(
+                            sub_data="sub",
+                            sub_sub_data="subsub",
+                            bs=[B(), B(), B()],
+                        )
+                        for i in range(3)
+                    ]
+                )
+
+                sess.commit()
+        else:
+            ASub, B = cls.classes("ASub", "B")
+
+            with Session(connection) as sess:
+                sess.add_all(
+                    [
+                        ASub(sub_data="sub", bs=[B(), B(), B()])
+                        for i in range(3)
+                    ]
+                )
+                sess.commit()
+
+    @testing.variation("query_from", ["aliased_class", "class_", "parent"])
+    @testing.combinations(selectinload, subqueryload, argnames="loader_fn")
+    def test_thing(self, query_from, loader_fn):
+
+        A = self.classes.A
+
+        if self.num_levels == 2:
+            target = self.classes.ASub
+        elif self.num_levels == 3:
+            target = self.classes.ASubSub
+
+        if query_from.aliased_class:
+            asub_alias = aliased(target)
+            query = select(asub_alias).options(loader_fn(asub_alias.bs))
+        elif query_from.class_:
+            query = select(target).options(loader_fn(A.bs))
+        elif query_from.parent:
+            query = select(A).options(loader_fn(A.bs))
+
+        s = fixture_session()
+
+        # NOTE: this is likely a different bug - setting
+        # polymorphic_load to "inline" and loading from the parent does not
+        # descend to the ASubSub subclass; however "selectin" setting
+        # **does**.   this is inconsistent
+        if (
+            query_from.parent
+            and self.wpoly_type == "inline"
+            and self.num_levels == 3
+        ):
+            # this should ideally be "2"
+            expected_q = 5
+
+        elif query_from.parent and self.wpoly_type == "none":
+            expected_q = 5
+        elif query_from.parent and self.wpoly_type == "selectin":
+            expected_q = 3
+        else:
+            expected_q = 2
+
+        with self.assert_statement_count(testing.db, expected_q):
+            for obj in s.scalars(query):
+                # test both that with_polymorphic loaded
+                eq_(obj.sub_data, "sub")
+                if self.num_levels == 3:
+                    eq_(obj.sub_sub_data, "subsub")
+
+                # as well as the collection eagerly loaded
+                assert obj.bs

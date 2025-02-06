@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
+from sqlalchemy import true
 from sqlalchemy import tuple_
 from sqlalchemy import union
 from sqlalchemy.sql import column
@@ -16,7 +17,10 @@ from sqlalchemy.sql import literal
 from sqlalchemy.sql import table
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
+from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
 
 table1 = table(
     "mytable",
@@ -54,8 +58,16 @@ grandchild = Table(
 )
 
 
-class FutureSelectTest(fixtures.TestBase, AssertsCompiledSQL):
+class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
+
+    def test_old_bracket_style_fail(self):
+        with expect_raises_message(
+            exc.ArgumentError,
+            r"Column expression, FROM clause, or other columns clause .*"
+            r".*Did you mean to say",
+        ):
+            select([table1.c.myid])
 
     def test_new_calling_style(self):
         stmt = select(table1.c.myid).where(table1.c.myid == table2.c.otherid)
@@ -66,8 +78,31 @@ class FutureSelectTest(fixtures.TestBase, AssertsCompiledSQL):
             "WHERE mytable.myid = myothertable.otherid",
         )
 
+    @testing.combinations(
+        (
+            lambda tbl: select().select_from(tbl).where(tbl.c.id == 123),
+            "SELECT FROM tbl WHERE tbl.id = :id_1",
+        ),
+        (lambda tbl: select().where(true()), "SELECT WHERE 1 = 1"),
+        (
+            lambda tbl: select()
+            .select_from(tbl)
+            .where(tbl.c.id == 123)
+            .exists(),
+            "EXISTS (SELECT FROM tbl WHERE tbl.id = :id_1)",
+        ),
+    )
+    def test_select_no_columns(self, stmt, expected):
+        """test #9440"""
+
+        tbl = table("tbl", column("id"))
+
+        stmt = testing.resolve_lambda(stmt, tbl=tbl)
+
+        self.assert_compile(stmt, expected)
+
     def test_new_calling_style_clauseelement_thing_that_has_iter(self):
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return table1
 
@@ -82,11 +117,11 @@ class FutureSelectTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_new_calling_style_inspectable_ce_thing_that_has_iter(self):
-        class Thing(object):
+        class Thing:
             def __iter__(self):
                 return iter(["a", "b", "c"])
 
-        class InspectedThing(object):
+        class InspectedThing:
             def __clause_element__(self):
                 return table1
 
@@ -433,3 +468,101 @@ class FutureSelectTest(fixtures.TestBase, AssertsCompiledSQL):
             " %(joiner)s SELECT :param_2 AS anon_2"
             " %(joiner)s SELECT :param_3 AS anon_3" % {"joiner": joiner},
         )
+
+    @testing.combinations(
+        lambda stmt: stmt.with_statement_hint("some hint"),
+        lambda stmt: stmt.with_hint(table("x"), "some hint"),
+        lambda stmt: stmt.where(column("q") == 5),
+        lambda stmt: stmt.having(column("q") == 5),
+        lambda stmt: stmt.order_by(column("q")),
+        lambda stmt: stmt.group_by(column("q")),
+        # TODO: continue
+    )
+    def test_methods_generative(self, testcase):
+        s1 = select(1)
+        s2 = testing.resolve_lambda(testcase, stmt=s1)
+
+        assert s1 is not s2
+
+
+class ColumnCollectionAsSelectTest(fixtures.TestBase, AssertsCompiledSQL):
+    """tests related to #8285."""
+
+    __dialect__ = "default"
+
+    def test_c_collection_as_from(self):
+        stmt = select(parent.c)
+
+        # this works because _all_selected_columns expands out
+        # ClauseList.  it does so in the same way that it works for
+        # Table already.  so this is free
+        eq_(stmt._all_selected_columns, [parent.c.id, parent.c.data])
+
+        self.assert_compile(stmt, "SELECT parent.id, parent.data FROM parent")
+
+    def test_c_sub_collection_str_stmt(self):
+        stmt = select(table1.c["myid", "description"])
+
+        self.assert_compile(
+            stmt, "SELECT mytable.myid, mytable.description FROM mytable"
+        )
+
+        subq = stmt.subquery()
+        self.assert_compile(
+            select(subq.c[0]).where(subq.c.description == "x"),
+            "SELECT anon_1.myid FROM (SELECT mytable.myid AS myid, "
+            "mytable.description AS description FROM mytable) AS anon_1 "
+            "WHERE anon_1.description = :description_1",
+        )
+
+    def test_c_sub_collection_int_stmt(self):
+        stmt = select(table1.c[2, 0])
+
+        self.assert_compile(
+            stmt, "SELECT mytable.description, mytable.myid FROM mytable"
+        )
+
+        subq = stmt.subquery()
+        self.assert_compile(
+            select(subq.c.myid).where(subq.c[1] == "x"),
+            "SELECT anon_1.myid FROM (SELECT mytable.description AS "
+            "description, mytable.myid AS myid FROM mytable) AS anon_1 "
+            "WHERE anon_1.myid = :myid_1",
+        )
+
+    def test_c_sub_collection_str(self):
+        coll = table1.c["myid", "description"]
+        is_(coll.myid, table1.c.myid)
+
+        eq_(list(coll), [table1.c.myid, table1.c.description])
+
+    def test_c_sub_collection_int(self):
+        coll = table1.c[2, 0]
+
+        is_(coll.myid, table1.c.myid)
+
+        eq_(list(coll), [table1.c.description, table1.c.myid])
+
+    def test_c_sub_collection_positive_slice(self):
+        coll = table1.c[0:2]
+
+        is_(coll.myid, table1.c.myid)
+        is_(coll.name, table1.c.name)
+
+        eq_(list(coll), [table1.c.myid, table1.c.name])
+
+    def test_c_sub_collection_negative_slice(self):
+        coll = table1.c[-2:]
+
+        is_(coll.name, table1.c.name)
+        is_(coll.description, table1.c.description)
+
+        eq_(list(coll), [table1.c.name, table1.c.description])
+
+    def test_missing_key(self):
+        with expect_raises_message(KeyError, "unknown"):
+            table1.c["myid", "unknown"]
+
+    def test_missing_index(self):
+        with expect_raises_message(IndexError, "5"):
+            table1.c["myid", 5]

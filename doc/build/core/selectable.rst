@@ -1,11 +1,16 @@
-Selectables, Tables, FROM objects
+SELECT and Related Constructs
 =================================
 
-The term "selectable" refers to any object that rows can be selected from;
-in SQLAlchemy, these objects descend from :class:`_expression.FromClause` and their
-distinguishing feature is their :attr:`_expression.FromClause.c` attribute, which is
-a namespace of all the columns contained within the FROM clause (these
-elements are themselves :class:`_expression.ColumnElement` subclasses).
+The term "selectable" refers to any object that represents database rows. In
+SQLAlchemy, these objects descend from :class:`_expression.Selectable`, the
+most prominent being :class:`_expression.Select`, which represents a SQL SELECT
+statement. A subset of :class:`_expression.Selectable` is
+:class:`_expression.FromClause`, which represents objects that can be within
+the FROM clause of a :class:`.Select` statement. A distinguishing feature of
+:class:`_expression.FromClause` is the :attr:`_expression.FromClause.c`
+attribute, which is a namespace of all the columns contained within the FROM
+clause (these elements are themselves :class:`_expression.ColumnElement`
+subclasses).
 
 .. currentmodule:: sqlalchemy.sql.expression
 
@@ -150,27 +155,22 @@ The classes here are generated using the constructors listed at
 .. autoclass:: Values
    :members:
 
+.. autoclass:: ScalarValues
+   :members:
+
 Label Style Constants
 ---------------------
 
 Constants used with the :meth:`_sql.GenerativeSelect.set_label_style`
 method.
 
-.. autodata:: LABEL_STYLE_DISAMBIGUATE_ONLY
+.. autoclass:: SelectLabelStyle
+    :members:
 
-.. autodata:: LABEL_STYLE_NONE
 
-.. autodata:: LABEL_STYLE_TABLENAME_PLUS_COL
+.. seealso::
 
-.. data:: LABEL_STYLE_DEFAULT
+    :meth:`_sql.Select.set_label_style`
 
-  The default label style, refers to :data:`_sql.LABEL_STYLE_DISAMBIGUATE_ONLY`.
-
-  .. versionadded:: 1.4
-
-  .. seealso::
-
-      :meth:`_sql.Select.set_label_style`
-
-      :meth:`_sql.Select.get_label_style`
+    :meth:`_sql.Select.get_label_style`
 

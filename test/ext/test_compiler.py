@@ -16,7 +16,7 @@ from sqlalchemy.ext.compiler import deregister
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateColumn
 from sqlalchemy.schema import CreateTable
-from sqlalchemy.schema import DDLElement
+from sqlalchemy.schema import ExecutableDDLElement
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.expression import BindParameter
 from sqlalchemy.sql.expression import ClauseElement
@@ -40,7 +40,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             inherit_cache = False
 
             def __init__(self, arg=None):
-                super(MyThingy, self).__init__(arg or "MYTHINGY!")
+                super().__init__(arg or "MYTHINGY!")
 
         @compiles(MyThingy)
         def visit_thingy(thingy, compiler, **kw):
@@ -125,7 +125,7 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
             inherit_cache = False
 
             def __init__(self):
-                super(MyThingy, self).__init__("MYTHINGY!")
+                super().__init__("MYTHINGY!")
 
         @compiles(MyThingy)
         def visit_thingy(thingy, compiler, **kw):
@@ -209,9 +209,11 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self.assert_compile(
             stmt,
-            "SELECT my_function(t1.q) AS my_function_1 FROM t1"
-            if named
-            else "SELECT my_function(t1.q) AS anon_1 FROM t1",
+            (
+                "SELECT my_function(t1.q) AS my_function_1 FROM t1"
+                if named
+                else "SELECT my_function(t1.q) AS anon_1 FROM t1"
+            ),
             dialect="sqlite",
         )
 
@@ -275,10 +277,10 @@ class UserDefinedTest(fixtures.TestBase, AssertsCompiledSQL):
                 del Select._compiler_dispatcher
 
     def test_dialect_specific(self):
-        class AddThingy(DDLElement):
+        class AddThingy(ExecutableDDLElement):
             __visit_name__ = "add_thingy"
 
-        class DropThingy(DDLElement):
+        class DropThingy(ExecutableDDLElement):
             __visit_name__ = "drop_thingy"
 
         @compiles(AddThingy, "sqlite")

@@ -1,3 +1,6 @@
+from itertools import zip_longest
+
+from sqlalchemy import bindparam
 from sqlalchemy import Column
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
@@ -5,18 +8,21 @@ from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy import util
+from sqlalchemy import TypeDecorator
 from sqlalchemy.sql import base as sql_base
 from sqlalchemy.sql import coercions
 from sqlalchemy.sql import column
 from sqlalchemy.sql import ColumnElement
 from sqlalchemy.sql import roles
+from sqlalchemy.sql import table
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_not_none
 
 
 class MiscTest(fixtures.TestBase):
@@ -39,6 +45,28 @@ class MiscTest(fixtures.TestBase):
         subset_select = select(common.c.id, common.c.data).alias()
 
         eq_(set(sql_util.find_tables(subset_select)), {common})
+
+    @testing.variation("has_cache_key", [True, False])
+    def test_get_embedded_bindparams(self, has_cache_key):
+        bp = bindparam("x")
+
+        if not has_cache_key:
+
+            class NotCacheable(TypeDecorator):
+                impl = String
+                cache_ok = False
+
+            stmt = select(column("q", NotCacheable())).where(column("y") == bp)
+
+        else:
+            stmt = select(column("q")).where(column("y") == bp)
+
+        eq_(stmt._get_embedded_bindparams(), [bp])
+
+        if not has_cache_key:
+            is_(stmt._generate_cache_key(), None)
+        else:
+            is_not_none(stmt._generate_cache_key())
 
     def test_find_tables_aliases(self):
         metadata = MetaData()
@@ -141,10 +169,18 @@ class MiscTest(fixtures.TestBase):
         ),
     )
     def test_unwrap_order_by(self, expr, expected):
-
         expr = coercions.expect(roles.OrderByRole, expr)
 
         unwrapped = sql_util.unwrap_order_by(expr)
 
-        for a, b in util.zip_longest(unwrapped, expected):
+        for a, b in zip_longest(unwrapped, expected):
             assert a is not None and a.compare(b)
+
+    def test_column_collection_get(self):
+        col_id = column("id", Integer)
+        col_alt = column("alt", Integer)
+        table1 = table("mytable", col_id)
+
+        is_(table1.columns.get("id"), col_id)
+        is_(table1.columns.get("alt"), None)
+        is_(table1.columns.get("alt", col_alt), col_alt)

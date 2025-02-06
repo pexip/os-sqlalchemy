@@ -17,6 +17,5 @@ API Reference
 .. autoclass:: Comparator
 
 
-.. autodata:: HYBRID_METHOD
-
-.. autodata:: HYBRID_PROPERTY
+.. autoclass:: HybridExtensionType
+   :members:

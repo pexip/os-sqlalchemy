@@ -1,5 +1,3 @@
-# coding: utf-8
-
 import re
 
 from sqlalchemy import BigInteger
@@ -30,13 +28,12 @@ from sqlalchemy import types
 from sqlalchemy import Unicode
 from sqlalchemy import UnicodeText
 from sqlalchemy import UniqueConstraint
-from sqlalchemy import util
 from sqlalchemy.dialects.mysql import base as mysql
 from sqlalchemy.dialects.mysql import reflection as _reflection
 from sqlalchemy.schema import CreateIndex
-from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
@@ -241,14 +238,19 @@ class TypeReflectionTest(fixtures.TestBase):
         metadata,
         connection,
     ):
-
         specs = [(mysql.ENUM("", "fleem"), mysql.ENUM("", "fleem"))]
 
         self._run_test(metadata, connection, specs, ["enums"])
 
+    @testing.only_on("mariadb>=10.7")
+    def test_uuid(self, metadata, connection):
+        specs = [
+            (mysql.UUID(), mysql.UUID()),
+        ]
+        self._run_test(metadata, connection, specs, [])
+
 
 class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
-
     __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
@@ -321,6 +323,7 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
                 mysql_avg_row_length="3",
                 mysql_password="secret",
                 mysql_connection="fish",
+                mysql_stats_sample_pages="4",
             )
 
         def_table = Table(
@@ -328,7 +331,7 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             metadata,
             Column("c1", Integer()),
             comment=comment,
-            **kwargs
+            **kwargs,
         )
 
         conn = connection
@@ -365,6 +368,7 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             assert def_table.kwargs["mysql_avg_row_length"] == "3"
             assert def_table.kwargs["mysql_password"] == "secret"
             assert def_table.kwargs["mysql_connection"] == "fish"
+            assert def_table.kwargs["mysql_stats_sample_pages"] == "4"
 
             assert reflected.kwargs["mysql_engine"] == "MEMORY"
 
@@ -376,12 +380,173 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             )
             assert reflected.kwargs["mysql_avg_row_length"] == "3"
             assert reflected.kwargs["mysql_connection"] == "fish"
+            assert reflected.kwargs["mysql_stats_sample_pages"] == "4"
 
             # This field doesn't seem to be returned by mysql itself.
             # assert reflected.kwargs['mysql_password'] == 'secret'
 
             # This is explicitly ignored when reflecting schema.
             # assert reflected.kwargs['mysql_auto_increment'] == '5'
+
+    def _norm_str(self, value, is_definition=False):
+        if is_definition:
+            # partition names on MariaDB contain backticks
+            return value.replace("`", "")
+        else:
+            return value.replace("`", "").replace(" ", "").lower()
+
+    def _norm_reflected_table(self, dialect_name, kwords):
+        dialect_name += "_"
+        normalised_table = {}
+        for k, v in kwords.items():
+            option = k.replace(dialect_name, "")
+            normalised_table[option] = self._norm_str(v)
+        return normalised_table
+
+    def _get_dialect_key(self):
+        if testing.against("mariadb"):
+            return "mariadb"
+        else:
+            return "mysql"
+
+    def test_reflection_with_partition_options(self, metadata, connection):
+        base_kwargs = dict(
+            engine="InnoDB",
+            default_charset="utf8",
+            partition_by="HASH(MONTH(c2))",
+            partitions="6",
+        )
+        dk = self._get_dialect_key()
+
+        kwargs = {f"{dk}_{key}": v for key, v in base_kwargs.items()}
+
+        def_table = Table(
+            "mysql_def",
+            metadata,
+            Column("c1", Integer()),
+            Column("c2", DateTime),
+            **kwargs,
+        )
+        eq_(def_table.kwargs[f"{dk}_partition_by"], "HASH(MONTH(c2))")
+        eq_(def_table.kwargs[f"{dk}_partitions"], "6")
+
+        metadata.create_all(connection)
+        reflected = Table("mysql_def", MetaData(), autoload_with=connection)
+        ref_kw = self._norm_reflected_table(dk, reflected.kwargs)
+        eq_(ref_kw["partition_by"], "hash(month(c2))")
+        eq_(ref_kw["partitions"], "6")
+
+    def test_reflection_with_subpartition_options(self, connection, metadata):
+        subpartititon_text = """HASH (TO_DAYS (c2))
+                                SUBPARTITIONS 2(
+                                 PARTITION p0 VALUES LESS THAN (1990),
+                                 PARTITION p1 VALUES LESS THAN (2000),
+                                 PARTITION p2 VALUES LESS THAN MAXVALUE
+                             );"""
+
+        base_kwargs = dict(
+            engine="InnoDB",
+            default_charset="utf8",
+            partition_by="RANGE(YEAR(c2))",
+            subpartition_by=subpartititon_text,
+        )
+        dk = self._get_dialect_key()
+        kwargs = {f"{dk}_{key}": v for key, v in base_kwargs.items()}
+
+        def_table = Table(
+            "mysql_def",
+            metadata,
+            Column("c1", Integer()),
+            Column("c2", DateTime),
+            **kwargs,
+        )
+
+        eq_(def_table.kwargs[f"{dk}_partition_by"], "RANGE(YEAR(c2))")
+        metadata.create_all(connection)
+
+        reflected = Table("mysql_def", MetaData(), autoload_with=connection)
+        ref_kw = self._norm_reflected_table(dk, reflected.kwargs)
+        opts = reflected.dialect_options[dk]
+
+        eq_(ref_kw["partition_by"], "range(year(c2))")
+        eq_(ref_kw["subpartition_by"], "hash(to_days(c2))")
+        eq_(ref_kw["subpartitions"], "2")
+        part_definitions = (
+            "PARTITION p0 VALUES LESS THAN (1990) ENGINE = InnoDB,"
+            " PARTITION p1 VALUES LESS THAN (2000) ENGINE = InnoDB,"
+            " PARTITION p2 VALUES LESS THAN MAXVALUE ENGINE = InnoDB"
+        )
+        eq_(
+            self._norm_str(opts["partition_definitions"], True),
+            part_definitions,
+        )
+
+    def test_reflection_with_subpartition_options_two(
+        self, connection, metadata
+    ):
+        partititon_text = """RANGE (YEAR (c2))
+                                SUBPARTITION BY HASH( TO_DAYS(c2))(
+                                 PARTITION p0 VALUES LESS THAN (1990)(
+                                 SUBPARTITION s0,
+                                 SUBPARTITION s1
+                                 ),
+                                 PARTITION p1 VALUES LESS THAN (2000)(
+                                 SUBPARTITION s2,
+                                 SUBPARTITION s3
+                                 ),
+                                PARTITION p2 VALUES LESS THAN MAXVALUE(
+                                 SUBPARTITION s4,
+                                 SUBPARTITION s5
+                                 )
+                             );"""
+
+        base_kwargs = dict(
+            engine="InnoDB",
+            default_charset="utf8",
+            partition_by=partititon_text,
+        )
+        dk = self._get_dialect_key()
+        kwargs = {f"{dk}_{key}": v for key, v in base_kwargs.items()}
+
+        def_table = Table(
+            "mysql_def",
+            metadata,
+            Column("c1", Integer()),
+            Column("c2", DateTime),
+            **kwargs,
+        )
+        eq_(def_table.kwargs[f"{dk}_partition_by"], partititon_text)
+
+        metadata.create_all(connection)
+        reflected = Table("mysql_def", MetaData(), autoload_with=connection)
+
+        ref_kw = self._norm_reflected_table(dk, reflected.kwargs)
+        opts = reflected.dialect_options[dk]
+        eq_(ref_kw["partition_by"], "range(year(c2))")
+        eq_(ref_kw["subpartition_by"], "hash(to_days(c2))")
+
+        part_definitions = (
+            "PARTITION p0 VALUES LESS THAN (1990),"
+            " PARTITION p1 VALUES LESS THAN (2000),"
+            " PARTITION p2 VALUES LESS THAN MAXVALUE"
+        )
+        subpart_definitions = (
+            "SUBPARTITION s0 ENGINE = InnoDB,"
+            " SUBPARTITION s1 ENGINE = InnoDB,"
+            " SUBPARTITION s2 ENGINE = InnoDB,"
+            " SUBPARTITION s3 ENGINE = InnoDB,"
+            " SUBPARTITION s4 ENGINE = InnoDB,"
+            " SUBPARTITION s5 ENGINE = InnoDB"
+        )
+
+        eq_(
+            self._norm_str(opts["partition_definitions"], True),
+            part_definitions,
+        )
+        eq_(
+            self._norm_str(opts["subpartition_definitions"], True),
+            subpart_definitions,
+        )
 
     def test_reflection_on_include_columns(self, metadata, connection):
         """Test reflection of include_columns to be sure they respect case."""
@@ -562,6 +727,10 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             )
 
     def test_skip_not_describable(self, metadata, connection):
+        """This test is the only one that test the _default_multi_reflect
+        behaviour with UnreflectableTableError
+        """
+
         @event.listens_for(metadata, "before_drop")
         def cleanup(*arg, **kw):
             with testing.db.begin() as conn:
@@ -583,14 +752,10 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             m.reflect(views=True, bind=conn)
         eq_(m.tables["test_t2"].name, "test_t2")
 
-        assert_raises_message(
-            exc.UnreflectableTableError,
-            "references invalid table",
-            Table,
-            "test_v",
-            MetaData(),
-            autoload_with=conn,
-        )
+        with expect_raises_message(
+            exc.UnreflectableTableError, "references invalid table"
+        ):
+            Table("test_v", MetaData(), autoload_with=conn)
 
     @testing.exclude("mysql", "<", (5, 0, 0), "no information_schema support")
     def test_system_views(self):
@@ -599,103 +764,152 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
         view_names = dialect.get_view_names(connection, "information_schema")
         self.assert_("TABLES" in view_names)
 
-    def test_nullable_reflection(self, metadata, connection):
-        """test reflection of NULL/NOT NULL, in particular with TIMESTAMP
-        defaults where MySQL is inconsistent in how it reports CREATE TABLE.
-
-        """
-        meta = metadata
-
-        # this is ideally one table, but older MySQL versions choke
-        # on the multiple TIMESTAMP columns
-        row = connection.exec_driver_sql(
-            "show variables like '%%explicit_defaults_for_timestamp%%'"
-        ).first()
-        explicit_defaults_for_timestamp = row[1].lower() in ("on", "1", "true")
-
-        reflected = []
-        for idx, cols in enumerate(
+    @testing.combinations(
+        (
             [
-                [
-                    "x INTEGER NULL",
-                    "y INTEGER NOT NULL",
-                    "z INTEGER",
-                    "q TIMESTAMP NULL",
-                ],
-                ["p TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"],
-                ["r TIMESTAMP NOT NULL"],
-                ["s TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"],
-                ["t TIMESTAMP"],
-                ["u TIMESTAMP DEFAULT CURRENT_TIMESTAMP"],
-            ]
-        ):
-            Table("nn_t%d" % idx, meta)  # to allow DROP
-
-            connection.exec_driver_sql(
-                """
-                    CREATE TABLE nn_t%d (
-                        %s
-                    )
-                """
-                % (idx, ", \n".join(cols))
-            )
-
-            reflected.extend(
-                {
-                    "name": d["name"],
-                    "nullable": d["nullable"],
-                    "default": d["default"],
-                }
-                for d in inspect(connection).get_columns("nn_t%d" % idx)
-            )
-
-        if connection.dialect._is_mariadb_102:
-            current_timestamp = "current_timestamp()"
-        else:
-            current_timestamp = "CURRENT_TIMESTAMP"
-
-        eq_(
-            reflected,
+                "x INTEGER NULL",
+                "y INTEGER NOT NULL",
+                "z INTEGER",
+                "q TIMESTAMP NULL",
+            ],
             [
                 {"name": "x", "nullable": True, "default": None},
                 {"name": "y", "nullable": False, "default": None},
                 {"name": "z", "nullable": True, "default": None},
                 {"name": "q", "nullable": True, "default": None},
-                {"name": "p", "nullable": True, "default": current_timestamp},
+            ],
+        ),
+        (
+            ["p TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"],
+            [
+                {
+                    "name": "p",
+                    "nullable": True,
+                    "default": "CURRENT_TIMESTAMP",
+                }
+            ],
+        ),
+        (
+            ["r TIMESTAMP NOT NULL"],
+            [
                 {
                     "name": "r",
                     "nullable": False,
-                    "default": None
-                    if explicit_defaults_for_timestamp
-                    else (
-                        "%(current_timestamp)s "
-                        "ON UPDATE %(current_timestamp)s"
-                    )
-                    % {"current_timestamp": current_timestamp},
-                },
-                {"name": "s", "nullable": False, "default": current_timestamp},
+                    "default": None,
+                    "non_explicit_defaults_for_ts_default": (
+                        "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                    ),
+                }
+            ],
+        ),
+        (
+            ["s TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"],
+            [
+                {
+                    "name": "s",
+                    "nullable": False,
+                    "default": "CURRENT_TIMESTAMP",
+                }
+            ],
+        ),
+        (
+            ["t TIMESTAMP"],
+            [
                 {
                     "name": "t",
-                    "nullable": True
-                    if explicit_defaults_for_timestamp
-                    else False,
-                    "default": None
-                    if explicit_defaults_for_timestamp
-                    else (
-                        "%(current_timestamp)s "
-                        "ON UPDATE %(current_timestamp)s"
-                    )
-                    % {"current_timestamp": current_timestamp},
-                },
+                    "nullable": True,
+                    "default": None,
+                    "non_explicit_defaults_for_ts_nullable": False,
+                    "non_explicit_defaults_for_ts_default": (
+                        "CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                    ),
+                }
+            ],
+        ),
+        (
+            ["u TIMESTAMP DEFAULT CURRENT_TIMESTAMP"],
+            [
                 {
                     "name": "u",
-                    "nullable": True
-                    if explicit_defaults_for_timestamp
-                    else False,
-                    "default": current_timestamp,
-                },
+                    "nullable": True,
+                    "non_explicit_defaults_for_ts_nullable": False,
+                    "default": "CURRENT_TIMESTAMP",
+                }
             ],
-        )
+        ),
+        (
+            ["v INTEGER GENERATED ALWAYS AS (4711) VIRTUAL NOT NULL"],
+            [
+                {
+                    "name": "v",
+                    "nullable": False,
+                    "default": None,
+                }
+            ],
+            testing.requires.mysql_notnull_generated_columns,
+        ),
+        argnames="ddl_columns,expected_reflected",
+    )
+    def test_nullable_reflection(
+        self, metadata, connection, ddl_columns, expected_reflected
+    ):
+        """test reflection of NULL/NOT NULL, in particular with TIMESTAMP
+        defaults where MySQL is inconsistent in how it reports CREATE TABLE.
+
+        """
+        row = connection.exec_driver_sql(
+            "show variables like '%%explicit_defaults_for_timestamp%%'"
+        ).first()
+        explicit_defaults_for_timestamp = row[1].lower() in ("on", "1", "true")
+
+        def get_expected_default(er):
+            if (
+                not explicit_defaults_for_timestamp
+                and "non_explicit_defaults_for_ts_default" in er
+            ):
+                default = er["non_explicit_defaults_for_ts_default"]
+            else:
+                default = er["default"]
+
+            if default is not None and connection.dialect._is_mariadb_102:
+                default = default.replace(
+                    "CURRENT_TIMESTAMP", "current_timestamp()"
+                )
+
+            return default
+
+        def get_expected_nullable(er):
+            if (
+                not explicit_defaults_for_timestamp
+                and "non_explicit_defaults_for_ts_nullable" in er
+            ):
+                return er["non_explicit_defaults_for_ts_nullable"]
+            else:
+                return er["nullable"]
+
+        expected_reflected = [
+            {
+                "name": er["name"],
+                "nullable": get_expected_nullable(er),
+                "default": get_expected_default(er),
+            }
+            for er in expected_reflected
+        ]
+
+        Table("nullable_refl", metadata)
+
+        cols_ddl = ", \n".join(ddl_columns)
+        connection.exec_driver_sql(f"CREATE TABLE nullable_refl ({cols_ddl})")
+
+        reflected = [
+            {
+                "name": d["name"],
+                "nullable": d["nullable"],
+                "default": d["default"],
+            }
+            for d in inspect(connection).get_columns("nullable_refl")
+        ]
+        eq_(reflected, expected_reflected)
 
     def test_reflection_with_unique_constraint(self, metadata, connection):
         insp = inspect(connection)
@@ -712,10 +926,10 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
 
         # MySQL converts unique constraints into unique indexes.
         # separately we get both
-        indexes = dict((i["name"], i) for i in insp.get_indexes("mysql_uc"))
-        constraints = set(
+        indexes = {i["name"]: i for i in insp.get_indexes("mysql_uc")}
+        constraints = {
             i["name"] for i in insp.get_unique_constraints("mysql_uc")
-        )
+        }
 
         self.assert_("uc_a" in indexes)
         self.assert_(indexes["uc_a"]["unique"])
@@ -725,8 +939,8 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
         # more "official" MySQL construct
         reflected = Table("mysql_uc", MetaData(), autoload_with=testing.db)
 
-        indexes = dict((i.name, i) for i in reflected.indexes)
-        constraints = set(uc.name for uc in reflected.constraints)
+        indexes = {i.name: i for i in reflected.indexes}
+        constraints = {uc.name for uc in reflected.constraints}
 
         self.assert_("uc_a" in indexes)
         self.assert_(indexes["uc_a"].unique)
@@ -757,6 +971,93 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
         self.assert_compile(
             CreateIndex(idx),
             "CREATE FULLTEXT INDEX textdata_ix ON mytable (textdata)",
+        )
+
+    def test_reflect_index_col_length(self, metadata, connection):
+        """test for #9047"""
+
+        tt = Table(
+            "test_table",
+            metadata,
+            Column("signal_type", Integer(), nullable=False),
+            Column("signal_data", String(200), nullable=False),
+            Column("signal_data_2", String(200), nullable=False),
+            Index(
+                "ix_1",
+                "signal_type",
+                "signal_data",
+                mysql_length={"signal_data": 25},
+                mariadb_length={"signal_data": 25},
+            ),
+        )
+        Index(
+            "ix_2",
+            tt.c.signal_type,
+            tt.c.signal_data,
+            tt.c.signal_data_2,
+            mysql_length={"signal_data": 25, "signal_data_2": 10},
+            mariadb_length={"signal_data": 25, "signal_data_2": 10},
+        )
+
+        mysql_length = (
+            "mysql_length"
+            if not connection.dialect.is_mariadb
+            else "mariadb_length"
+        )
+        eq_(
+            {idx.name: idx.kwargs[mysql_length] for idx in tt.indexes},
+            {
+                "ix_1": {"signal_data": 25},
+                "ix_2": {"signal_data": 25, "signal_data_2": 10},
+            },
+        )
+
+        metadata.create_all(connection)
+
+        eq_(
+            sorted(
+                inspect(connection).get_indexes("test_table"),
+                key=lambda rec: rec["name"],
+            ),
+            [
+                {
+                    "name": "ix_1",
+                    "column_names": ["signal_type", "signal_data"],
+                    "unique": False,
+                    "dialect_options": {mysql_length: {"signal_data": 25}},
+                },
+                {
+                    "name": "ix_2",
+                    "column_names": [
+                        "signal_type",
+                        "signal_data",
+                        "signal_data_2",
+                    ],
+                    "unique": False,
+                    "dialect_options": {
+                        mysql_length: {
+                            "signal_data": 25,
+                            "signal_data_2": 10,
+                        }
+                    },
+                },
+            ],
+        )
+
+        new_metadata = MetaData()
+        reflected_table = Table(
+            "test_table", new_metadata, autoload_with=connection
+        )
+
+        eq_(
+            {
+                idx.name: idx.kwargs[mysql_length]
+                for idx in reflected_table.indexes
+            },
+            {
+                "ix_1": {"signal_data": 25},
+                "ix_2": {"signal_data": 25, "signal_data_2": 10},
+            },
         )
 
     @testing.requires.mysql_ngram_fulltext
@@ -851,8 +1152,8 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             },
         ]
         ischema_casing_1 = [
-            (util.u("Test"), util.u("Track"), "TrackID"),
-            (util.u("Test_Schema"), util.u("Track"), "TrackID"),
+            ("Test", "Track", "TrackID"),
+            ("Test_Schema", "Track", "TrackID"),
         ]
         return fkeys_casing_1, ischema_casing_1
 
@@ -896,7 +1197,7 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
             dialect._casing = casing
             dialect.default_schema_name = "Test"
             connection = mock.Mock(
-                dialect=dialect, execute=lambda stmt, params: ischema
+                dialect=dialect, execute=lambda stmt: ischema
             )
             dialect._correct_for_mysql_bugs_88718_96365(fkeys, connection)
             eq_(
@@ -1096,10 +1397,10 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
         m.create_all(connection)
 
         eq_(
-            dict(
-                (rec["name"], rec)
+            {
+                rec["name"]: rec
                 for rec in inspect(connection).get_foreign_keys("t2")
-            ),
+            },
             {
                 "cap_t1id_fk": {
                     "name": "cap_t1id_fk",
@@ -1119,6 +1420,29 @@ class ReflectionTest(fixtures.TestBase, AssertsCompiledSQL):
                 },
             },
         )
+
+    def test_reflect_comment_escapes(self, connection, metadata):
+        c = "\\ - \\\\ - \\0 - \\a - \\b - \\t - \\n - \\v - \\f - \\r"
+        Table("t", metadata, Column("c", Integer, comment=c), comment=c)
+        metadata.create_all(connection)
+
+        insp = inspect(connection)
+        tc = insp.get_table_comment("t")
+        eq_(tc, {"text": c})
+        col = insp.get_columns("t")[0]
+        eq_({col["name"]: col["comment"]}, {"c": c})
+
+    def test_reflect_comment_unicode(self, connection, metadata):
+        c = "☁️✨🐍🁰🝝"
+        c_exp = "☁️✨???"
+        Table("t", metadata, Column("c", Integer, comment=c), comment=c)
+        metadata.create_all(connection)
+
+        insp = inspect(connection)
+        tc = insp.get_table_comment("t")
+        eq_(tc, {"text": c_exp})
+        col = insp.get_columns("t")[0]
+        eq_({col["name"]: col["comment"]}, {"c": c_exp})
 
 
 class RawReflectionTest(fixtures.TestBase):
@@ -1233,7 +1557,7 @@ class RawReflectionTest(fixtures.TestBase):
             "  CONSTRAINT `addresses_user_id_fkey` "
             "FOREIGN KEY (`user_id`) "
             "REFERENCES `users` (`id`) "
-            "ON DELETE CASCADE ON UPDATE SET NULL"
+            "ON DELETE SET DEFAULT ON UPDATE SET NULL"
         )
         eq_(
             m.groups(),
@@ -1243,7 +1567,7 @@ class RawReflectionTest(fixtures.TestBase):
                 "`users`",
                 "`id`",
                 None,
-                "CASCADE",
+                "SET DEFAULT",
                 "SET NULL",
             ),
         )
@@ -1260,5 +1584,5 @@ class RawReflectionTest(fixtures.TestBase):
         ("CREATE TABLE `VIEW_THINGS`", False),
         ("CREATE TABLE `A VIEW`", False),
     )
-    def test_is_view(self, sql, expected):
+    def test_is_view(self, sql: str, expected: bool) -> None:
         is_(self.parser._check_view(sql), expected)

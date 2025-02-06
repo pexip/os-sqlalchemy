@@ -16,7 +16,7 @@ from sqlalchemy.testing.assertions import expect_warnings
 from sqlalchemy.testing.util import gc_collect
 
 
-class MockClass(object):
+class MockClass:
     def __init__(self, base, name):
         self._sa_class_manager = mock.Mock(registry=base)
         tokens = name.split(".")
@@ -25,7 +25,7 @@ class MockClass(object):
         self.metadata = MetaData()
 
 
-class MockProp(object):
+class MockProp:
     parent = "some_parent"
 
 
@@ -33,7 +33,6 @@ class ClsRegistryTest(fixtures.TestBase):
     __requires__ = ("predictable_gc",)
 
     def test_same_module_same_name(self):
-
         base = registry()
         f1 = MockClass(base, "foo.bar.Foo")
         f2 = MockClass(base, "foo.bar.Foo")
@@ -123,7 +122,6 @@ class ClsRegistryTest(fixtures.TestBase):
         argnames="name",
     )
     def test_name_resolution_failures(self, name, registry):
-
         Base = registry.generate_base()
 
         f1 = MockClass(registry, "existent.Foo")
@@ -232,7 +230,7 @@ class ClsRegistryTest(fixtures.TestBase):
             del f2
             gc_collect()
 
-            eq_(len(clsregistry._registries), 1)
+            eq_(len(clsregistry._registries), 0)
 
     def test_dupe_classes_name_race(self):
         """test the race condition that the class was garbage "

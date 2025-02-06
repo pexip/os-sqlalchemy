@@ -1,3 +1,5 @@
+.. highlight:: pycon+sql
+
 Operator Reference
 ===============================
 
@@ -5,8 +7,8 @@ Operator Reference
 
     >>> from sqlalchemy import column, select
     >>> from sqlalchemy import create_engine
-    >>> engine = create_engine("sqlite+pysqlite:///:memory:", echo=True, future=True)
-    >>> from sqlalchemy import MetaData, Table, Column, Integer, String
+    >>> engine = create_engine("sqlite+pysqlite:///:memory:", echo=True)
+    >>> from sqlalchemy import MetaData, Table, Column, Integer, String, Numeric
     >>> metadata_obj = MetaData()
     >>> user_table = Table(
     ...     "user_account",
@@ -121,49 +123,49 @@ strings, dates, and many others:
 * :meth:`_sql.ColumnOperators.__eq__` (Python "``==``" operator)::
 
     >>> print(column("x") == 5)
-    x = :x_1
+    {printsql}x = :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.__ne__` (Python "``!=``" operator)::
 
     >>> print(column("x") != 5)
-    x != :x_1
+    {printsql}x != :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.__gt__` (Python "``>``" operator)::
 
     >>> print(column("x") > 5)
-    x > :x_1
+    {printsql}x > :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.__lt__` (Python "``<``" operator)::
 
     >>> print(column("x") < 5)
-    x < :x_1
+    {printsql}x < :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.__ge__` (Python "``>=``" operator)::
 
     >>> print(column("x") >= 5)
-    x >= :x_1
+    {printsql}x >= :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.__le__` (Python "``<=``" operator)::
 
     >>> print(column("x") <= 5)
-    x <= :x_1
+    {printsql}x <= :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.between`::
 
     >>> print(column("x").between(5, 10))
-    x BETWEEN :x_1 AND :x_2
+    {printsql}x BETWEEN :x_1 AND :x_2
 
   ..
 
@@ -182,18 +184,15 @@ IN against a list of values
 IN is available most typically by passing a list of
 values to the :meth:`_sql.ColumnOperators.in_` method::
 
-
     >>> print(column("x").in_([1, 2, 3]))
-    x IN (__[POSTCOMPILE_x_1])
+    {printsql}x IN (__[POSTCOMPILE_x_1])
 
 The special bound form ``__[POSTCOMPILE`` is rendered into individual parameters
-at execution time, illustrated below:
-
-.. sourcecode:: pycon+sql
+at execution time, illustrated below::
 
     >>> stmt = select(User.id).where(User.id.in_([1, 2, 3]))
     >>> result = conn.execute(stmt)
-    {opensql}SELECT user_account.id
+    {execsql}SELECT user_account.id
     FROM user_account
     WHERE user_account.id IN (?, ?, ?)
     [...] (1, 2, 3){stop}
@@ -203,13 +202,11 @@ Empty IN Expressions
 
 SQLAlchemy produces a mathematically valid result for an empty IN expression
 by rendering a backend-specific subquery that returns no rows.   Again
-in other words, "it just works":
-
-.. sourcecode:: pycon+sql
+in other words, "it just works"::
 
     >>> stmt = select(User.id).where(User.id.in_([]))
     >>> result = conn.execute(stmt)
-    {opensql}SELECT user_account.id
+    {execsql}SELECT user_account.id
     FROM user_account
     WHERE user_account.id IN (SELECT 1 FROM (SELECT 1) WHERE 1!=1)
     [...] ()
@@ -224,12 +221,12 @@ NOT IN
 "NOT IN" is available via the :meth:`_sql.ColumnOperators.not_in` operator::
 
     >>> print(column("x").not_in([1, 2, 3]))
-    (x NOT IN (__[POSTCOMPILE_x_1]))
+    {printsql}(x NOT IN (__[POSTCOMPILE_x_1]))
 
 This is typically more easily available by negating with the ``~`` operator::
 
     >>> print(~column("x").in_([1, 2, 3]))
-    (x NOT IN (__[POSTCOMPILE_x_1]))
+    {printsql}(x NOT IN (__[POSTCOMPILE_x_1]))
 
 Tuple IN Expressions
 ~~~~~~~~~~~~~~~~~~~~
@@ -244,17 +241,14 @@ then receives a list of tuples::
     >>> tup = tuple_(column("x", Integer), column("y", Integer))
     >>> expr = tup.in_([(1, 2), (3, 4)])
     >>> print(expr)
-    (x, y) IN (__[POSTCOMPILE_param_1])
+    {printsql}(x, y) IN (__[POSTCOMPILE_param_1])
 
-To illustrate the parameters rendered:
-
-.. sourcecode:: pycon+sql
-
+To illustrate the parameters rendered::
 
     >>> tup = tuple_(User.id, Address.id)
     >>> stmt = select(User.name).join(Address).where(tup.in_([(1, 1), (2, 2)]))
     >>> conn.execute(stmt).all()
-    {opensql}SELECT user_account.name
+    {execsql}SELECT user_account.name
     FROM user_account JOIN address ON user_account.id = address.user_id
     WHERE (user_account.id, address.id) IN (VALUES (?, ?), (?, ?))
     [...] (1, 1, 2, 2){stop}
@@ -269,7 +263,7 @@ construct is passed in directly, without any explicit conversion to a named
 subquery::
 
     >>> print(column("x").in_(select(user_table.c.id)))
-    x IN (SELECT user_account.id
+    {printsql}x IN (SELECT user_account.id
     FROM user_account)
 
 Tuples work as expected::
@@ -279,7 +273,7 @@ Tuples work as expected::
     ...         select(user_table.c.id, address_table.c.id).join(address_table)
     ...     )
     ... )
-    (x, y) IN (SELECT user_account.id, address.id
+    {printsql}(x, y) IN (SELECT user_account.id, address.id
     FROM user_account JOIN address ON user_account.id = address.user_id)
 
 Identity Comparisons
@@ -296,24 +290,24 @@ databases support:
   using regular Python ``None``::
 
     >>> print(column("x").is_(None))
-    x IS NULL
+    {printsql}x IS NULL
 
   SQL NULL is also explicitly available, if needed, using the
   :func:`_sql.null` construct::
 
     >>> from sqlalchemy import null
     >>> print(column("x").is_(null()))
-    x IS NULL
+    {printsql}x IS NULL
 
   The :meth:`_sql.ColumnOperators.is_` operator is automatically invoked when
   using the :meth:`_sql.ColumnOperators.__eq__` overloaded operator, i.e.
   ``==``, in conjunction with the ``None`` or :func:`_sql.null` value. In this
   way, there's typically not a need to use :meth:`_sql.ColumnOperators.is_`
-  explicitly, paricularly when used with a dynamic value::
+  explicitly, particularly when used with a dynamic value::
 
     >>> a = None
     >>> print(column("x") == a)
-    x IS NULL
+    {printsql}x IS NULL
 
   Note that the Python ``is`` operator is **not overloaded**.  Even though
   Python provides hooks to overload operators such as ``==`` and ``!=``,
@@ -324,26 +318,26 @@ databases support:
   Similar to :meth:`_sql.ColumnOperators.is_`, produces "IS NOT"::
 
     >>> print(column("x").is_not(None))
-    x IS NOT NULL
+    {printsql}x IS NOT NULL
 
   Is similarly equivalent to ``!= None``::
 
     >>> print(column("x") != None)
-    x IS NOT NULL
+    {printsql}x IS NOT NULL
 
 * :meth:`_sql.ColumnOperators.is_distinct_from`:
 
   Produces SQL IS DISTINCT FROM::
 
     >>> print(column("x").is_distinct_from("some value"))
-    x IS DISTINCT FROM :x_1
+    {printsql}x IS DISTINCT FROM :x_1
 
 * :meth:`_sql.ColumnOperators.isnot_distinct_from`:
 
   Produces SQL IS NOT DISTINCT FROM::
 
     >>> print(column("x").isnot_distinct_from("some value"))
-    x IS NOT DISTINCT FROM :x_1
+    {printsql}x IS NOT DISTINCT FROM :x_1
 
 String Comparisons
 ^^^^^^^^^^^^^^^^^^
@@ -351,7 +345,7 @@ String Comparisons
 * :meth:`_sql.ColumnOperators.like`::
 
     >>> print(column("x").like("word"))
-    x LIKE :x_1
+    {printsql}x LIKE :x_1
 
   ..
 
@@ -361,14 +355,14 @@ String Comparisons
   generic backend.  On the PostgreSQL backend it will use ``ILIKE``::
 
     >>> print(column("x").ilike("word"))
-    lower(x) LIKE lower(:x_1)
+    {printsql}lower(x) LIKE lower(:x_1)
 
   ..
 
 * :meth:`_sql.ColumnOperators.notlike`::
 
     >>> print(column("x").notlike("word"))
-    x NOT LIKE :x_1
+    {printsql}x NOT LIKE :x_1
 
   ..
 
@@ -376,7 +370,7 @@ String Comparisons
 * :meth:`_sql.ColumnOperators.notilike`::
 
     >>> print(column("x").notilike("word"))
-    lower(x) NOT LIKE lower(:x_1)
+    {printsql}lower(x) NOT LIKE lower(:x_1)
 
   ..
 
@@ -389,23 +383,22 @@ backends or sometimes a function like ``concat()``:
 
 * :meth:`_sql.ColumnOperators.startswith`::
 
-    The string containment operators
     >>> print(column("x").startswith("word"))
-    x LIKE :x_1 || '%'
+    {printsql}x LIKE :x_1 || '%'
 
   ..
 
 * :meth:`_sql.ColumnOperators.endswith`::
 
     >>> print(column("x").endswith("word"))
-    x LIKE '%' || :x_1
+    {printsql}x LIKE '%' || :x_1
 
   ..
 
 * :meth:`_sql.ColumnOperators.contains`::
 
     >>> print(column("x").contains("word"))
-    x LIKE '%' || :x_1 || '%'
+    {printsql}x LIKE '%' || :x_1 || '%'
 
   ..
 
@@ -421,7 +414,7 @@ behaviors and results on different databases:
   feature of the underlying database, if available::
 
     >>> print(column("x").match("word"))
-    x MATCH :x_1
+    {printsql}x MATCH :x_1
 
   ..
 
@@ -432,13 +425,13 @@ behaviors and results on different databases:
 
     >>> from sqlalchemy.dialects import postgresql
     >>> print(column("x").regexp_match("word").compile(dialect=postgresql.dialect()))
-    x ~ %(x_1)s
+    {printsql}x ~ %(x_1)s
 
   Or MySQL::
 
     >>> from sqlalchemy.dialects import mysql
     >>> print(column("x").regexp_match("word").compile(dialect=mysql.dialect()))
-    x REGEXP %s
+    {printsql}x REGEXP %s
 
   ..
 
@@ -453,20 +446,20 @@ String Alteration
   String concatenation::
 
     >>> print(column("x").concat("some string"))
-    x || :x_1
+    {printsql}x || :x_1
 
   This operator is available via :meth:`_sql.ColumnOperators.__add__`, that
   is, the Python ``+`` operator, when working with a column expression that
   derives from :class:`_types.String`::
 
     >>> print(column("x", String) + "some string")
-    x || :x_1
+    {printsql}x || :x_1
 
   The operator will produce the appropriate database-specific construct,
   such as on MySQL it's historically been the ``concat()`` SQL function::
 
     >>> print((column("x", String) + "some string").compile(dialect=mysql.dialect()))
-    concat(x, %s)
+    {printsql}concat(x, %s)
 
   ..
 
@@ -476,7 +469,7 @@ String Alteration
   REPLACE equivalent for the backends which support it::
 
     >>> print(column("x").regexp_replace("foo", "bar").compile(dialect=postgresql.dialect()))
-    REGEXP_REPLACE(x, %(x_1)s, %(x_2)s)
+    {printsql}REGEXP_REPLACE(x, %(x_1)s, %(x_2)s)
 
   ..
 
@@ -490,7 +483,7 @@ String Alteration
     ...         dialect=mysql.dialect()
     ...     )
     ... )
-    (x COLLATE latin1_german2_ci) = %s
+    {printsql}(x COLLATE latin1_german2_ci) = %s
 
 
   To use COLLATE against a literal value, use the :func:`_sql.literal` construct::
@@ -502,7 +495,7 @@ String Alteration
     ...         dialect=mysql.dialect()
     ...     )
     ... )
-    (%s COLLATE latin1_german2_ci) = x
+    {printsql}(%s COLLATE latin1_german2_ci) = x
 
   ..
 
@@ -512,10 +505,10 @@ Arithmetic Operators
 * :meth:`_sql.ColumnOperators.__add__`, :meth:`_sql.ColumnOperators.__radd__` (Python "``+``" operator)::
 
     >>> print(column("x") + 5)
-    x + :x_1
+    {printsql}x + :x_1{stop}
 
     >>> print(5 + column("x"))
-    :x_1 + x
+    {printsql}:x_1 + x{stop}
 
   ..
 
@@ -528,10 +521,10 @@ Arithmetic Operators
 * :meth:`_sql.ColumnOperators.__sub__`, :meth:`_sql.ColumnOperators.__rsub__` (Python "``-``" operator)::
 
     >>> print(column("x") - 5)
-    x - :x_1
+    {printsql}x - :x_1{stop}
 
     >>> print(5 - column("x"))
-    :x_1 - x
+    {printsql}:x_1 - x{stop}
 
   ..
 
@@ -539,19 +532,44 @@ Arithmetic Operators
 * :meth:`_sql.ColumnOperators.__mul__`, :meth:`_sql.ColumnOperators.__rmul__` (Python "``*``" operator)::
 
     >>> print(column("x") * 5)
-    x * :x_1
+    {printsql}x * :x_1{stop}
 
     >>> print(5 * column("x"))
-    :x_1 * x
+    {printsql}:x_1 * x{stop}
 
   ..
 
-* :meth:`_sql.ColumnOperators.__div__`, :meth:`_sql.ColumnOperators.__rdiv__` (Python "``/``" operator)::
+* :meth:`_sql.ColumnOperators.__truediv__`, :meth:`_sql.ColumnOperators.__rtruediv__` (Python "``/``" operator).
+  This is the Python ``truediv`` operator, which will ensure integer true division occurs::
 
     >>> print(column("x") / 5)
-    x / :x_1
+    {printsql}x / CAST(:x_1 AS NUMERIC){stop}
     >>> print(5 / column("x"))
-    :x_1 / x
+    {printsql}:x_1 / CAST(x AS NUMERIC){stop}
+
+  .. versionchanged:: 2.0  The Python ``/`` operator now ensures integer true division takes place
+
+  ..
+
+* :meth:`_sql.ColumnOperators.__floordiv__`, :meth:`_sql.ColumnOperators.__rfloordiv__` (Python "``//``" operator).
+  This is the Python ``floordiv`` operator, which will ensure floor division occurs.
+  For the default backend as well as backends such as PostgreSQL, the SQL ``/`` operator normally
+  behaves this way for integer values::
+
+    >>> print(column("x") // 5)
+    {printsql}x / :x_1{stop}
+    >>> print(5 // column("x", Integer))
+    {printsql}:x_1 / x{stop}
+
+  For backends that don't use floor division by default, or when used with numeric values,
+  the FLOOR() function is used to ensure floor division::
+
+    >>> print(column("x") // 5.5)
+    {printsql}FLOOR(x / :x_1){stop}
+    >>> print(5 // column("x", Numeric))
+    {printsql}FLOOR(:x_1 / x){stop}
+
+  .. versionadded:: 2.0  Support for FLOOR division
 
   ..
 
@@ -559,9 +577,76 @@ Arithmetic Operators
 * :meth:`_sql.ColumnOperators.__mod__`, :meth:`_sql.ColumnOperators.__rmod__` (Python "``%``" operator)::
 
     >>> print(column("x") % 5)
-    x % :x_1
+    {printsql}x % :x_1{stop}
     >>> print(5 % column("x"))
-    :x_1 % x
+    {printsql}:x_1 % x{stop}
+
+  ..
+
+.. _operators_bitwise:
+
+Bitwise Operators
+^^^^^^^^^^^^^^^^^
+
+Bitwise operator functions provide uniform access to bitwise operators across
+different backends, which are expected to operate on compatible
+values such as integers and bit-strings (e.g. PostgreSQL
+:class:`_postgresql.BIT` and similar). Note that these are **not** general
+boolean operators.
+
+.. versionadded:: 2.0.2 Added dedicated operators for bitwise operations.
+
+* :meth:`_sql.ColumnOperators.bitwise_not`, :func:`_sql.bitwise_not`.
+  Available as a column-level method, producing a bitwise NOT clause against a
+  parent object::
+
+    >>> print(column("x").bitwise_not())
+    ~x
+
+  This operator is also available as a column-expression-level method, applying
+  bitwise NOT to an individual column expression::
+
+    >>> from sqlalchemy import bitwise_not
+    >>> print(bitwise_not(column("x")))
+    ~x
+
+  ..
+
+* :meth:`_sql.ColumnOperators.bitwise_and` produces bitwise AND::
+
+    >>> print(column("x").bitwise_and(5))
+    x & :x_1
+
+  ..
+
+* :meth:`_sql.ColumnOperators.bitwise_or` produces bitwise OR::
+
+    >>> print(column("x").bitwise_or(5))
+    x | :x_1
+
+  ..
+
+* :meth:`_sql.ColumnOperators.bitwise_xor` produces bitwise XOR::
+
+    >>> print(column("x").bitwise_xor(5))
+    x ^ :x_1
+
+  For PostgreSQL dialects, "#" is used to represent bitwise XOR; this emits
+  automatically when using one of these backends::
+
+    >>> from sqlalchemy.dialects import postgresql
+    >>> print(column("x").bitwise_xor(5).compile(dialect=postgresql.dialect()))
+    x # %(x_1)s
+
+  ..
+
+* :meth:`_sql.ColumnOperators.bitwise_rshift`, :meth:`_sql.ColumnOperators.bitwise_lshift`
+  produce bitwise shift operators::
+
+    >>> print(column("x").bitwise_rshift(5))
+    x >> :x_1
+    >>> print(column("x").bitwise_lshift(5))
+    x << :x_1
 
   ..
 
@@ -577,7 +662,7 @@ The most common conjunction, "AND", is automatically applied if we make repeated
     ...     .where(user_table.c.name == "squidward")
     ...     .where(address_table.c.user_id == user_table.c.id)
     ... )
-    SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE user_account.name = :name_1 AND address.user_id = user_account.id
 
@@ -585,10 +670,11 @@ The most common conjunction, "AND", is automatically applied if we make repeated
 
     >>> print(
     ...     select(address_table.c.email_address).where(
-    ...         user_table.c.name == "squidward", address_table.c.user_id == user_table.c.id
+    ...         user_table.c.name == "squidward",
+    ...         address_table.c.user_id == user_table.c.id,
     ...     )
     ... )
-    SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE user_account.name = :name_1 AND address.user_id = user_account.id
 
@@ -604,7 +690,7 @@ The "AND" conjunction, as well as its partner "OR", are both available directly 
     ...         )
     ...     )
     ... )
-    SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE (user_account.name = :name_1 OR user_account.name = :name_2)
     AND address.user_id = user_account.id
@@ -614,13 +700,13 @@ typically invert the operator in a boolean expression::
 
     >>> from sqlalchemy import not_
     >>> print(not_(column("x") == 5))
-    x != :x_1
+    {printsql}x != :x_1
 
 It also may apply a keyword such as ``NOT`` when appropriate::
 
     >>> from sqlalchemy import Boolean
     >>> print(not_(column("x", Boolean)))
-    NOT x
+    {printsql}NOT x
 
 
 Conjunction Operators
@@ -640,7 +726,7 @@ The above conjunction functions :func:`_sql.and_`, :func:`_sql.or_`,
   as :func:`_sql.and_` (note parenthesis around the two operands)::
 
      >>> print((column("x") == 5) & (column("y") == 10))
-     x = :x_1 AND y = :y_1
+     {printsql}x = :x_1 AND y = :y_1
 
   ..
 
@@ -651,7 +737,7 @@ The above conjunction functions :func:`_sql.and_`, :func:`_sql.or_`,
   as :func:`_sql.or_` (note parenthesis around the two operands)::
 
     >>> print((column("x") == 5) | (column("y") == 10))
-    x = :x_1 OR y = :y_1
+    {printsql}x = :x_1 OR y = :y_1
 
   ..
 
@@ -663,21 +749,13 @@ The above conjunction functions :func:`_sql.and_`, :func:`_sql.or_`,
   applying the ``NOT`` keyword to the expression as a whole::
 
     >>> print(~(column("x") == 5))
-    x != :x_1
+    {printsql}x != :x_1{stop}
 
     >>> from sqlalchemy import Boolean
     >>> print(~column("x", Boolean))
-    NOT x
+    {printsql}NOT x{stop}
 
   ..
-
-
-
-Operator Customization
-^^^^^^^^^^^^^^^^^^^^^^
-
-TODO
-
 
 ..  Setup code, not for display
 

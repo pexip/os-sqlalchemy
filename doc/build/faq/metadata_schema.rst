@@ -62,7 +62,7 @@ This is available via the :attr:`_schema.MetaData.sorted_tables` function::
 
     metadata_obj = MetaData()
     # ... add Table objects to metadata
-    ti = metadata_obj.sorted_tables:
+    ti = metadata_obj.sorted_tables
     for t in ti:
         print(t)
 
@@ -93,7 +93,7 @@ metadata creation sequence as a string, using this recipe::
         print(sql.compile(dialect=engine.dialect))
 
 
-    engine = create_mock_engine("postgresql://", dump)
+    engine = create_mock_engine("postgresql+psycopg2://", dump)
     metadata_obj.create_all(engine, checkfirst=False)
 
 The `Alembic <https://alembic.sqlalchemy.org>`_ tool also supports

@@ -1,5 +1,12 @@
+from __future__ import annotations
+
+from collections import abc
 import copy
+import dataclasses
 import pickle
+from typing import List
+from unittest.mock import call
+from unittest.mock import Mock
 
 from sqlalchemy import cast
 from sqlalchemy import exc
@@ -14,6 +21,7 @@ from sqlalchemy import testing
 from sqlalchemy.engine import default
 from sqlalchemy.ext.associationproxy import _AssociationList
 from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.ext.associationproxy import AssociationProxy
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import clear_mappers
 from sqlalchemy.orm import collections
@@ -21,10 +29,12 @@ from sqlalchemy.orm import composite
 from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import declared_attr
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import mapper
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.collections import attribute_mapped_collection
+from sqlalchemy.orm.collections import attribute_keyed_dict
 from sqlalchemy.orm.collections import collection
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
@@ -34,10 +44,12 @@ from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_none
+from sqlalchemy.testing import is_not_none
 from sqlalchemy.testing.assertions import expect_raises_message
+from sqlalchemy.testing.entities import ComparableEntity  # noqa
+from sqlalchemy.testing.entities import ComparableMixin  # noqa
 from sqlalchemy.testing.fixtures import fixture_session
-from sqlalchemy.testing.mock import call
-from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.testing.util import gc_collect
@@ -61,7 +73,7 @@ class ListCollection(list):
     pass
 
 
-class ObjectCollection(object):
+class ObjectCollection:
     def __init__(self):
         self.values = list()
 
@@ -104,14 +116,14 @@ class AutoFlushTest(fixtures.MappedTest):
         )
 
     def _fixture(self, collection_class, is_dict=False):
-        class Parent(object):
+        class Parent:
             collection = association_proxy("_collection", "child")
 
-        class Child(object):
+        class Child:
             def __init__(self, name):
                 self.name = name
 
-        class Association(object):
+        class Association:
             if is_dict:
 
                 def __init__(self, key, child):
@@ -194,7 +206,11 @@ class AutoFlushTest(fixtures.MappedTest):
             collection[obj.name] = obj
 
         self._test_premature_flush(
-            collections.attribute_mapped_collection("name"), set_, is_dict=True
+            collections.attribute_keyed_dict(
+                "name", ignore_unpopulated_attribute=True
+            ),
+            set_,
+            is_dict=True,
         )
 
 
@@ -256,6 +272,23 @@ class _CollectionOperations(fixtures.MappedTest):
             },
         )
         cls.mapper_registry.map_imperatively(Child, children_table)
+
+    def test_abc(self):
+        Parent = self.classes.Parent
+
+        p1 = Parent("x")
+
+        collection_class = self.collection_class or list
+
+        for abc_ in (abc.Set, abc.MutableMapping, abc.MutableSequence):
+            if issubclass(collection_class, abc_):
+                break
+        else:
+            abc_ = None
+
+        if abc_:
+            p1 = Parent("x")
+            assert isinstance(p1.children, abc_)
 
     def roundtrip(self, obj):
         if obj not in self.session:
@@ -513,6 +546,10 @@ class CustomDictTest(_CollectionOperations):
 
         p1.children["b"] = "proxied"
 
+        eq_(list(p1.children.keys()), ["a", "b"])
+        eq_(list(p1.children.items()), [("a", "regular"), ("b", "proxied")])
+        eq_(list(p1.children.values()), ["regular", "proxied"])
+
         self.assert_("proxied" in list(p1.children.values()))
         self.assert_("b" in p1.children)
         self.assert_("proxied" not in p1._children)
@@ -537,7 +574,7 @@ class CustomDictTest(_CollectionOperations):
         self.assert_(len(p1._children) == 3)
         self.assert_(len(p1.children) == 3)
 
-        self.assert_(set(p1.children) == set(["d", "e", "f"]))
+        self.assert_(set(p1.children) == {"d", "e", "f"})
 
         del ch
         p1 = self.roundtrip(p1)
@@ -619,9 +656,7 @@ class SetTest(_CollectionOperations):
         self.assert_(len(p1.children) == 2)
         self.assert_(len(p1._children) == 2)
 
-        self.assert_(
-            set([o.name for o in p1._children]) == set(["regular", "proxied"])
-        )
+        self.assert_({o.name for o in p1._children} == {"regular", "proxied"})
 
         ch2 = None
         for o in p1._children:
@@ -633,7 +668,7 @@ class SetTest(_CollectionOperations):
 
         self.assert_(len(p1._children) == 1)
         self.assert_(len(p1.children) == 1)
-        self.assert_(p1._children == set([ch1]))
+        self.assert_(p1._children == {ch1})
 
         p1.children.remove("regular")
 
@@ -654,7 +689,7 @@ class SetTest(_CollectionOperations):
         self.assert_("b" in p1.children)
         self.assert_("d" not in p1.children)
 
-        self.assert_(p1.children == set(["a", "b", "c"]))
+        self.assert_(p1.children == {"a", "b", "c"})
 
         assert_raises(KeyError, p1.children.remove, "d")
 
@@ -673,15 +708,15 @@ class SetTest(_CollectionOperations):
 
         p1.children = ["a", "b", "c"]
         p1 = self.roundtrip(p1)
-        self.assert_(p1.children == set(["a", "b", "c"]))
+        self.assert_(p1.children == {"a", "b", "c"})
 
         p1.children.discard("b")
         p1 = self.roundtrip(p1)
-        self.assert_(p1.children == set(["a", "c"]))
+        self.assert_(p1.children == {"a", "c"})
 
         p1.children.remove("a")
         p1 = self.roundtrip(p1)
-        self.assert_(p1.children == set(["c"]))
+        self.assert_(p1.children == {"c"})
 
         p1._children = set()
         self.assert_(len(p1.children) == 0)
@@ -705,18 +740,17 @@ class SetTest(_CollectionOperations):
 
         p1 = Parent("P1")
         p1.children = ["a", "b", "c"]
-        control = set(["a", "b", "c"])
+        control = {"a", "b", "c"}
 
         for other in (
-            set(["a", "b", "c"]),
-            set(["a", "b", "c", "d"]),
-            set(["a"]),
-            set(["a", "b"]),
-            set(["c", "d"]),
-            set(["e", "f", "g"]),
+            {"a", "b", "c"},
+            {"a", "b", "c", "d"},
+            {"a"},
+            {"a", "b"},
+            {"c", "d"},
+            {"e", "f", "g"},
             set(),
         ):
-
             eq_(p1.children.union(other), control.union(other))
             eq_(p1.children.difference(other), control.difference(other))
             eq_((p1.children - other), (control - other))
@@ -735,7 +769,6 @@ class SetTest(_CollectionOperations):
             self.assert_((p1.children > other) == (control > other))
             self.assert_((p1.children >= other) == (control >= other))
 
-    @testing.requires.python_fixed_issue_8743
     def test_set_comparison_empty_to_empty(self):
         # test issue #3265 which was fixed in Python version 2.7.8
         Parent = self.classes.Parent
@@ -774,12 +807,12 @@ class SetTest(_CollectionOperations):
         ):
             for base in (["a", "b", "c"], []):
                 for other in (
-                    set(["a", "b", "c"]),
-                    set(["a", "b", "c", "d"]),
-                    set(["a"]),
-                    set(["a", "b"]),
-                    set(["c", "d"]),
-                    set(["e", "f", "g"]),
+                    {"a", "b", "c"},
+                    {"a", "b", "c", "d"},
+                    {"a"},
+                    {"a", "b"},
+                    {"c", "d"},
+                    {"e", "f", "g"},
                     set(),
                 ):
                     p = Parent("p")
@@ -810,12 +843,12 @@ class SetTest(_CollectionOperations):
         for op in ("|=", "-=", "&=", "^="):
             for base in (["a", "b", "c"], []):
                 for other in (
-                    set(["a", "b", "c"]),
-                    set(["a", "b", "c", "d"]),
-                    set(["a"]),
-                    set(["a", "b"]),
-                    set(["c", "d"]),
-                    set(["e", "f", "g"]),
+                    {"a", "b", "c"},
+                    {"a", "b", "c", "d"},
+                    {"a"},
+                    {"a", "b"},
+                    {"c", "d"},
+                    {"e", "f", "g"},
                     frozenset(["e", "f", "g"]),
                     set(),
                 ):
@@ -975,7 +1008,7 @@ class ScalarTest(fixtures.MappedTest):
             Column("baz", String(128)),
         )
 
-        class Parent(object):
+        class Parent:
             foo = association_proxy("child", "foo")
             bar = association_proxy(
                 "child", "bar", creator=lambda v: Child(bar=v)
@@ -987,7 +1020,7 @@ class ScalarTest(fixtures.MappedTest):
             def __init__(self, name):
                 self.name = name
 
-        class Child(object):
+        class Child:
             def __init__(self, **kw):
                 for attr in kw:
                     setattr(self, attr, kw[attr])
@@ -1071,6 +1104,64 @@ class ScalarTest(fixtures.MappedTest):
         p2 = Parent("p2")
         p2.bar = "quux"
 
+    def test_scalar_opts_exclusive(self):
+        with expect_raises_message(
+            exc.ArgumentError,
+            "The cascade_scalar_deletes and create_on_none_assignment "
+            "parameters are mutually exclusive.",
+        ):
+            association_proxy(
+                "a",
+                "b",
+                cascade_scalar_deletes=True,
+                create_on_none_assignment=True,
+            )
+
+    @testing.variation("create_on_none", [True, False])
+    @testing.variation("specify_creator", [True, False])
+    def test_create_on_set_none(
+        self, create_on_none, specify_creator, decl_base
+    ):
+        class A(decl_base):
+            __tablename__ = "a"
+            id = mapped_column(Integer, primary_key=True)
+            b_id = mapped_column(ForeignKey("b.id"))
+            b = relationship("B")
+
+            if specify_creator:
+                b_data = association_proxy(
+                    "b",
+                    "data",
+                    create_on_none_assignment=bool(create_on_none),
+                    creator=lambda data: B(data=data),
+                )
+            else:
+                b_data = association_proxy(
+                    "b", "data", create_on_none_assignment=bool(create_on_none)
+                )
+
+        class B(decl_base):
+            __tablename__ = "b"
+            id = mapped_column(Integer, primary_key=True)
+            data = mapped_column(String)
+
+            def __init__(self, data=None):
+                self.data = data
+
+        a1 = A()
+        is_none(a1.b)
+        a1.b_data = None
+
+        if create_on_none:
+            is_not_none(a1.b)
+        else:
+            is_none(a1.b)
+
+        a1.b_data = "data"
+
+        a1.b_data = None
+        is_not_none(a1.b)
+
     @testing.provide_metadata
     def test_empty_scalars(self):
         metadata = self.metadata
@@ -1096,14 +1187,14 @@ class ScalarTest(fixtures.MappedTest):
             Column("name", String(50)),
         )
 
-        class A(object):
+        class A:
             a2b_name = association_proxy("a2b_single", "name")
             b_single = association_proxy("a2b_single", "b")
 
-        class A2B(object):
+        class A2B:
             pass
 
-        class B(object):
+        class B:
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1137,12 +1228,12 @@ class ScalarTest(fixtures.MappedTest):
         get = Mock()
         set_ = Mock()
 
-        class Parent(object):
+        class Parent:
             foo = association_proxy(
                 "child", "foo", getset_factory=lambda cc, parent: (get, set_)
             )
 
-        class Child(object):
+        class Child:
             def __init__(self, foo):
                 self.foo = foo
 
@@ -1163,7 +1254,6 @@ class ScalarTest(fixtures.MappedTest):
 class LazyLoadTest(fixtures.MappedTest):
     @classmethod
     def define_tables(cls, metadata):
-
         Table(
             "Parent",
             metadata,
@@ -1320,17 +1410,17 @@ class LazyLoadTest(fixtures.MappedTest):
         self.assert_(p._children is not None)
 
 
-class Parent(object):
+class Parent:
     def __init__(self, name):
         self.name = name
 
 
-class Child(object):
+class Child:
     def __init__(self, name):
         self.name = name
 
 
-class KVChild(object):
+class KVChild:
     def __init__(self, name, value):
         self.name = name
         self.value = value
@@ -1387,7 +1477,7 @@ class ReconstitutionTest(fixtures.MappedTest):
         add_child("p1", "c2")
         session.flush()
         p = session.query(Parent).filter_by(name="p1").one()
-        assert set(p.kids) == set(["c1", "c2"]), p.kids
+        assert set(p.kids) == {"c1", "c2"}, p.kids
 
     def test_copy(self):
         self.mapper_registry.map_imperatively(
@@ -1401,7 +1491,7 @@ class ReconstitutionTest(fixtures.MappedTest):
         p_copy = copy.copy(p)
         del p
         gc_collect()
-        assert set(p_copy.kids) == set(["c1", "c2"]), p_copy.kids
+        assert set(p_copy.kids) == {"c1", "c2"}, p_copy.kids
 
     def test_pickle_list(self):
         self.mapper_registry.map_imperatively(
@@ -1431,7 +1521,7 @@ class ReconstitutionTest(fixtures.MappedTest):
         p = Parent("p1")
         p.kids.update(["c1", "c2"])
         r1 = pickle.loads(pickle.dumps(p))
-        assert r1.kids == set(["c1", "c2"])
+        assert r1.kids == {"c1", "c2"}
 
         # can't do this without parent having a cycle
         # r2 = pickle.loads(pickle.dumps(p.kids))
@@ -1444,7 +1534,7 @@ class ReconstitutionTest(fixtures.MappedTest):
             properties=dict(
                 children=relationship(
                     KVChild,
-                    collection_class=collections.mapped_collection(
+                    collection_class=collections.keyfunc_mapping(
                         PickleKeyFunc("name")
                     ),
                 )
@@ -1462,7 +1552,7 @@ class ReconstitutionTest(fixtures.MappedTest):
         # assert r2 == {'c1': 'c1', 'c2': 'c2'}
 
 
-class PickleKeyFunc(object):
+class PickleKeyFunc:
     def __init__(self, name):
         self.name = name
 
@@ -2335,14 +2425,13 @@ class DictOfTupleUpdateTest(fixtures.MappedTest):
             a,
             properties={
                 "orig": relationship(
-                    B, collection_class=attribute_mapped_collection("key")
+                    B, collection_class=attribute_keyed_dict("key")
                 )
             },
         )
         cls.mapper_registry.map_imperatively(B, b)
 
     def test_update_one_elem_dict(self):
-
         a1 = self.classes.A()
         a1.elements.update({("B", 3): "elem2"})
         eq_(a1.elements, {("B", 3): "elem2"})
@@ -2366,7 +2455,8 @@ class DictOfTupleUpdateTest(fixtures.MappedTest):
         a1 = self.classes.A()
         assert_raises_message(
             ValueError,
-            "dictionary update sequence requires " "2-element tuples",
+            "dictionary update sequence element #1 has length 5; "
+            "2 is required",
             a1.elements.update,
             (("B", 3), "elem2"),
         )
@@ -2375,7 +2465,7 @@ class DictOfTupleUpdateTest(fixtures.MappedTest):
         a1 = self.classes.A()
         assert_raises_message(
             TypeError,
-            "update expected at most 1 arguments, got 2",
+            "update expected at most 1 arguments?, got 2",
             a1.elements.update,
             (("B", 3), "elem2"),
             (("C", 4), "elem3"),
@@ -2422,7 +2512,7 @@ class CompositeAccessTest(fixtures.DeclarativeMappedTest):
                 creator=lambda point: PointData(point=point),
             )
 
-        class PointData(fixtures.ComparableEntity, cls.DeclarativeBasic):
+        class PointData(ComparableEntity, cls.DeclarativeBasic):
             __tablename__ = "point"
 
             id = Column(
@@ -2484,7 +2574,7 @@ class AttributeAccessTest(fixtures.TestBase):
 
         Base = declarative_base()
 
-        class Mixin(object):
+        class Mixin:
             @declared_attr
             def children(cls):
                 return association_proxy("_children", "value")
@@ -2621,7 +2711,7 @@ class AttributeAccessTest(fixtures.TestBase):
     def test_resolved_to_correct_class_five(self):
         Base = declarative_base()
 
-        class Mixin(object):
+        class Mixin:
             children = association_proxy("_children", "value")
 
         class Parent(Mixin, Base):
@@ -2651,7 +2741,7 @@ class AttributeAccessTest(fixtures.TestBase):
         foo._calc_owner(None, None)
         is_(foo.owning_class, None)
 
-        class Bat(object):
+        class Bat:
             foo = association_proxy("x", "y")
 
         Bat.foo
@@ -2678,10 +2768,11 @@ class AttributeAccessTest(fixtures.TestBase):
         is_(Bat.foo.owning_class, Bat)
 
 
-class ScalarRemoveTest(object):
+class ScalarRemoveTest:
     useobject = None
     cascade_scalar_deletes = None
     uselist = None
+    create_on_none_assignment = False
 
     @classmethod
     def setup_classes(cls):
@@ -2696,6 +2787,7 @@ class ScalarRemoveTest(object):
                 "b",
                 creator=lambda b: AB(b=b),
                 cascade_scalar_deletes=cls.cascade_scalar_deletes,
+                create_on_none_assignment=cls.create_on_none_assignment,
             )
 
         if cls.useobject:
@@ -2764,7 +2856,12 @@ class ScalarRemoveTest(object):
 
         a1.b = None
 
-        assert a1.ab is None
+        if self.create_on_none_assignment:
+            assert isinstance(a1.ab, AB)
+            assert a1.ab is not None
+            eq_(a1.ab.b, None)
+        else:
+            assert a1.ab is None
 
     def test_del_already_nonpresent(self):
         if self.useobject:
@@ -2852,7 +2949,6 @@ class ScalarRemoveTest(object):
 class ScalarRemoveListObjectCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = True
     cascade_scalar_deletes = True
@@ -2862,7 +2958,6 @@ class ScalarRemoveListObjectCascade(
 class ScalarRemoveScalarObjectCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = True
     cascade_scalar_deletes = True
@@ -2872,7 +2967,6 @@ class ScalarRemoveScalarObjectCascade(
 class ScalarRemoveListScalarCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = False
     cascade_scalar_deletes = True
@@ -2882,7 +2976,6 @@ class ScalarRemoveListScalarCascade(
 class ScalarRemoveScalarScalarCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = False
     cascade_scalar_deletes = True
@@ -2892,7 +2985,6 @@ class ScalarRemoveScalarScalarCascade(
 class ScalarRemoveListObjectNoCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = True
     cascade_scalar_deletes = False
@@ -2902,27 +2994,36 @@ class ScalarRemoveListObjectNoCascade(
 class ScalarRemoveScalarObjectNoCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = True
     cascade_scalar_deletes = False
     uselist = False
 
 
+class ScalarRemoveScalarObjectNoCascadeNoneAssign(
+    ScalarRemoveScalarObjectNoCascade
+):
+    create_on_none_assignment = True
+
+
 class ScalarRemoveListScalarNoCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = False
     cascade_scalar_deletes = False
     uselist = True
 
 
+class ScalarRemoveListScalarNoCascadeNoneAssign(
+    ScalarRemoveScalarObjectNoCascade
+):
+    create_on_none_assignment = True
+
+
 class ScalarRemoveScalarScalarNoCascade(
     ScalarRemoveTest, fixtures.DeclarativeMappedTest
 ):
-
     run_create_tables = None
     useobject = False
     cascade_scalar_deletes = False
@@ -2939,7 +3040,7 @@ class InfoTest(fixtures.TestBase):
         eq_(assoc.info, {})
 
     def test_via_cls(self):
-        class Foob(object):
+        class Foob:
             assoc = association_proxy("a", "b")
 
         eq_(Foob.assoc.info, {})
@@ -3096,7 +3197,7 @@ class MultiOwnerTest(
             "Association proxy D.c refers to an attribute 'csub_only_data'",
             fn,
             *arg,
-            **kw
+            **kw,
         )
 
     def _assert_raises_attribute(self, message, fn, *arg, **kw):
@@ -3270,7 +3371,7 @@ class ProxyOfSynonymTest(AssertsCompiledSQL, fixtures.DeclarativeMappedTest):
 
         self.assert_compile(
             A.b_data == "foo",
-            "EXISTS (SELECT 1 FROM a, b WHERE a.id = b.a_id "
+            "EXISTS (SELECT 1 FROM b, a WHERE a.id = b.a_id "
             "AND b.data = :data_1)",
         )
 
@@ -3318,7 +3419,7 @@ class SynonymOfProxyTest(AssertsCompiledSQL, fixtures.DeclarativeMappedTest):
 
         self.assert_compile(
             A.b_data_syn == "foo",
-            "EXISTS (SELECT 1 FROM a, b WHERE a.id = b.a_id "
+            "EXISTS (SELECT 1 FROM b, a WHERE a.id = b.a_id "
             "AND b.data = :data_1)",
         )
 
@@ -3449,7 +3550,7 @@ class ProxyHybridTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
 
         eq_(
             str(A.well_behaved_b_data == 5),
-            "EXISTS (SELECT 1 \nFROM a, b \nWHERE "
+            "EXISTS (SELECT 1 \nFROM b, a \nWHERE "
             "a.id = b.aid AND b.data = :data_1)",
         )
 
@@ -3489,7 +3590,6 @@ class ProxyPlainPropertyTest(fixtures.DeclarativeMappedTest):
 
     @classmethod
     def setup_classes(cls):
-
         Base = cls.DeclarativeBasic
 
         class A(Base):
@@ -3712,3 +3812,239 @@ class ScopeBehaviorTest(fixtures.DeclarativeMappedTest):
         gc_collect()
 
         assert len(a1bs) == 2
+
+
+class DeclOrmForms(fixtures.TestBase):
+    """test issues related to #8880, #8878, #8876"""
+
+    def test_straight_decl_usage(self, decl_base):
+        """test use of assoc prox as the default descriptor for a
+        dataclasses.field.
+
+        """
+
+        class User(decl_base):
+            __allow_unmapped__ = True
+
+            __tablename__ = "user"
+
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+            user_keyword_associations: Mapped[List[UserKeywordAssociation]] = (
+                relationship(
+                    back_populates="user",
+                    cascade="all, delete-orphan",
+                )
+            )
+
+            keywords: AssociationProxy[list[str]] = association_proxy(
+                "user_keyword_associations", "keyword"
+            )
+
+        UserKeywordAssociation, Keyword = self._keyword_mapping(
+            User, decl_base
+        )
+
+        self._assert_keyword_assoc_mapping(
+            User, UserKeywordAssociation, Keyword, init=True
+        )
+
+    @testing.variation("embed_in_field", [True, False])
+    @testing.combinations(
+        {},
+        {"repr": False},
+        {"repr": True},
+        ({"kw_only": True}, testing.requires.python310),
+        {"init": False},
+        {"default_factory": True},
+        argnames="field_kw",
+    )
+    def test_dc_decl_usage(self, dc_decl_base, embed_in_field, field_kw):
+        """test use of assoc prox as the default descriptor for a
+        dataclasses.field.
+
+        This exercises #8880
+
+        """
+
+        if field_kw.pop("default_factory", False) and not embed_in_field:
+            has_default_factory = True
+            field_kw["default_factory"] = lambda: [
+                Keyword("l1"),
+                Keyword("l2"),
+                Keyword("l3"),
+            ]
+        else:
+            has_default_factory = False
+
+        class User(dc_decl_base):
+            __allow_unmapped__ = True
+
+            __tablename__ = "user"
+
+            id: Mapped[int] = mapped_column(
+                primary_key=True, repr=True, init=False
+            )
+
+            user_keyword_associations: Mapped[List[UserKeywordAssociation]] = (
+                relationship(
+                    back_populates="user",
+                    cascade="all, delete-orphan",
+                    init=False,
+                )
+            )
+
+            if embed_in_field:
+                # this is an incorrect form to use with
+                # MappedAsDataclass.  However, we want to make sure it
+                # works as kind of a test to ensure we are being as well
+                # behaved as possible with an explicit dataclasses.field(),
+                # by testing that it uses its normal descriptor-as-default
+                # behavior
+                keywords: AssociationProxy[list[str]] = dataclasses.field(
+                    default=association_proxy(
+                        "user_keyword_associations", "keyword"
+                    ),
+                    **field_kw,
+                )
+            else:
+                keywords: AssociationProxy[list[str]] = association_proxy(
+                    "user_keyword_associations", "keyword", **field_kw
+                )
+
+        UserKeywordAssociation, Keyword = self._dc_keyword_mapping(
+            User, dc_decl_base
+        )
+
+        # simplify __qualname__ so we can test repr() more easily
+        User.__qualname__ = "mod.User"
+        UserKeywordAssociation.__qualname__ = "mod.UserKeywordAssociation"
+        Keyword.__qualname__ = "mod.Keyword"
+
+        init = field_kw.get("init", True)
+
+        u1 = self._assert_keyword_assoc_mapping(
+            User,
+            UserKeywordAssociation,
+            Keyword,
+            init=init,
+            has_default_factory=has_default_factory,
+        )
+
+        if field_kw.get("repr", True):
+            eq_(
+                repr(u1),
+                "mod.User(id=None, user_keyword_associations=["
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k1'), user=...), "
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k2'), user=...), "
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k3'), user=...)], "
+                "keywords=[mod.Keyword(id=None, keyword='k1'), "
+                "mod.Keyword(id=None, keyword='k2'), "
+                "mod.Keyword(id=None, keyword='k3')])",
+            )
+        else:
+            eq_(
+                repr(u1),
+                "mod.User(id=None, user_keyword_associations=["
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k1'), user=...), "
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k2'), user=...), "
+                "mod.UserKeywordAssociation(user_id=None, keyword_id=None, "
+                "keyword=mod.Keyword(id=None, keyword='k3'), user=...)])",
+            )
+
+    def _assert_keyword_assoc_mapping(
+        self,
+        User,
+        UserKeywordAssociation,
+        Keyword,
+        *,
+        init,
+        has_default_factory=False,
+    ):
+        if not init:
+            with expect_raises_message(
+                TypeError, r"got an unexpected keyword argument 'keywords'"
+            ):
+                User(keywords=[Keyword("k1"), Keyword("k2"), Keyword("k3")])
+
+        if has_default_factory:
+            u1 = User()
+            eq_(u1.keywords, [Keyword("l1"), Keyword("l2"), Keyword("l3")])
+
+            eq_(
+                [ka.keyword.keyword for ka in u1.user_keyword_associations],
+                ["l1", "l2", "l3"],
+            )
+
+        if init:
+            u1 = User(keywords=[Keyword("k1"), Keyword("k2"), Keyword("k3")])
+        else:
+            u1 = User()
+            u1.keywords = [Keyword("k1"), Keyword("k2"), Keyword("k3")]
+
+        eq_(u1.keywords, [Keyword("k1"), Keyword("k2"), Keyword("k3")])
+
+        eq_(
+            [ka.keyword.keyword for ka in u1.user_keyword_associations],
+            ["k1", "k2", "k3"],
+        )
+
+        return u1
+
+    def _keyword_mapping(self, User, decl_base):
+        class UserKeywordAssociation(decl_base):
+            __tablename__ = "user_keyword"
+            user_id: Mapped[int] = mapped_column(
+                ForeignKey("user.id"), primary_key=True
+            )
+            keyword_id: Mapped[int] = mapped_column(
+                ForeignKey("keyword.id"), primary_key=True
+            )
+
+            user: Mapped[User] = relationship(
+                back_populates="user_keyword_associations",
+            )
+
+            keyword: Mapped[Keyword] = relationship()
+
+            def __init__(self, keyword=None, user=None):
+                self.user = user
+                self.keyword = keyword
+
+        class Keyword(ComparableMixin, decl_base):
+            __tablename__ = "keyword"
+            id: Mapped[int] = mapped_column(primary_key=True)
+            keyword: Mapped[str] = mapped_column()
+
+            def __init__(self, keyword):
+                self.keyword = keyword
+
+        return UserKeywordAssociation, Keyword
+
+    def _dc_keyword_mapping(self, User, dc_decl_base):
+        class UserKeywordAssociation(dc_decl_base):
+            __tablename__ = "user_keyword"
+            user_id: Mapped[int] = mapped_column(
+                ForeignKey("user.id"), primary_key=True, init=False
+            )
+            keyword_id: Mapped[int] = mapped_column(
+                ForeignKey("keyword.id"), primary_key=True, init=False
+            )
+
+            keyword: Mapped[Keyword] = relationship(default=None)
+
+            user: Mapped[User] = relationship(
+                back_populates="user_keyword_associations", default=None
+            )
+
+        class Keyword(dc_decl_base):
+            __tablename__ = "keyword"
+            id: Mapped[int] = mapped_column(primary_key=True, init=False)
+            keyword: Mapped[str] = mapped_column(init=True)
+
+        return UserKeywordAssociation, Keyword

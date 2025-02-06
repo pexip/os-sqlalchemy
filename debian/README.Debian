@@ -2,22 +2,33 @@ SQLAlchemy Debian notes
 =======================
 
 The package does not depend on various low level database libraries, but it
-does suggest all the supported ones. Please install the ones you intend to use.
-
-For SQLite3:
-	python3 standard library
+does suggest supported ones. Please install the ones you intend to use.
 
 For PostgreSQL:
-	python3-psycopg2
+• python3-asyncpg (asynchronous)
+• python3-pg8000 (pure Python implementation)
+• python3-psycopg2
+• python3-psycopg2cffi (psycopg2 implementation using CFFI, i.e. calling C code from Python)
+
+For SQLite:
+• python3-aiosqlite (asynchronous)
+
+For MariaDB:
+• python3-mariadb-connector
 
 For MySQL:
-	python3-mysqldb
+• python3-mysqldb
+• python3-mysql.connector (pure Python implementation)
 
-For Firebird:
-	python3-fdb
+For ODBC:
+• python3-pyodbc
 
 For Microsoft SQL Server:
-	python3-pymssql
+• python3-pymssql
+
+For Oracle:
+• python3-oracledb
+• python3-cx-oracle (from contrib)
 
 Documentation and examples can be found in the python-sqlalchemy-doc package
 in /usr/share/doc/python-sqlalchemy-doc.

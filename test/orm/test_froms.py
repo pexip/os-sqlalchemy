@@ -6,6 +6,7 @@ from sqlalchemy import exists
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import Integer
+from sqlalchemy import literal
 from sqlalchemy import literal_column
 from sqlalchemy import select
 from sqlalchemy import String
@@ -25,6 +26,8 @@ from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.context import ORMSelectCompileState
@@ -36,7 +39,9 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from test.orm import _fixtures
@@ -349,8 +354,9 @@ class RawSelectTest(QueryTest, AssertsCompiledSQL):
             .set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL)
             .statement,
             "SELECT users.id AS users_id, users.name AS users_name "
-            "FROM users, "
-            "(SELECT users.id AS id, users.name AS name FROM users) AS anon_1",
+            "FROM "
+            "(SELECT users.id AS id, users.name AS name FROM users) "
+            "AS anon_1, users",
         )
 
         self.assert_compile(
@@ -492,7 +498,7 @@ class EntityFromSubqueryTest(QueryTest, AssertsCompiledSQL):
 
         assert_raises_message(
             sa_exc.ArgumentError,
-            "Column expression or FROM clause expected, got "
+            "Column expression, FROM clause, or other .* expected, got "
             "<sqlalchemy.sql.selectable.Select .*> object resolved from "
             "<AliasedClass .* User> object. To create a FROM clause from "
             "a <class 'sqlalchemy.sql.selectable.Select'> object",
@@ -522,7 +528,6 @@ class EntityFromSubqueryTest(QueryTest, AssertsCompiledSQL):
         )
 
     def test_no_joinedload(self):
-
         User = self.classes.User
 
         s = fixture_session()
@@ -771,8 +776,9 @@ class EntityFromSubqueryTest(QueryTest, AssertsCompiledSQL):
 
         self.assert_compile(
             select(u2),
-            "SELECT users_1.id, users_1.name FROM users AS users_1, "
-            "(SELECT users.id AS id, users.name AS name FROM users) AS anon_1",
+            "SELECT users_1.id, users_1.name FROM "
+            "(SELECT users.id AS id, users.name AS name FROM users) "
+            "AS anon_1, users AS users_1",
         )
 
     def test_multiple_entities(self):
@@ -863,8 +869,8 @@ class ColumnAccessTest(QueryTest, AssertsCompiledSQL):
         self.assert_compile(
             q.filter(User.name == "ed"),
             "SELECT users.id AS users_id, users.name AS users_name "
-            "FROM users, (SELECT users.id AS id, users.name AS name FROM "
-            "users) AS anon_1 WHERE users.name = :name_1",
+            "FROM (SELECT users.id AS id, users.name AS name FROM "
+            "users) AS anon_1, users WHERE users.name = :name_1",
         )
 
     def test_anonymous_expression_oldstyle(self):
@@ -1016,7 +1022,6 @@ class ColumnAccessTest(QueryTest, AssertsCompiledSQL):
         )
 
     def test_anonymous_expression_plus_flag_aliased_join_newstyle(self):
-
         User = self.classes.User
         Address = self.classes.Address
         addresses = self.tables.addresses
@@ -1726,7 +1731,6 @@ class InstancesTest(QueryTest, AssertsCompiledSQL):
         sess.expunge_all()
 
         def go():
-
             # same as above, except Order is aliased, so two adapters
             # are applied by the eager loader
 
@@ -1889,7 +1893,9 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
                 .order_by(User.id)
             )
 
-        compile_state = ORMSelectCompileState.create_for_statement(stmt, None)
+        compile_state = ORMSelectCompileState._create_orm_context(
+            stmt, toplevel=True, compiler=None
+        )
         is_(compile_state._primary_entity, None)
 
     def test_column_queries_one(self):
@@ -2324,7 +2330,6 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
             q4,
             q5,
         ]:
-
             eq_(
                 q.all(),
                 [
@@ -2724,6 +2729,46 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
 
             eq_(q.all(), expected)
 
+    def test_unrelated_column(self):
+        """Test for #9217"""
+
+        User = self.classes.User
+
+        q = select(User.id, func.lower("SANDY").label("name")).where(
+            User.id == 7
+        )
+
+        s = select(User).from_statement(q)
+        sess = fixture_session()
+        res = sess.scalars(s).one()
+        in_("name", res.__dict__)
+        eq_(res, User(name="sandy", id=7))
+
+    def test_unrelated_column_col_prop(self, decl_base):
+        """Test for #9217 combined with #9273"""
+
+        class User(ComparableEntity, decl_base):
+            __tablename__ = "some_user_table"
+
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+            name: Mapped[str] = mapped_column()
+            age: Mapped[int] = mapped_column()
+
+            is_adult: Mapped[bool] = column_property(age >= 18)
+
+        stmt = select(
+            literal(1).label("id"),
+            literal("John").label("name"),
+            literal(30).label("age"),
+        )
+
+        s = select(User).from_statement(stmt)
+        sess = fixture_session()
+        res = sess.scalars(s).one()
+
+        eq_(res, User(name="John", age=30, id=1))
+
     def test_expression_selectable_matches_mzero(self):
         User, Address = self.classes.User, self.classes.Address
 
@@ -2818,10 +2863,10 @@ class MixedEntitiesTest(QueryTest, AssertsCompiledSQL):
             .filter(ag1.email_address > 5),
             "SELECT users.id "
             "AS users_id, users.name AS users_name, addresses.email_address "
-            "AS addresses_email_address FROM addresses, users JOIN "
+            "AS addresses_email_address FROM users JOIN "
             "(SELECT addresses.id AS id, sum(length(addresses.email_address)) "
             "AS email_address FROM addresses GROUP BY addresses.user_id) AS "
-            "anon_1 ON users.id = addresses.user_id "
+            "anon_1 ON users.id = addresses.user_id, addresses "
             "WHERE addresses.email_address > :email_address_1",
         )
 
@@ -2948,9 +2993,10 @@ class SelectFromTest(QueryTest, AssertsCompiledSQL):
         self.assert_compile(
             sess.query(ualias).select_from(ua).filter(ualias.id > ua.id),
             "SELECT users_1.id AS users_1_id, users_1.name AS users_1_name "
-            "FROM users AS users_1, ("
+            "FROM ("
             "SELECT users.id AS id, users.name AS name FROM users "
-            "WHERE users.id IN (__[POSTCOMPILE_id_1])) AS anon_1 "
+            "WHERE users.id IN (__[POSTCOMPILE_id_1])) AS anon_1, "
+            "users AS users_1 "
             "WHERE users_1.id > anon_1.id",
             check_post_param={"id_1": [7, 8]},
         )
@@ -3584,7 +3630,7 @@ class ExternalColumnsTest(QueryTest):
             User,
             users,
             properties={
-                "concat": column_property((users.c.id * 2)),
+                "concat": column_property(users.c.id * 2),
                 "count": column_property(
                     select(func.count(addresses.c.id))
                     .where(
@@ -3751,7 +3797,7 @@ class ExternalColumnsTest(QueryTest):
                 "addresses": relationship(
                     Address, backref="user", order_by=addresses.c.id
                 ),
-                "concat": column_property((users.c.id * 2)),
+                "concat": column_property(users.c.id * 2),
                 "count": column_property(
                     select(func.count(addresses.c.id))
                     .where(
@@ -3868,13 +3914,13 @@ class TestOverlyEagerEquivalentCols(fixtures.MappedTest):
             self.tables.sub1,
         )
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
-        class Sub1(fixtures.ComparableEntity):
+        class Sub1(ComparableEntity):
             pass
 
-        class Sub2(fixtures.ComparableEntity):
+        class Sub2(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -4044,7 +4090,6 @@ class CorrelateORMTest(fixtures.TestBase, testing.AssertsCompiledSQL):
         Base.registry.dispose()
 
     def _combinations(fn):
-
         return testing.combinations(
             (True,), (False,), argnames="include_property"
         )(

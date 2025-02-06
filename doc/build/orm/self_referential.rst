@@ -27,19 +27,23 @@ class called ``Node``, representing a tree structure::
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer, ForeignKey("node.id"))
-        data = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        parent_id = mapped_column(Integer, ForeignKey("node.id"))
+        data = mapped_column(String(50))
         children = relationship("Node")
 
-With this structure, a graph such as the following::
+With this structure, a graph such as the following:
+
+.. sourcecode:: text
 
     root --+---> child1
            +---> child2 --+--> subchild1
            |              +--> subchild2
            +---> child3
 
-Would be represented with data such as::
+Would be represented with data such as:
+
+.. sourcecode:: text
 
     id       parent_id     data
     ---      -------       ----
@@ -61,9 +65,9 @@ that indicate those which should be considered to be "remote"::
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer, ForeignKey("node.id"))
-        data = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        parent_id = mapped_column(Integer, ForeignKey("node.id"))
+        data = mapped_column(String(50))
         parent = relationship("Node", remote_side=[id])
 
 Where above, the ``id`` column is applied as the :paramref:`_orm.relationship.remote_side`
@@ -72,18 +76,20 @@ of the ``parent`` :func:`_orm.relationship`, thus establishing
 then behaves as a many-to-one.
 
 As always, both directions can be combined into a bidirectional
-relationship using the :func:`.backref` function::
+relationship using two :func:`_orm.relationship` constructs linked by
+:paramref:`_orm.relationship.back_populates`::
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer, ForeignKey("node.id"))
-        data = Column(String(50))
-        children = relationship("Node", backref=backref("parent", remote_side=[id]))
+        id = mapped_column(Integer, primary_key=True)
+        parent_id = mapped_column(Integer, ForeignKey("node.id"))
+        data = mapped_column(String(50))
+        children = relationship("Node", back_populates="parent")
+        parent = relationship("Node", back_populates="children", remote_side=[id])
 
-There are several examples included with SQLAlchemy illustrating
-self-referential strategies; these include :ref:`examples_adjacencylist` and
-:ref:`examples_xmlpersistence`.
+.. seealso::
+
+    :ref:`examples_adjacencylist` - working example, updated for SQLAlchemy 2.0
 
 Composite Adjacency Lists
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -104,14 +110,16 @@ to a specific folder within that account::
             ),
         )
 
-        account_id = Column(Integer, primary_key=True)
-        folder_id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer)
-        name = Column(String)
+        account_id = mapped_column(Integer, primary_key=True)
+        folder_id = mapped_column(Integer, primary_key=True)
+        parent_id = mapped_column(Integer)
+        name = mapped_column(String)
 
         parent_folder = relationship(
-            "Folder", backref="child_folders", remote_side=[account_id, folder_id]
+            "Folder", back_populates="child_folders", remote_side=[account_id, folder_id]
         )
+
+        child_folders = relationship("Folder", back_populates="parent_folder")
 
 Above, we pass ``account_id`` into the :paramref:`_orm.relationship.remote_side` list.
 :func:`_orm.relationship` recognizes that the ``account_id`` column here
@@ -127,7 +135,7 @@ Self-Referential Query Strategies
 Querying of self-referential structures works like any other query::
 
     # get all nodes named 'child2'
-    session.query(Node).filter(Node.data == "child2")
+    session.scalars(select(Node).where(Node.data == "child2"))
 
 However extra care is needed when attempting to join along
 the foreign key from one level of the tree to the next.  In SQL,
@@ -144,10 +152,13 @@ looks like:
     from sqlalchemy.orm import aliased
 
     nodealias = aliased(Node)
-    session.query(Node).filter(Node.data == "subchild1").join(
-        Node.parent.of_type(nodealias)
-    ).filter(nodealias.data == "child2").all()
-    {opensql}SELECT node.id AS node_id,
+    session.scalars(
+        select(Node)
+        .where(Node.data == "subchild1")
+        .join(Node.parent.of_type(nodealias))
+        .where(nodealias.data == "child2")
+    ).all()
+    {execsql}SELECT node.id AS node_id,
             node.parent_id AS node_parent_id,
             node.data AS node_data
     FROM node JOIN node AS node_1
@@ -156,8 +167,6 @@ looks like:
         AND node_1.data = ?
     ['subchild1', 'child2']
 
-For an example of using :func:`_orm.aliased` to join across an arbitrarily long
-chain of self-referential nodes, see :ref:`examples_xmlpersistence`.
 
 .. _self_referential_eager_loading:
 
@@ -179,14 +188,14 @@ configured via :paramref:`~.relationships.join_depth`:
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        parent_id = Column(Integer, ForeignKey("node.id"))
-        data = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        parent_id = mapped_column(Integer, ForeignKey("node.id"))
+        data = mapped_column(String(50))
         children = relationship("Node", lazy="joined", join_depth=2)
 
 
-    session.query(Node).all()
-    {opensql}SELECT node_1.id AS node_1_id,
+    session.scalars(select(Node)).all()
+    {execsql}SELECT node_1.id AS node_1_id,
             node_1.parent_id AS node_1_parent_id,
             node_1.data AS node_1_data,
             node_2.id AS node_2_id,
