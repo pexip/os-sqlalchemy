@@ -26,8 +26,6 @@ except ImportError:
 
 
 class DataclassesTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
-    __requires__ = ("dataclasses",)
-
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -232,8 +230,6 @@ class DataclassesTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
 
 
 class PlainDeclarativeDataclassesTest(DataclassesTest):
-    __requires__ = ("dataclasses",)
-
     run_setup_classes = "each"
     run_setup_mappers = "each"
 
@@ -259,7 +255,6 @@ class PlainDeclarativeDataclassesTest(DataclassesTest):
         @declarative
         @dataclasses.dataclass
         class SpecialWidget(Widget):
-
             magic: bool = False
 
             __mapper_args__ = dict(
@@ -275,7 +270,9 @@ class PlainDeclarativeDataclassesTest(DataclassesTest):
             widgets: List[Widget] = dataclasses.field(default_factory=list)
             widget_count: int = dataclasses.field(init=False)
 
-            widgets = relationship("Widget")
+            __mapper_args__ = dict(
+                properties=dict(widgets=relationship("Widget"))
+            )
 
             def __post_init__(self):
                 self.widget_count = len(self.widgets)
@@ -296,8 +293,6 @@ class PlainDeclarativeDataclassesTest(DataclassesTest):
 class FieldEmbeddedDeclarativeDataclassesTest(
     fixtures.DeclarativeMappedTest, DataclassesTest
 ):
-    __requires__ = ("dataclasses",)
-
     @classmethod
     def setup_classes(cls):
         declarative = cls.DeclarativeBasic.registry.mapped
@@ -391,15 +386,12 @@ class FieldEmbeddedDeclarativeDataclassesTest(
 
 
 class FieldEmbeddedWMixinTest(FieldEmbeddedDeclarativeDataclassesTest):
-    __requires__ = ("dataclasses",)
-
     @classmethod
     def setup_classes(cls):
         declarative = cls.DeclarativeBasic.registry.mapped
 
         @dataclasses.dataclass
         class SurrogateWidgetPK:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             widget_id: int = dataclasses.field(
@@ -444,7 +436,6 @@ class FieldEmbeddedWMixinTest(FieldEmbeddedDeclarativeDataclassesTest):
 
         @dataclasses.dataclass
         class SurrogateAccountPK:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             account_id = Column(
@@ -521,15 +512,12 @@ class FieldEmbeddedWMixinTest(FieldEmbeddedDeclarativeDataclassesTest):
 
 
 class FieldEmbeddedMixinWLambdaTest(fixtures.DeclarativeMappedTest):
-    __requires__ = ("dataclasses",)
-
     @classmethod
     def setup_classes(cls):
         declarative = cls.DeclarativeBasic.registry.mapped
 
         @dataclasses.dataclass
         class WidgetDC:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             widget_id: int = dataclasses.field(
@@ -597,7 +585,6 @@ class FieldEmbeddedMixinWLambdaTest(fixtures.DeclarativeMappedTest):
 
         @dataclasses.dataclass
         class AccountDC:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             # relationship on mixin
@@ -699,15 +686,12 @@ class FieldEmbeddedMixinWLambdaTest(fixtures.DeclarativeMappedTest):
 
 
 class FieldEmbeddedMixinWDeclaredAttrTest(FieldEmbeddedMixinWLambdaTest):
-    __requires__ = ("dataclasses",)
-
     @classmethod
     def setup_classes(cls):
         declarative = cls.DeclarativeBasic.registry.mapped
 
         @dataclasses.dataclass
         class WidgetDC:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             widget_id: int = dataclasses.field(
@@ -776,7 +760,6 @@ class FieldEmbeddedMixinWDeclaredAttrTest(FieldEmbeddedMixinWLambdaTest):
 
         @dataclasses.dataclass
         class AccountDC:
-
             __sa_dataclass_metadata_key__ = "sa"
 
             # relationship on mixin
@@ -840,8 +823,6 @@ class FieldEmbeddedMixinWDeclaredAttrTest(FieldEmbeddedMixinWLambdaTest):
 
 
 class PropagationFromMixinTest(fixtures.TestBase):
-    __requires__ = ("dataclasses",)
-
     def test_propagate_w_plain_mixin_col(self, run_test):
         @dataclasses.dataclass
         class CommonMixin:
@@ -901,7 +882,6 @@ class PropagationFromMixinTest(fixtures.TestBase):
             @declarative
             @dataclasses.dataclass
             class BaseType(CommonMixin):
-
                 discriminator = Column("type", String(50))
                 __mapper_args__ = dict(polymorphic_on=discriminator)
                 id = Column(Integer, primary_key=True)
@@ -910,14 +890,12 @@ class PropagationFromMixinTest(fixtures.TestBase):
             @declarative
             @dataclasses.dataclass
             class Single(BaseType):
-
                 __tablename__ = None
                 __mapper_args__ = dict(polymorphic_identity="type1")
 
             @declarative
             @dataclasses.dataclass
             class Joined(BaseType):
-
                 __mapper_args__ = dict(polymorphic_identity="type2")
                 id = Column(
                     Integer, ForeignKey("basetype.id"), primary_key=True
@@ -926,7 +904,7 @@ class PropagationFromMixinTest(fixtures.TestBase):
             eq_(BaseType.__table__.name, "basetype")
             eq_(
                 list(BaseType.__table__.c.keys()),
-                ["timestamp", "type", "id", "value"],
+                ["type", "id", "value", "timestamp"],
             )
             eq_(BaseType.__table__.kwargs, {"mysql_engine": "InnoDB"})
             assert Single.__table__ is BaseType.__table__
@@ -940,8 +918,6 @@ class PropagationFromMixinTest(fixtures.TestBase):
 
 
 class PropagationFromAbstractTest(fixtures.TestBase):
-    __requires__ = ("dataclasses",)
-
     def test_propagate_w_plain_mixin_col(self, run_test):
         @dataclasses.dataclass
         class BaseType:
@@ -1005,7 +981,6 @@ class PropagationFromAbstractTest(fixtures.TestBase):
             @declarative
             @dataclasses.dataclass
             class Single(BaseType):
-
                 __tablename__ = "single"
                 __mapper_args__ = dict(polymorphic_identity="type1")
 

@@ -16,9 +16,8 @@ high demand, so in the interests of having an easy StackOverflow answer
 queued up, here it is.   The author recommends "table_per_related"
 or "table_per_association" instead of this approach.
 
-.. versionadded:: 0.8.3
-
 """
+
 from sqlalchemy import and_
 from sqlalchemy import Column
 from sqlalchemy import create_engine
@@ -35,7 +34,7 @@ from sqlalchemy.orm import Session
 
 
 @as_declarative()
-class Base(object):
+class Base:
     """Base class which provides automated table name
     and surrogate primary key column.
 
@@ -86,7 +85,7 @@ class Address(Base):
         )
 
 
-class HasAddresses(object):
+class HasAddresses:
     """HasAddresses mixin, creates a relationship to
     the address_association table for each parent.
 

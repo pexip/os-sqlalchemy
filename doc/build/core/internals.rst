@@ -7,8 +7,23 @@ Some key internal constructs are listed here.
 
 .. currentmodule:: sqlalchemy
 
+.. autoclass:: sqlalchemy.engine.BindTyping
+    :members:
+
 .. autoclass:: sqlalchemy.engine.Compiled
     :members:
+
+.. autoclass:: sqlalchemy.engine.interfaces.DBAPIConnection
+    :members:
+    :undoc-members:
+
+.. autoclass:: sqlalchemy.engine.interfaces.DBAPICursor
+    :members:
+    :undoc-members:
+
+.. autoclass:: sqlalchemy.engine.interfaces.DBAPIType
+    :members:
+    :undoc-members:
 
 .. autoclass:: sqlalchemy.sql.compiler.DDLCompiler
     :members:
@@ -26,6 +41,9 @@ Some key internal constructs are listed here.
 
 
 .. autoclass:: sqlalchemy.engine.ExecutionContext
+    :members:
+
+.. autoclass:: sqlalchemy.sql.compiler.ExpandedState
     :members:
 
 
@@ -51,3 +69,4 @@ Some key internal constructs are listed here.
 
 .. autoclass:: sqlalchemy.engine.AdaptedConnection
     :members:
+

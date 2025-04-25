@@ -12,10 +12,9 @@ tutorial.
     :maxdepth: 2
 
     quickstart
-    tutorial
     mapper_config
     relationships
-    loading_objects
+    queryguide/index
     session
     extending
     extensions/index

@@ -33,22 +33,24 @@ from sqlalchemy.orm.interfaces import MANYTOONE
 from sqlalchemy.orm.interfaces import ONETOMANY
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
-from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.entities import BasicEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
 
 
-class _RelationshipErrors(object):
+class _RelationshipErrors:
     def _assert_raises_no_relevant_fks(
         self, fn, expr, relname, primary, *arg, **kw
     ):
@@ -62,7 +64,7 @@ class _RelationshipErrors(object):
             % (primary, expr, relname),
             fn,
             *arg,
-            **kw
+            **kw,
         )
 
     def _assert_raises_no_equality(
@@ -81,7 +83,7 @@ class _RelationshipErrors(object):
             % (primary, expr, relname),
             fn,
             *arg,
-            **kw
+            **kw,
         )
 
     def _assert_raises_ambig_join(
@@ -101,7 +103,7 @@ class _RelationshipErrors(object):
                 % (relname, secondary_arg),
                 fn,
                 *arg,
-                **kw
+                **kw,
             )
         else:
             assert_raises_message(
@@ -115,7 +117,7 @@ class _RelationshipErrors(object):
                 "foreign key reference to the parent table." % (relname,),
                 fn,
                 *arg,
-                **kw
+                **kw,
             )
 
     def _assert_raises_no_join(self, fn, relname, secondary_arg, *arg, **kw):
@@ -132,7 +134,7 @@ class _RelationshipErrors(object):
                 "'secondaryjoin' expressions" % (relname, secondary_arg),
                 fn,
                 *arg,
-                **kw
+                **kw,
             )
         else:
             assert_raises_message(
@@ -146,7 +148,7 @@ class _RelationshipErrors(object):
                 "expression." % (relname,),
                 fn,
                 *arg,
-                **kw
+                **kw,
             )
 
     def _assert_raises_ambiguous_direction(self, fn, relname, *arg, **kw):
@@ -161,7 +163,7 @@ class _RelationshipErrors(object):
             "via the foreign_keys argument." % relname,
             fn,
             *arg,
-            **kw
+            **kw,
         )
 
     def _assert_raises_no_local_remote(self, fn, relname, *arg, **kw):
@@ -176,12 +178,11 @@ class _RelationshipErrors(object):
             % (relname),
             fn,
             *arg,
-            **kw
+            **kw,
         )
 
 
 class DependencyTwoParentTest(fixtures.MappedTest):
-
     """Test flush() when a mapper is dependent on multiple relationships"""
 
     run_setup_mappers = "once"
@@ -334,10 +335,10 @@ class M2ODontOverwriteFKTest(fixtures.MappedTest):
     def _fixture(self, uselist=False):
         a, b = self.tables.a, self.tables.b
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -428,12 +429,13 @@ class M2ODontOverwriteFKTest(fixtures.MappedTest):
 
 
 class DirectSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
-
     """Tests the ultimate join condition, a single column
     that points to itself, e.g. within a SQL function or similar.
     The test is against a materialized path setup.
 
-    this is an **extremely** unusual case::
+    this is an **extremely** unusual case:
+
+    .. sourcecode:: text
 
         Entity
         ------
@@ -529,12 +531,12 @@ class DirectSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
         Entity = self.classes.Entity
         self.assert_compile(
             Entity.descendants.property.strategy._lazywhere,
-            "entity.path LIKE :param_1 || :path_1",
+            "entity.path LIKE (:param_1 || :path_1)",
         )
 
         self.assert_compile(
             Entity.descendants.property.strategy._rev_lazywhere,
-            ":param_1 LIKE entity.path || :path_1",
+            ":param_1 LIKE (entity.path || :path_1)",
         )
 
     def test_ancestors_lazyload_clause(self):
@@ -543,12 +545,12 @@ class DirectSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
         # :param_1 LIKE (:param_1 || :path_1)
         self.assert_compile(
             Entity.anscestors.property.strategy._lazywhere,
-            ":param_1 LIKE entity.path || :path_1",
+            ":param_1 LIKE (entity.path || :path_1)",
         )
 
         self.assert_compile(
             Entity.anscestors.property.strategy._rev_lazywhere,
-            "entity.path LIKE :param_1 || :path_1",
+            "entity.path LIKE (:param_1 || :path_1)",
         )
 
     def test_descendants_lazyload(self):
@@ -634,7 +636,7 @@ class DirectSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
         self.assert_compile(
             sess.query(Entity).join(Entity.descendants.of_type(da)),
             "SELECT entity.path AS entity_path FROM entity JOIN entity AS "
-            "entity_1 ON entity_1.path LIKE entity.path || :path_1",
+            "entity_1 ON entity_1.path LIKE (entity.path || :path_1)",
         )
 
 
@@ -655,18 +657,15 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
         add_bsub2_a_viewonly=False,
         add_b_a_overlaps=None,
     ):
-
         Base = self.mapper_registry.generate_base()
 
         class A(Base):
-
             __tablename__ = "a"
 
             id = Column(Integer, primary_key=True)
             a_members = relationship("AMember", backref="a")
 
         class AMember(Base):
-
             __tablename__ = "a_member"
 
             a_id = Column(Integer, ForeignKey("a.id"), primary_key=True)
@@ -706,14 +705,12 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
         # however, *no* warning should be emitted otherwise.
 
         class BSub1(B):
-
             if add_bsub1_a:
                 a = relationship("A")
 
             __mapper_args__ = {"polymorphic_identity": "bsub1"}
 
         class BSub2(B):
-
             if add_bsub2_a_viewonly:
                 a = relationship("A", viewonly=True)
 
@@ -728,7 +725,6 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
         return A, AMember, B, BSub1, BSub2
 
     def _fixture_two(self, setup_backrefs=False, setup_overlaps=False):
-
         Base = self.mapper_registry.generate_base()
 
         # purposely using the comma to make sure parsing the comma works
@@ -873,15 +869,13 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
 
     @testing.provide_metadata
     def test_simple_warn(self):
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship '(?:Child.parent|Parent.children)' will copy "
             r"column parent.id to column child.parent_id, which conflicts "
             r"with relationship\(s\): '(?:Parent.children|Child.parent)' "
-            r"\(copies parent.id to child.parent_id\).",
-            self._fixture_two,
-            setup_backrefs=False,
-        )
+            r"\(copies parent.id to child.parent_id\)."
+        ):
+            self._fixture_two(setup_backrefs=False)
 
     @testing.combinations((True,), (False,), argnames="set_overlaps")
     def test_fixture_five(self, metadata, set_overlaps):
@@ -964,15 +958,12 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
 
     @testing.provide_metadata
     def test_double_rel_same_mapper_warns(self):
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship 'Parent.child[12]' will copy column parent.id to "
             r"column child.parent_id, which conflicts with relationship\(s\): "
-            r"'Parent.child[12]' \(copies parent.id to child.parent_id\)",
-            self._fixture_three,
-            use_same_mappers=True,
-            setup_overlaps=False,
-        )
+            r"'Parent.child[12]' \(copies parent.id to child.parent_id\)"
+        ):
+            self._fixture_three(use_same_mappers=True, setup_overlaps=False)
 
     @testing.provide_metadata
     def test_double_rel_same_mapper_overlaps_works(self):
@@ -984,48 +975,37 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
 
     @testing.provide_metadata
     def test_warn_one(self):
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship '(?:BSub1.a|BSub2.a_member|B.a)' will copy column "
-            r"(?:a.id|a_member.a_id) to column b.a_id",
-            self._fixture_one,
-            add_b_a=True,
-            add_bsub1_a=True,
-        )
+            r"(?:a.id|a_member.a_id) to column b.a_id"
+        ):
+            self._fixture_one(add_b_a=True, add_bsub1_a=True)
 
     @testing.provide_metadata
     def test_warn_two(self):
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship '(?:BSub1.a|B.a_member)' will copy column "
-            r"(?:a.id|a_member.a_id) to column b.a_id",
-            self._fixture_one,
-            add_b_amember=True,
-            add_bsub1_a=True,
-        )
+            r"(?:a.id|a_member.a_id) to column b.a_id"
+        ):
+            self._fixture_one(add_b_amember=True, add_bsub1_a=True)
 
     @testing.provide_metadata
     def test_warn_three(self):
-        assert_warns_message(
-            exc.SAWarning,
-            r"relationship '(?:BSub1.a|B.a_member|B.a)' will copy column "
-            r"(?:a.id|a_member.a_id) to column b.a_id",
-            self._fixture_one,
-            add_b_amember=True,
-            add_bsub1_a=True,
-            add_b_a=True,
-        )
+        with expect_warnings(
+            r"relationship '(?:BSub1.a|B.a_member|BSub2.a_member|B.a)' "
+            r"will copy column (?:a.id|a_member.a_id) to column b.a_id",
+        ):
+            self._fixture_one(
+                add_b_amember=True, add_bsub1_a=True, add_b_a=True
+            )
 
     @testing.provide_metadata
     def test_warn_four(self):
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship '(?:B.a|BSub2.a_member|B.a)' will copy column "
-            r"(?:a.id|a_member.a_id) to column b.a_id",
-            self._fixture_one,
-            add_bsub2_a_viewonly=True,
-            add_b_a=True,
-        )
+            r"(?:a.id|a_member.a_id) to column b.a_id"
+        ):
+            self._fixture_one(add_bsub2_a_viewonly=True, add_b_a=True)
 
     @testing.provide_metadata
     def test_works_one(self):
@@ -1035,19 +1015,20 @@ class OverlappingFksSiblingTest(fixtures.MappedTest):
 
     @testing.provide_metadata
     def test_works_two(self):
-        # doesn't actually work with real FKs beacuse it creates conflicts :)
+        # doesn't actually work with real FKs because it creates conflicts :)
         self._fixture_one(
             add_b_a=True, add_b_a_overlaps="a_member", add_bsub1_a=True
         )
 
 
 class CompositeSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
-
     """Tests a composite FK where, in
     the relationship(), one col points
     to itself in the same table.
 
-    this is a very unusual case::
+    this is a very unusual case:
+
+    .. sourcecode:: text
 
         company         employee
         ----------      ----------
@@ -1302,12 +1283,11 @@ class CompositeSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
             },
         )
 
-        assert_warns_message(
-            exc.SAWarning,
+        with expect_warnings(
             r"relationship .* will copy column .* to column "
-            r"employee_t.company_id, which conflicts with relationship\(s\)",
-            configure_mappers,
-        )
+            r"employee_t.company_id, which conflicts with relationship\(s\)"
+        ):
+            configure_mappers()
 
     def test_annotated_no_overwriting(self):
         Employee, Company, employee_t, company_t = (
@@ -1355,7 +1335,8 @@ class CompositeSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
             # this happens
             assert_raises_message(
                 AssertionError,
-                "Dependency rule tried to blank-out primary key column "
+                "Dependency rule on column 'employee_t.company_id' "
+                "tried to blank-out primary key column "
                 "'employee_t.company_id'",
                 sess.flush,
             )
@@ -1397,25 +1378,21 @@ class CompositeSelfRefFKTest(fixtures.MappedTest, AssertsCompiledSQL):
         employee_t = self.tables.employee_t
         eq_(
             set(Employee.employees.property.local_remote_pairs),
-            set(
-                [
-                    (employee_t.c.company_id, employee_t.c.company_id),
-                    (employee_t.c.emp_id, employee_t.c.reports_to_id),
-                ]
-            ),
+            {
+                (employee_t.c.company_id, employee_t.c.company_id),
+                (employee_t.c.emp_id, employee_t.c.reports_to_id),
+            },
         )
         eq_(
             Employee.employees.property.remote_side,
-            set([employee_t.c.company_id, employee_t.c.reports_to_id]),
+            {employee_t.c.company_id, employee_t.c.reports_to_id},
         )
         eq_(
             set(Employee.reports_to.property.local_remote_pairs),
-            set(
-                [
-                    (employee_t.c.company_id, employee_t.c.company_id),
-                    (employee_t.c.reports_to_id, employee_t.c.emp_id),
-                ]
-            ),
+            {
+                (employee_t.c.company_id, employee_t.c.company_id),
+                (employee_t.c.reports_to_id, employee_t.c.emp_id),
+            },
         )
 
     def _setup_data(self, sess):
@@ -1530,7 +1507,6 @@ class CompositeJoinPartialFK(fixtures.MappedTest, AssertsCompiledSQL):
 
 
 class SynonymsAsFKsTest(fixtures.MappedTest):
-
     """Syncrules on foreign keys that are also primary"""
 
     @classmethod
@@ -1602,7 +1578,6 @@ class SynonymsAsFKsTest(fixtures.MappedTest):
 
 
 class FKsAsPksTest(fixtures.MappedTest):
-
     """Syncrules on foreign keys that are also primary"""
 
     @classmethod
@@ -1668,7 +1643,7 @@ class FKsAsPksTest(fixtures.MappedTest):
             sess.commit()
 
     def test_no_delete_PK_AtoB(self):
-        """A cant be deleted without B because B would have no PK value."""
+        """A can't be deleted without B because B would have no PK value."""
 
         tableB, A, B, tableA = (
             self.tables.tableB,
@@ -1694,7 +1669,7 @@ class FKsAsPksTest(fixtures.MappedTest):
 
             assert_raises_message(
                 AssertionError,
-                "Dependency rule tried to blank-out "
+                "Dependency rule on column 'tableA.id' tried to blank-out "
                 "primary key column 'tableB.id' on instance ",
                 sess.flush,
             )
@@ -1721,7 +1696,7 @@ class FKsAsPksTest(fixtures.MappedTest):
             b1.a = None
             assert_raises_message(
                 AssertionError,
-                "Dependency rule tried to blank-out "
+                "Dependency rule on column 'tableA.id' tried to blank-out "
                 "primary key column 'tableB.id' on instance ",
                 sess.flush,
             )
@@ -1732,7 +1707,7 @@ class FKsAsPksTest(fixtures.MappedTest):
     def test_nullPKsOK_BtoA(self, metadata, connection):
         A, tableA = self.classes.A, self.tables.tableA
 
-        # postgresql cant handle a nullable PK column...?
+        # postgresql can't handle a nullable PK column...?
         tableC = Table(
             "tablec",
             metadata,
@@ -1747,7 +1722,7 @@ class FKsAsPksTest(fixtures.MappedTest):
         )
         tableC.create(connection)
 
-        class C(fixtures.BasicEntity):
+        class C(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1887,7 +1862,6 @@ class FKsAsPksTest(fixtures.MappedTest):
 
 
 class UniqueColReferenceSwitchTest(fixtures.MappedTest):
-
     """test a relationship based on a primary
     join against a unique non-pk column"""
 
@@ -1952,7 +1926,6 @@ class UniqueColReferenceSwitchTest(fixtures.MappedTest):
 
 
 class RelationshipToSelectableTest(fixtures.MappedTest):
-
     """Test a map to a select that relates to a map to the table."""
 
     @classmethod
@@ -1985,10 +1958,10 @@ class RelationshipToSelectableTest(fixtures.MappedTest):
     def test_basic(self):
         items = self.tables.items
 
-        class Container(fixtures.BasicEntity):
+        class Container(BasicEntity):
             pass
 
-        class LineItem(fixtures.BasicEntity):
+        class LineItem(BasicEntity):
             pass
 
         container_select = (
@@ -2046,7 +2019,6 @@ class RelationshipToSelectableTest(fixtures.MappedTest):
 
 
 class FKEquatedToConstantTest(fixtures.MappedTest):
-
     """test a relationship with a non-column entity in the primary join,
     is not viewonly, and also has the non-column's clause mentioned in the
     foreign keys list.
@@ -2077,10 +2049,10 @@ class FKEquatedToConstantTest(fixtures.MappedTest):
     def test_basic(self):
         tag_foo, tags = self.tables.tag_foo, self.tables.tags
 
-        class Tag(fixtures.ComparableEntity):
+        class Tag(ComparableEntity):
             pass
 
-        class TagInstance(fixtures.ComparableEntity):
+        class TagInstance(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -2183,7 +2155,6 @@ class BackrefPropagatesForwardsArgs(fixtures.MappedTest):
 
 
 class AmbiguousJoinInterpretedAsSelfRef(fixtures.MappedTest):
-
     """test ambiguous joins due to FKs on both sides treated as
     self-referential.
 
@@ -2278,7 +2249,6 @@ class AmbiguousJoinInterpretedAsSelfRef(fixtures.MappedTest):
 
 
 class ManualBackrefTest(_fixtures.FixtureTest):
-
     """Test explicit relationships that are backrefs to each other."""
 
     run_inserts = None
@@ -2378,7 +2348,7 @@ class ManualBackrefTest(_fixtures.FixtureTest):
             r"User.addresses references "
             r"relationship Address.dingaling, "
             r"which does not "
-            r"reference mapper mapped class User->users",
+            r"reference mapper Mapper\[User\(users\)\]",
             configure_mappers,
         )
 
@@ -2417,7 +2387,6 @@ class ManualBackrefTest(_fixtures.FixtureTest):
 
 
 class NoLoadBackPopulates(_fixtures.FixtureTest):
-
     """test the noload stratgegy which unlike others doesn't use
     lazyloader to set up instrumentation"""
 
@@ -2517,10 +2486,10 @@ class JoinConditionErrorTest(fixtures.TestBase):
         )
         t2 = Table("t2", m, Column("id", Integer, primary_key=True))
 
-        class C1(object):
+        class C1:
             pass
 
-        class C2(object):
+        class C2:
             pass
 
         registry.map_imperatively(
@@ -2540,7 +2509,6 @@ class JoinConditionErrorTest(fixtures.TestBase):
         argnames="argname, arg",
     )
     def test_invalid_string_args(self, registry, argname, arg):
-
         kw = {argname: arg}
         Base = registry.generate_base()
 
@@ -2578,10 +2546,10 @@ class JoinConditionErrorTest(fixtures.TestBase):
             Column("t1id", Integer, ForeignKey("t1.id")),
         )
 
-        class C1(object):
+        class C1:
             pass
 
-        class C2(object):
+        class C2:
             pass
 
         registry.map_imperatively(C1, t1, properties={"c2": relationship(C2)})
@@ -2649,10 +2617,10 @@ class JoinConditionErrorTest(fixtures.TestBase):
             Column("t1id", Integer),
         )
 
-        class C1(object):
+        class C1:
             pass
 
-        class C2(object):
+        class C2:
             pass
 
         registry.map_imperatively(C1, t1, properties={"c2": relationship(C2)})
@@ -2665,7 +2633,6 @@ class JoinConditionErrorTest(fixtures.TestBase):
 
 
 class TypeMatchTest(fixtures.MappedTest):
-
     """test errors raised when trying to add items
     whose type is not handled by a relationship"""
 
@@ -2710,13 +2677,13 @@ class TypeMatchTest(fixtures.MappedTest):
     def test_o2m_oncascade(self):
         a, c, b = (self.tables.a, self.tables.c, self.tables.b)
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
-        class C(fixtures.BasicEntity):
+        class C(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -2744,13 +2711,13 @@ class TypeMatchTest(fixtures.MappedTest):
     def test_o2m_onflush(self):
         a, c, b = (self.tables.a, self.tables.c, self.tables.b)
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
-        class C(fixtures.BasicEntity):
+        class C(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -2775,10 +2742,10 @@ class TypeMatchTest(fixtures.MappedTest):
     def test_o2m_nopoly_onflush(self):
         a, c, b = (self.tables.a, self.tables.c, self.tables.b)
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
         class C(B):
@@ -2806,13 +2773,13 @@ class TypeMatchTest(fixtures.MappedTest):
     def test_m2o_nopoly_onflush(self):
         a, b, d = (self.tables.a, self.tables.b, self.tables.d)
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
         class B(A):
             pass
 
-        class D(fixtures.BasicEntity):
+        class D(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(A, a)
@@ -2833,13 +2800,13 @@ class TypeMatchTest(fixtures.MappedTest):
     def test_m2o_oncascade(self):
         a, b, d = (self.tables.a, self.tables.b, self.tables.d)
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
-        class D(fixtures.BasicEntity):
+        class D(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(A, a)
@@ -2893,10 +2860,10 @@ class TypedAssociationTable(fixtures.MappedTest):
 
         t2, t3, t1 = (self.tables.t2, self.tables.t3, self.tables.t1)
 
-        class T1(fixtures.BasicEntity):
+        class T1(BasicEntity):
             pass
 
-        class T2(fixtures.BasicEntity):
+        class T2(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(T2, t2)
@@ -2933,7 +2900,6 @@ class TypedAssociationTable(fixtures.MappedTest):
 
 
 class CustomOperatorTest(fixtures.MappedTest, AssertsCompiledSQL):
-
     """test op() in conjunction with join conditions"""
 
     run_create_tables = run_deletes = None
@@ -2956,10 +2922,10 @@ class CustomOperatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_join_on_custom_op_legacy_is_comparison(self):
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -2983,10 +2949,10 @@ class CustomOperatorTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_join_on_custom_bool_op(self):
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3044,10 +3010,10 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
         return s
 
     def test_o2m_viewonly_oneside(self):
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3077,10 +3043,10 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
         assert b1 not in sess.dirty
 
     def test_m2o_viewonly_oneside(self):
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3110,10 +3076,10 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
         assert b1 not in sess.dirty
 
     def test_o2m_viewonly_only(self):
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3131,10 +3097,10 @@ class ViewOnlyHistoryTest(fixtures.MappedTest):
         self._assert_fk(a1, b1, False)
 
     def test_m2o_viewonly_only(self):
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(A, self.tables.t1)
@@ -3179,10 +3145,10 @@ class ViewOnlyM2MBackrefTest(fixtures.MappedTest):
     def test_viewonly(self):
         t1t2, t2, t1 = (self.tables.t1t2, self.tables.t2, self.tables.t1)
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3211,7 +3177,6 @@ class ViewOnlyM2MBackrefTest(fixtures.MappedTest):
 
 
 class ViewOnlyOverlappingNames(fixtures.MappedTest):
-
     """'viewonly' mappings with overlapping PK column names."""
 
     @classmethod
@@ -3254,13 +3219,13 @@ class ViewOnlyOverlappingNames(fixtures.MappedTest):
 
         t2, t3, t1 = (self.tables.t2, self.tables.t3, self.tables.t1)
 
-        class C1(fixtures.BasicEntity):
+        class C1(BasicEntity):
             pass
 
-        class C2(fixtures.BasicEntity):
+        class C2(BasicEntity):
             pass
 
-        class C3(fixtures.BasicEntity):
+        class C3(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3300,8 +3265,8 @@ class ViewOnlyOverlappingNames(fixtures.MappedTest):
         sess.expunge_all()
 
         c1 = sess.get(C1, c1.id)
-        assert set([x.id for x in c1.t2s]) == set([c2a.id, c2b.id])
-        assert set([x.id for x in c1.t2_view]) == set([c2b.id])
+        assert {x.id for x in c1.t2s} == {c2a.id, c2b.id}
+        assert {x.id for x in c1.t2_view} == {c2b.id}
 
 
 class ViewOnlySyncBackref(fixtures.MappedTest):
@@ -3388,10 +3353,10 @@ class ViewOnlySyncBackref(fixtures.MappedTest):
     @testing.combinations(True, False, None, argnames="B_a_sync")
     @testing.combinations(True, False, argnames="B_a_view")
     def test_case(self, B_a_view, B_a_sync, A_bs_view, A_bs_sync):
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         case = self.cases[(B_a_view, B_a_sync, A_bs_view, A_bs_sync)]
@@ -3467,7 +3432,6 @@ class ViewOnlySyncBackref(fixtures.MappedTest):
 
 
 class ViewOnlyUniqueNames(fixtures.MappedTest):
-
     """'viewonly' mappings with unique PK column names."""
 
     @classmethod
@@ -3518,13 +3482,13 @@ class ViewOnlyUniqueNames(fixtures.MappedTest):
 
         t2, t3, t1 = (self.tables.t2, self.tables.t3, self.tables.t1)
 
-        class C1(fixtures.BasicEntity):
+        class C1(BasicEntity):
             pass
 
-        class C2(fixtures.BasicEntity):
+        class C2(BasicEntity):
             pass
 
-        class C3(fixtures.BasicEntity):
+        class C3(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3564,12 +3528,11 @@ class ViewOnlyUniqueNames(fixtures.MappedTest):
         sess.expunge_all()
 
         c1 = sess.get(C1, c1.t1id)
-        assert set([x.t2id for x in c1.t2s]) == set([c2a.t2id, c2b.t2id])
-        assert set([x.t2id for x in c1.t2_view]) == set([c2b.t2id])
+        assert {x.t2id for x in c1.t2s} == {c2a.t2id, c2b.t2id}
+        assert {x.t2id for x in c1.t2_view} == {c2b.t2id}
 
 
 class ViewOnlyLocalRemoteM2M(fixtures.TestBase):
-
     """test that local-remote is correctly determined for m2m"""
 
     def test_local_remote(self, registry):
@@ -3584,10 +3547,10 @@ class ViewOnlyLocalRemoteM2M(fixtures.TestBase):
             Column("t2_id", Integer, ForeignKey("t2.id")),
         )
 
-        class A(object):
+        class A:
             pass
 
-        class B(object):
+        class B:
             pass
 
         registry.map_imperatively(B, t2)
@@ -3608,7 +3571,6 @@ class ViewOnlyLocalRemoteM2M(fixtures.TestBase):
 
 
 class ViewOnlyNonEquijoin(fixtures.MappedTest):
-
     """'viewonly' mappings based on non-equijoins."""
 
     @classmethod
@@ -3624,10 +3586,10 @@ class ViewOnlyNonEquijoin(fixtures.MappedTest):
     def test_viewonly_join(self):
         bars, foos = self.tables.bars, self.tables.foos
 
-        class Foo(fixtures.ComparableEntity):
+        class Foo(ComparableEntity):
             pass
 
-        class Bar(fixtures.ComparableEntity):
+        class Bar(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3670,7 +3632,6 @@ class ViewOnlyNonEquijoin(fixtures.MappedTest):
 
 
 class ViewOnlyRepeatedRemoteColumn(fixtures.MappedTest):
-
     """'viewonly' mappings that contain the same 'remote' column twice"""
 
     @classmethod
@@ -3697,10 +3658,10 @@ class ViewOnlyRepeatedRemoteColumn(fixtures.MappedTest):
     def test_relationship_on_or(self):
         bars, foos = self.tables.bars, self.tables.foos
 
-        class Foo(fixtures.ComparableEntity):
+        class Foo(ComparableEntity):
             pass
 
-        class Bar(fixtures.ComparableEntity):
+        class Bar(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3744,7 +3705,6 @@ class ViewOnlyRepeatedRemoteColumn(fixtures.MappedTest):
 
 
 class ViewOnlyRepeatedLocalColumn(fixtures.MappedTest):
-
     """'viewonly' mappings that contain the same 'local' column twice"""
 
     @classmethod
@@ -3772,10 +3732,10 @@ class ViewOnlyRepeatedLocalColumn(fixtures.MappedTest):
     def test_relationship_on_or(self):
         bars, foos = self.tables.bars, self.tables.foos
 
-        class Foo(fixtures.ComparableEntity):
+        class Foo(ComparableEntity):
             pass
 
-        class Bar(fixtures.ComparableEntity):
+        class Bar(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3819,7 +3779,6 @@ class ViewOnlyRepeatedLocalColumn(fixtures.MappedTest):
 
 
 class ViewOnlyComplexJoin(_RelationshipErrors, fixtures.MappedTest):
-
     """'viewonly' mappings with a complex join condition."""
 
     @classmethod
@@ -4021,7 +3980,6 @@ class FunctionAsPrimaryJoinTest(fixtures.DeclarativeMappedTest):
 
 
 class RemoteForeignBetweenColsTest(fixtures.DeclarativeMappedTest):
-
     """test a complex annotation using between().
 
     Using declarative here as an integration test for the local()
@@ -4034,7 +3992,7 @@ class RemoteForeignBetweenColsTest(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class Network(fixtures.ComparableEntity, Base):
+        class Network(ComparableEntity, Base):
             __tablename__ = "network"
 
             id = Column(
@@ -4051,7 +4009,7 @@ class RemoteForeignBetweenColsTest(fixtures.DeclarativeMappedTest):
                 viewonly=True,
             )
 
-        class Address(fixtures.ComparableEntity, Base):
+        class Address(ComparableEntity, Base):
             __tablename__ = "address"
 
             ip_addr = Column(Integer, primary_key=True)
@@ -4399,7 +4357,8 @@ class InvalidRemoteSideTest(fixtures.MappedTest):
         assert_raises_message(
             sa.exc.ArgumentError,
             "T1.t1s and back-reference T1.parent are "
-            r"both of the same direction symbol\('ONETOMANY'\).  Did you "
+            r"both of the same "
+            r"direction .*RelationshipDirection.ONETOMANY.*.  Did you "
             "mean to set remote_side on the many-to-one side ?",
             configure_mappers,
         )
@@ -4422,7 +4381,8 @@ class InvalidRemoteSideTest(fixtures.MappedTest):
         assert_raises_message(
             sa.exc.ArgumentError,
             "T1.t1s and back-reference T1.parent are "
-            r"both of the same direction symbol\('MANYTOONE'\).  Did you "
+            r"both of the same direction .*RelationshipDirection.MANYTOONE.*."
+            "Did you "
             "mean to set remote_side on the many-to-one side ?",
             configure_mappers,
         )
@@ -4442,7 +4402,8 @@ class InvalidRemoteSideTest(fixtures.MappedTest):
         # can't be sure of ordering here
         assert_raises_message(
             sa.exc.ArgumentError,
-            r"both of the same direction symbol\('ONETOMANY'\).  Did you "
+            r"both of the same direction "
+            r".*RelationshipDirection.ONETOMANY.*.  Did you "
             "mean to set remote_side on the many-to-one side ?",
             configure_mappers,
         )
@@ -4466,7 +4427,8 @@ class InvalidRemoteSideTest(fixtures.MappedTest):
         # can't be sure of ordering here
         assert_raises_message(
             sa.exc.ArgumentError,
-            r"both of the same direction symbol\('MANYTOONE'\).  Did you "
+            r"both of the same direction "
+            r".*RelationshipDirection.MANYTOONE.*.  Did you "
             "mean to set remote_side on the many-to-one side ?",
             configure_mappers,
         )
@@ -4519,7 +4481,7 @@ class AmbiguousFKResolutionTest(_RelationshipErrors, fixtures.MappedTest):
         self.mapper_registry.map_imperatively(B, b)
         sa.orm.configure_mappers()
         assert A.bs.property.primaryjoin.compare(a.c.id == b.c.aid_1)
-        eq_(A.bs.property._calculated_foreign_keys, set([b.c.aid_1]))
+        eq_(A.bs.property._calculated_foreign_keys, {b.c.aid_1})
 
     def test_with_pj_o2m(self):
         A, B = self.classes.A, self.classes.B
@@ -4534,7 +4496,7 @@ class AmbiguousFKResolutionTest(_RelationshipErrors, fixtures.MappedTest):
         self.mapper_registry.map_imperatively(B, b)
         sa.orm.configure_mappers()
         assert A.bs.property.primaryjoin.compare(a.c.id == b.c.aid_1)
-        eq_(A.bs.property._calculated_foreign_keys, set([b.c.aid_1]))
+        eq_(A.bs.property._calculated_foreign_keys, {b.c.aid_1})
 
     def test_with_annotated_pj_o2m(self):
         A, B = self.classes.A, self.classes.B
@@ -4549,7 +4511,7 @@ class AmbiguousFKResolutionTest(_RelationshipErrors, fixtures.MappedTest):
         self.mapper_registry.map_imperatively(B, b)
         sa.orm.configure_mappers()
         assert A.bs.property.primaryjoin.compare(a.c.id == b.c.aid_1)
-        eq_(A.bs.property._calculated_foreign_keys, set([b.c.aid_1]))
+        eq_(A.bs.property._calculated_foreign_keys, {b.c.aid_1})
 
     def test_no_fks_m2m(self):
         A, B = self.classes.A, self.classes.B
@@ -4634,7 +4596,6 @@ class SecondaryArgTest(fixtures.TestBase):
 class SecondaryNestedJoinTest(
     fixtures.MappedTest, AssertsCompiledSQL, testing.AssertsExecutionResults
 ):
-
     """test support for a relationship where the 'secondary' table is a
     compound join().
 
@@ -4788,7 +4749,6 @@ class SecondaryNestedJoinTest(
         )
 
     def test_render_lazyload(self):
-
         A = self.classes.A
         sess = fixture_session()
         a1 = sess.query(A).filter(A.name == "a1").first()
@@ -4798,7 +4758,7 @@ class SecondaryNestedJoinTest(
 
         # here, the "lazy" strategy has to ensure the "secondary"
         # table is part of the "select_from()", since it's a join().
-        # referring to just the columns wont actually render all those
+        # referring to just the columns won't actually render all those
         # join conditions.
         self.assert_sql_execution(
             testing.db,
@@ -5451,8 +5411,8 @@ class InvalidRelationshipEscalationTestM2M(
         )
         self.mapper_registry.map_imperatively(Bar, bars)
         sa.orm.configure_mappers()
-        eq_(Foo.bars.property._join_condition.local_columns, set([foos.c.id]))
-        eq_(Bar.foos.property._join_condition.local_columns, set([bars.c.id]))
+        eq_(Foo.bars.property._join_condition.local_columns, {foos.c.id})
+        eq_(Bar.foos.property._join_condition.local_columns, {bars.c.id})
 
     def test_bad_primaryjoin(self):
         foobars_with_fks, bars, Bar, foobars, Foo, foos = (
@@ -5635,7 +5595,7 @@ class ActiveHistoryFlagTest(_fixtures.FixtureTest):
     def test_composite_property_flag(self):
         Order, orders = self.classes.Order, self.tables.orders
 
-        class MyComposite(object):
+        class MyComposite:
             def __init__(self, description, isopen):
                 self.description = description
                 self.isopen = isopen
@@ -5967,7 +5927,6 @@ class InactiveHistoryNoRaiseTest(_fixtures.FixtureTest):
         delete,
         legacy_inactive_history_style,
     ):
-
         if delete:
             assert not backref, "delete and backref are mutually exclusive"
 
@@ -6285,6 +6244,42 @@ class RaiseLoadTest(_fixtures.FixtureTest):
                 lambda: a1.user,
             )
 
+    def test_raiseload_from_eager_load(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+        Dingaling, dingalings = self.classes.Dingaling, self.tables.dingalings
+        self.mapper_registry.map_imperatively(Dingaling, dingalings)
+
+        self.mapper_registry.map_imperatively(
+            Address,
+            addresses,
+            properties=dict(dingaling=relationship(Dingaling)),
+        )
+
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties=dict(addresses=relationship(Address)),
+        )
+
+        q = (
+            fixture_session()
+            .query(User)
+            .options(joinedload(User.addresses).raiseload("*"))
+            .filter_by(id=7)
+        )
+        u1 = q.first()
+        assert "addresses" in u1.__dict__
+        with expect_raises_message(
+            sa.exc.InvalidRequestError,
+            "'Address.dingaling' is not available due to lazy='raise'",
+        ):
+            u1.addresses[0].dingaling
+
     def test_raiseload_wildcard_all_classes_option(self):
         Address, addresses, users, User = (
             self.classes.Address,
@@ -6368,7 +6363,6 @@ class RaiseLoadTest(_fixtures.FixtureTest):
 
 
 class RelationDeprecationTest(fixtures.MappedTest):
-
     """test usage of the old 'relation' function."""
 
     run_inserts = "once"
@@ -6517,8 +6511,8 @@ class SecondaryIncludesLocalColsTest(fixtures.MappedTest):
             CompiledSQL(
                 "SELECT a.id AS a_id, b.id AS b_id FROM a JOIN "
                 "(SELECT a.id AS "
-                "aid, b.id AS id FROM a JOIN b ON a.b_ids LIKE :id_1 || "
-                "b.id || :param_1) AS anon_1 ON a.id = anon_1.aid "
+                "aid, b.id AS id FROM a JOIN b ON a.b_ids LIKE (:id_1 || "
+                "b.id || :param_1)) AS anon_1 ON a.id = anon_1.aid "
                 "JOIN b ON b.id = anon_1.id ORDER BY a.id, b.id"
             )
         )
@@ -6539,7 +6533,7 @@ class SecondaryIncludesLocalColsTest(fixtures.MappedTest):
             CompiledSQL(
                 "SELECT a.id AS a_id, a.b_ids AS a_b_ids, b_1.id AS b_1_id "
                 "FROM a LEFT OUTER JOIN ((SELECT a.id AS aid, b.id AS id "
-                "FROM a JOIN b ON a.b_ids LIKE :id_1 || b.id || :param_1) "
+                "FROM a JOIN b ON a.b_ids LIKE (:id_1 || b.id || :param_1)) "
                 "AS anon_1 JOIN b AS b_1 ON b_1.id = anon_1.id) "
                 "ON a.id = anon_1.aid WHERE a.id = :id_2",
                 params=[{"id_1": "%", "param_1": "%", "id_2": 2}],
@@ -6552,14 +6546,14 @@ class SecondaryIncludesLocalColsTest(fixtures.MappedTest):
         s = fixture_session()
 
         with assert_engine(testing.db) as asserter_:
-            eq_(set(id_ for id_, in s.query(A.id).filter(A.bs.any())), {1, 2})
+            eq_({id_ for id_, in s.query(A.id).filter(A.bs.any())}, {1, 2})
 
         asserter_.assert_(
             CompiledSQL(
                 "SELECT a.id AS a_id FROM a WHERE "
-                "EXISTS (SELECT 1 FROM (SELECT a.id AS aid, b.id AS id "
-                "FROM a JOIN b ON a.b_ids LIKE :id_1 || b.id || :param_1) "
-                "AS anon_1, b WHERE a.id = anon_1.aid AND b.id = anon_1.id)",
+                "EXISTS (SELECT 1 FROM b, (SELECT a.id AS aid, b.id AS id "
+                "FROM a JOIN b ON a.b_ids LIKE (:id_1 || b.id || :param_1)) "
+                "AS anon_1 WHERE a.id = anon_1.aid AND b.id = anon_1.id)",
                 params=[],
             )
         )
@@ -6588,7 +6582,7 @@ class SecondaryIncludesLocalColsTest(fixtures.MappedTest):
             CompiledSQL(
                 "SELECT a_1.id AS a_1_id, b.id AS b_id FROM a AS a_1 JOIN "
                 "(SELECT a.id AS aid, b.id AS id FROM a JOIN b ON a.b_ids "
-                "LIKE :id_1 || b.id || :param_1) AS anon_1 "
+                "LIKE (:id_1 || b.id || :param_1)) AS anon_1 "
                 "ON a_1.id = anon_1.aid JOIN b ON b.id = anon_1.id "
                 "WHERE a_1.id IN (__[POSTCOMPILE_primary_keys])",
                 params=[{"id_1": "%", "param_1": "%", "primary_keys": [2]}],

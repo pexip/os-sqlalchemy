@@ -1,3 +1,6 @@
+import random
+import uuid
+
 import sqlalchemy as sa
 from sqlalchemy import CheckConstraint
 from sqlalchemy import event
@@ -7,11 +10,14 @@ from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import Index
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import literal
+from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import UniqueConstraint
-from sqlalchemy import util
+from sqlalchemy import Uuid
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import as_declarative
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import clear_mappers
@@ -21,32 +27,43 @@ from sqlalchemy.orm import composite
 from sqlalchemy.orm import configure_mappers
 from sqlalchemy.orm import decl_base
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import declared_attr
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import descriptor_props
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import joinedload
-from sqlalchemy.orm import mapper
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
+from sqlalchemy.orm import MappedAsDataclass
+from sqlalchemy.orm import MappedColumn
+from sqlalchemy.orm import Mapper
 from sqlalchemy.orm import registry
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import synonym
 from sqlalchemy.orm import synonym_for
+from sqlalchemy.orm.decl_api import add_mapped_attribute
+from sqlalchemy.orm.decl_api import DeclarativeBaseNoMeta
 from sqlalchemy.orm.decl_api import DeclarativeMeta
 from sqlalchemy.orm.decl_base import _DeferredMapperConfig
 from sqlalchemy.orm.events import InstrumentationEvents
 from sqlalchemy.orm.events import MapperEvents
+from sqlalchemy.schema import PrimaryKeyConstraint
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import assertions
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
-from sqlalchemy.util import with_metaclass
 
 
 Base = None
@@ -54,38 +71,7 @@ Base = None
 User = Address = None
 
 
-class DeclarativeTestBase(
-    fixtures.TestBase,
-    testing.AssertsExecutionResults,
-    testing.AssertsCompiledSQL,
-):
-    __dialect__ = "default"
-
-    base_style = "dynamic"
-
-    def setup_test(self):
-        global Base
-
-        if self.base_style == "dynamic":
-            Base = declarative_base()
-        elif self.base_style == "explicit":
-            mapper_registry = registry()
-
-            class Base(with_metaclass(DeclarativeMeta)):
-                __abstract__ = True
-                registry = mapper_registry
-                metadata = mapper_registry.metadata
-
-    def teardown_test(self):
-        close_all_sessions()
-        clear_mappers()
-        Base.metadata.drop_all(testing.db)
-
-
-@testing.combinations(
-    ("dynamic",), ("explicit",), argnames="base_style", id_="s"
-)
-class DeclarativeTest(DeclarativeTestBase):
+class DeclarativeBaseSetupsTest(fixtures.TestBase):
     def test_unbound_declarative_base(self):
         Base = declarative_base()
 
@@ -112,8 +98,1052 @@ class DeclarativeTest(DeclarativeTestBase):
         with testing.expect_raises(exc.UnboundExecutionError):
             s.get_bind(User)
 
+    @testing.variation(
+        "base_type",
+        ["declbase", "declbasenometa", "declbasefn", "asdeclarative"],
+    )
+    def test_reg_constructor_is_present(self, base_type):
+        """test #9171"""
+
+        if base_type.declbase:
+
+            class Base(DeclarativeBase):
+                pass
+
+        elif base_type.declbasenometa:
+
+            class Base(DeclarativeBaseNoMeta):
+                pass
+
+        elif base_type.declbasefn:
+            Base = declarative_base()
+        elif base_type.asdeclarative:
+
+            @as_declarative()
+            class Base:
+                pass
+
+        else:
+            base_type.fail()
+
+        # check for direct assignment
+        is_(Base.registry.constructor, Base.__init__)
+        is_(Base.__dict__["__init__"], Base.__init__)
+
+        class fakeself:
+            foo = None
+            bar = None
+
+        fs = fakeself()
+        Base.__init__(fs, foo="bar", bar="bat")
+        eq_(fs.foo, "bar")
+        eq_(fs.bar, "bat")
+
+    @testing.variation(
+        "base_type",
+        [
+            "declbase",
+            "declbasenometa",
+            "declbasefn",
+            "asdeclarative",
+            "mixinonbase",
+        ],
+    )
+    def test_reg_constructor_custom_init(self, base_type):
+        """test for #9171 testing what an explicit __init__ does.
+
+        Here we decide that newer DeclarativeBase superclasses should
+        honor the ``__init__`` that's given.
+
+        """
+
+        m1 = mock.Mock()
+
+        if base_type.declbase:
+
+            class Base(DeclarativeBase):
+                def __init__(self, x=None):
+                    m1.init(x)
+
+        elif base_type.declbasenometa:
+
+            class Base(DeclarativeBaseNoMeta):
+                def __init__(self, x=None):
+                    m1.init(x)
+
+        elif base_type.declbasefn:
+
+            class _B:
+                def __init__(self, x=None):
+                    m1.init(x)
+
+            Base = declarative_base(cls=_B)
+        elif base_type.mixinonbase:
+
+            class Mixin:
+                def __init__(self, x=None):
+                    m1.init(x)
+
+            class Base(Mixin, DeclarativeBase):
+                pass
+
+        elif base_type.asdeclarative:
+
+            @as_declarative()
+            class Base:
+                def __init__(self, x=None):
+                    m1.init(x)
+
+        else:
+            base_type.fail()
+
+        class fakeself:
+            pass
+
+        fs = fakeself()
+
+        if (
+            base_type.declbase
+            or base_type.declbasenometa
+            or base_type.mixinonbase
+        ):
+            Base.__init__(fs, x=5)
+            eq_(m1.mock_calls, [mock.call.init(5)])
+        else:
+            with expect_raises_message(
+                TypeError, "'x' is an invalid keyword argument for fakeself"
+            ):
+                Base.__init__(fs, x=5)
+
+    def test_insert_sentinel_param_custom_type_maintained(self, decl_base):
+        class A(decl_base):
+            __tablename__ = "a"
+            id: Mapped[uuid.UUID] = mapped_column(
+                default=uuid.uuid4, primary_key=True, insert_sentinel=True
+            )
+            data: Mapped[str]
+
+        is_(A.id.expression.type._type_affinity, Uuid)
+
+    def test_insert_sentinel_param_default_type(self, decl_base):
+        class A(decl_base):
+            __tablename__ = "a"
+            id: Mapped[int] = mapped_column(
+                primary_key=True, insert_sentinel=True
+            )
+            data: Mapped[str]
+
+        is_(A.id.expression.type._type_affinity, Integer)
+
+    @testing.variation("argument", ["version_id_col", "polymorphic_on"])
+    @testing.variation("column_type", ["anno", "non_anno", "plain_column"])
+    def test_mapped_column_version_poly_arg(
+        self, decl_base, column_type, argument
+    ):
+        """test #9240"""
+
+        if column_type.anno:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a: Mapped[int] = mapped_column(primary_key=True)
+                b: Mapped[int] = mapped_column()
+                c: Mapped[str] = mapped_column()
+
+                if argument.version_id_col:
+                    __mapper_args__ = {"version_id_col": b}
+                elif argument.polymorphic_on:
+                    __mapper_args__ = {"polymorphic_on": c}
+                else:
+                    argument.fail()
+
+        elif column_type.non_anno:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a = mapped_column(Integer, primary_key=True)
+                b = mapped_column(Integer)
+                c = mapped_column(String)
+
+                if argument.version_id_col:
+                    __mapper_args__ = {"version_id_col": b}
+                elif argument.polymorphic_on:
+                    __mapper_args__ = {"polymorphic_on": c}
+                else:
+                    argument.fail()
+
+        elif column_type.plain_column:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a = Column(Integer, primary_key=True)
+                b = Column(Integer)
+                c = Column(String)
+
+                if argument.version_id_col:
+                    __mapper_args__ = {"version_id_col": b}
+                elif argument.polymorphic_on:
+                    __mapper_args__ = {"polymorphic_on": c}
+                else:
+                    argument.fail()
+
+        else:
+            column_type.fail()
+
+        if argument.version_id_col:
+            assert A.__mapper__.version_id_col is A.__table__.c.b
+        elif argument.polymorphic_on:
+            assert A.__mapper__.polymorphic_on is A.__table__.c.c
+        else:
+            argument.fail()
+
+    @testing.variation(
+        "pk_type", ["single", "tuple", "list", "single_str", "list_str"]
+    )
+    @testing.variation("column_type", ["anno", "non_anno", "plain_column"])
+    def test_mapped_column_pk_arg(self, decl_base, column_type, pk_type):
+        """test #9240"""
+
+        if column_type.anno:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a: Mapped[int] = mapped_column()
+                b: Mapped[int] = mapped_column()
+
+                if pk_type.single:
+                    __mapper_args__ = {"primary_key": a}
+                elif pk_type.tuple:
+                    __mapper_args__ = {"primary_key": (a, b)}
+                elif pk_type.list:
+                    __mapper_args__ = {"primary_key": [a, b]}
+                elif pk_type.single_str:
+                    __mapper_args__ = {"primary_key": "a"}
+                elif pk_type.list_str:
+                    __mapper_args__ = {"primary_key": ["a", "b"]}
+                else:
+                    pk_type.fail()
+
+        elif column_type.non_anno:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a = mapped_column(Integer)
+                b = mapped_column(Integer)
+
+                if pk_type.single:
+                    __mapper_args__ = {"primary_key": a}
+                elif pk_type.tuple:
+                    __mapper_args__ = {"primary_key": (a, b)}
+                elif pk_type.list:
+                    __mapper_args__ = {"primary_key": [a, b]}
+                elif pk_type.single_str:
+                    __mapper_args__ = {"primary_key": "a"}
+                elif pk_type.list_str:
+                    __mapper_args__ = {"primary_key": ["a", "b"]}
+                else:
+                    pk_type.fail()
+
+        elif column_type.plain_column:
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a = Column(Integer)
+                b = Column(Integer)
+
+                if pk_type.single:
+                    __mapper_args__ = {"primary_key": a}
+                elif pk_type.tuple:
+                    __mapper_args__ = {"primary_key": (a, b)}
+                elif pk_type.list:
+                    __mapper_args__ = {"primary_key": [a, b]}
+                elif pk_type.single_str:
+                    __mapper_args__ = {"primary_key": "a"}
+                elif pk_type.list_str:
+                    __mapper_args__ = {"primary_key": ["a", "b"]}
+                else:
+                    pk_type.fail()
+
+        else:
+            column_type.fail()
+
+        if pk_type.single or pk_type.single_str:
+            assert A.__mapper__.primary_key[0] is A.__table__.c.a
+        else:
+            assert A.__mapper__.primary_key[0] is A.__table__.c.a
+            assert A.__mapper__.primary_key[1] is A.__table__.c.b
+
+    def test_mapper_pk_arg_degradation_no_col(self, decl_base):
+        with expect_raises_message(
+            exc.ArgumentError,
+            "Can't determine primary_key column 'q' - no attribute is "
+            "mapped to this name.",
+        ):
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a: Mapped[int] = mapped_column()
+                b: Mapped[int] = mapped_column()
+
+                __mapper_args__ = {"primary_key": "q"}
+
+    @testing.variation("proptype", ["relationship", "colprop"])
+    def test_mapper_pk_arg_degradation_is_not_a_col(self, decl_base, proptype):
+        with expect_raises_message(
+            exc.ArgumentError,
+            "Can't determine primary_key column 'b'; property does "
+            "not refer to a single mapped Column",
+        ):
+
+            class A(decl_base):
+                __tablename__ = "a"
+
+                a: Mapped[int] = mapped_column(Integer)
+
+                if proptype.colprop:
+                    b: Mapped[int] = column_property(a + 5)
+                elif proptype.relationship:
+                    b = relationship("B")
+                else:
+                    proptype.fail()
+
+                __mapper_args__ = {"primary_key": "b"}
+
+    @testing.variation(
+        "argument", ["version_id_col", "polymorphic_on", "primary_key"]
+    )
+    @testing.variation("argtype", ["callable", "fixed"])
+    @testing.variation("column_type", ["mapped_column", "plain_column"])
+    def test_mapped_column_pk_arg_via_mixin(
+        self, decl_base, argtype, column_type, argument
+    ):
+        """test #9240"""
+
+        class Mixin:
+            if column_type.mapped_column:
+                a: Mapped[int] = mapped_column()
+                b: Mapped[int] = mapped_column()
+                c: Mapped[str] = mapped_column()
+            elif column_type.plain_column:
+                a = Column(Integer)
+                b = Column(Integer)
+                c = Column(String)
+            else:
+                column_type.fail()
+
+            if argtype.callable:
+
+                @declared_attr.directive
+                @classmethod
+                def __mapper_args__(cls):
+                    if argument.primary_key:
+                        return {"primary_key": [cls.a, cls.b]}
+                    elif argument.version_id_col:
+                        return {"version_id_col": cls.b, "primary_key": cls.a}
+                    elif argument.polymorphic_on:
+                        return {"polymorphic_on": cls.c, "primary_key": cls.a}
+                    else:
+                        argument.fail()
+
+            elif argtype.fixed:
+                if argument.primary_key:
+                    __mapper_args__ = {"primary_key": [a, b]}
+                elif argument.version_id_col:
+                    __mapper_args__ = {"primary_key": a, "version_id_col": b}
+                elif argument.polymorphic_on:
+                    __mapper_args__ = {"primary_key": a, "polymorphic_on": c}
+                else:
+                    argument.fail()
+
+            else:
+                argtype.fail()
+
+        class A(Mixin, decl_base):
+            __tablename__ = "a"
+
+        if argument.primary_key:
+            assert A.__mapper__.primary_key[0] is A.__table__.c.a
+            assert A.__mapper__.primary_key[1] is A.__table__.c.b
+        elif argument.version_id_col:
+            assert A.__mapper__.version_id_col is A.__table__.c.b
+        elif argument.polymorphic_on:
+            assert A.__mapper__.polymorphic_on is A.__table__.c.c
+        else:
+            argtype.fail()
+
+    def test_dispose_attrs(self):
+        reg = registry()
+
+        class Foo:
+            __tablename__ = "some_table"
+
+            id = Column(Integer, primary_key=True)
+
+        reg.mapped(Foo)
+
+        is_(Foo.__mapper__, class_mapper(Foo))
+        is_(Foo.__table__, class_mapper(Foo).local_table)
+
+        clear_mappers()
+
+        assert not hasattr(Foo, "__mapper__")
+        assert not hasattr(Foo, "__table__")
+
+        from sqlalchemy.orm import clsregistry
+
+        assert clsregistry._key_is_empty(
+            "Foo", reg._class_registry, lambda cls: cls is Foo
+        )
+
+    def test_difficult_class(self, metadata):
+        """test no getattr() errors with a customized class"""
+
+        # metaclass to mock the way zope.interface breaks getattr()
+        class BrokenMeta(type):
+            def __getattribute__(self, attr):
+                if attr == "xyzzy":
+                    raise AttributeError("xyzzy")
+                else:
+                    return object.__getattribute__(self, attr)
+
+        # even though this class has an xyzzy attribute, getattr(cls,"xyzzy")
+        # fails
+        class BrokenParent(metaclass=BrokenMeta):
+            xyzzy = "magic"
+
+        # _as_declarative() inspects obj.__class__.__bases__
+        class User(BrokenParent, ComparableEntity):
+            __tablename__ = "users"
+            id = Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            name = Column("name", String(50))
+
+        reg = registry(metadata=metadata)
+
+        mp = reg.map_declaratively(User)
+        assert mp is inspect(User)
+        assert mp is User.__mapper__
+
+    def test_undefer_column_name(self):
+        # TODO: not sure if there was an explicit
+        # test for this elsewhere
+        foo = Column(Integer)
+        eq_(str(foo), "(no name)")
+        eq_(foo.key, None)
+        eq_(foo.name, None)
+        decl_base._undefer_column_name("foo", foo)
+        eq_(str(foo), "foo")
+        eq_(foo.key, "foo")
+        eq_(foo.name, "foo")
+
+    def test_string_dependency_resolution_schemas(self):
+        Base = declarative_base()
+
+        class User(Base):
+            __tablename__ = "users"
+            __table_args__ = {"schema": "fooschema"}
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+            props = relationship(
+                "Prop",
+                secondary="fooschema.user_to_prop",
+                primaryjoin="User.id==fooschema.user_to_prop.c.user_id",
+                secondaryjoin="fooschema.user_to_prop.c.prop_id==Prop.id",
+                backref="users",
+            )
+
+        class Prop(Base):
+            __tablename__ = "props"
+            __table_args__ = {"schema": "fooschema"}
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+        user_to_prop = Table(
+            "user_to_prop",
+            Base.metadata,
+            Column("user_id", Integer, ForeignKey("fooschema.users.id")),
+            Column("prop_id", Integer, ForeignKey("fooschema.props.id")),
+            schema="fooschema",
+        )
+        configure_mappers()
+
+        assert (
+            class_mapper(User).get_property("props").secondary is user_to_prop
+        )
+
+    def test_string_dependency_resolution_schemas_no_base(self):
+        """
+
+        found_during_type_annotation
+
+        """
+
+        reg = registry()
+
+        @reg.mapped
+        class User:
+            __tablename__ = "users"
+            __table_args__ = {"schema": "fooschema"}
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+            props = relationship(
+                "Prop",
+                secondary="fooschema.user_to_prop",
+                primaryjoin="User.id==fooschema.user_to_prop.c.user_id",
+                secondaryjoin="fooschema.user_to_prop.c.prop_id==Prop.id",
+                backref="users",
+            )
+
+        @reg.mapped
+        class Prop:
+            __tablename__ = "props"
+            __table_args__ = {"schema": "fooschema"}
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+
+        user_to_prop = Table(
+            "user_to_prop",
+            reg.metadata,
+            Column("user_id", Integer, ForeignKey("fooschema.users.id")),
+            Column("prop_id", Integer, ForeignKey("fooschema.props.id")),
+            schema="fooschema",
+        )
+        configure_mappers()
+
+        assert (
+            class_mapper(User).get_property("props").secondary is user_to_prop
+        )
+
+    def test_string_dependency_resolution_annotations(self):
+        Base = declarative_base()
+
+        class Parent(Base):
+            __tablename__ = "parent"
+            id = Column(Integer, primary_key=True)
+            name = Column(String)
+            children = relationship(
+                "Child",
+                primaryjoin="Parent.name=="
+                "remote(foreign(func.lower(Child.name_upper)))",
+            )
+
+        class Child(Base):
+            __tablename__ = "child"
+            id = Column(Integer, primary_key=True)
+            name_upper = Column(String)
+
+        configure_mappers()
+        eq_(
+            Parent.children.property._calculated_foreign_keys,
+            {Child.name_upper.property.columns[0]},
+        )
+
+    def test_class_has_registry_attr(self, registry):
+        existing_registry = registry
+
+        Base = registry.generate_base()
+
+        class A(Base):
+            __tablename__ = "a"
+
+            registry = {"foo": "bar"}
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+
+        class SubA(A):
+            pass
+
+        is_(Base.registry, existing_registry)
+        is_(inspect(A).registry, existing_registry)
+        eq_(A.registry, {"foo": "bar"})
+
+        is_(inspect(SubA).registry, existing_registry)
+        eq_(SubA.registry, {"foo": "bar"})
+
+    def test_class_does_not_have_registry_attr(self):
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            r"Declarative base class has no 'registry' attribute, or "
+            r"registry is not a sqlalchemy.orm.registry\(\) object",
+        ):
+
+            class Base(metaclass=DeclarativeMeta):
+                metadata = sa.MetaData()
+
+    def test_shared_class_registry(self):
+        reg = {}
+        Base1 = declarative_base(class_registry=reg)
+        Base2 = declarative_base(class_registry=reg)
+
+        class A(Base1):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+
+        class B(Base2):
+            __tablename__ = "b"
+            id = Column(Integer, primary_key=True)
+            aid = Column(Integer, ForeignKey(A.id))
+            as_ = relationship("A")
+
+        assert B.as_.property.mapper.class_ is A
+
+    def test_custom_base(self):
+        class MyBase:
+            def foobar(self):
+                return "foobar"
+
+        Base = declarative_base(cls=MyBase)
+        assert hasattr(Base, "metadata")
+        assert Base().foobar() == "foobar"
+
+    def test_as_declarative(self, metadata):
+        class User(ComparableEntity):
+            __tablename__ = "users"
+            id = Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            name = Column("name", String(50))
+            addresses = relationship("Address", backref="user")
+
+        class Address(ComparableEntity):
+            __tablename__ = "addresses"
+            id = Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            email = Column("email", String(50))
+            user_id = Column("user_id", Integer, ForeignKey("users.id"))
+
+        reg = registry(metadata=metadata)
+        reg.mapped(User)
+        reg.mapped(Address)
+
+        reg.metadata.create_all(testing.db)
+        u1 = User(
+            name="u1", addresses=[Address(email="one"), Address(email="two")]
+        )
+        with Session(testing.db) as sess:
+            sess.add(u1)
+            sess.commit()
+        with Session(testing.db) as sess:
+            eq_(
+                sess.query(User).all(),
+                [
+                    User(
+                        name="u1",
+                        addresses=[Address(email="one"), Address(email="two")],
+                    )
+                ],
+            )
+
+    def test_map_declaratively(self, metadata):
+        class User(ComparableEntity):
+            __tablename__ = "users"
+            id = Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            name = Column("name", String(50))
+            addresses = relationship("Address", backref="user")
+
+        class Address(ComparableEntity):
+            __tablename__ = "addresses"
+            id = Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            email = Column("email", String(50))
+            user_id = Column("user_id", Integer, ForeignKey("users.id"))
+
+        reg = registry(metadata=metadata)
+        um = reg.map_declaratively(User)
+        am = reg.map_declaratively(Address)
+
+        is_(User.__mapper__, um)
+        is_(Address.__mapper__, am)
+
+        reg.metadata.create_all(testing.db)
+        u1 = User(
+            name="u1", addresses=[Address(email="one"), Address(email="two")]
+        )
+        with Session(testing.db) as sess:
+            sess.add(u1)
+            sess.commit()
+        with Session(testing.db) as sess:
+            eq_(
+                sess.query(User).all(),
+                [
+                    User(
+                        name="u1",
+                        addresses=[Address(email="one"), Address(email="two")],
+                    )
+                ],
+            )
+
+    def test_custom_mapper_attribute(self):
+        def mymapper(cls, tbl, **kwargs):
+            m = sa.orm.Mapper(cls, tbl, **kwargs)
+            m.CHECK = True
+            return m
+
+        base = declarative_base()
+
+        class Foo(base):
+            __tablename__ = "foo"
+            __mapper_cls__ = mymapper
+            id = Column(Integer, primary_key=True)
+
+        eq_(Foo.__mapper__.CHECK, True)
+
+    def test_custom_mapper_argument(self):
+        def mymapper(cls, tbl, **kwargs):
+            m = sa.orm.Mapper(cls, tbl, **kwargs)
+            m.CHECK = True
+            return m
+
+        base = declarative_base(mapper=mymapper)
+
+        class Foo(base):
+            __tablename__ = "foo"
+            id = Column(Integer, primary_key=True)
+
+        eq_(Foo.__mapper__.CHECK, True)
+
+    def test_no_change_to_all_descriptors(self):
+        base = declarative_base()
+
+        class Foo(base):
+            __tablename__ = "foo"
+            id = Column(Integer, primary_key=True)
+
+        eq_(Foo.__mapper__.all_orm_descriptors.keys(), ["id"])
+
+    def test_cls_docstring(self):
+        class MyBase:
+            """MyBase Docstring"""
+
+        Base = declarative_base(cls=MyBase)
+
+        eq_(Base.__doc__, MyBase.__doc__)
+
+    def test_delattr_mapped_raises(self):
+        Base = declarative_base()
+
+        class Foo(Base):
+            __tablename__ = "foo"
+
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+
+        def go():
+            del Foo.data
+
+        assert_raises_message(
+            NotImplementedError,
+            "Can't un-map individual mapped attributes on a mapped class.",
+            go,
+        )
+
+    def test_delattr_hybrid_fine(self):
+        Base = declarative_base()
+
+        class Foo(Base):
+            __tablename__ = "foo"
+
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+
+            @hybrid_property
+            def data_hybrid(self):
+                return self.data
+
+        assert "data_hybrid" in Foo.__mapper__.all_orm_descriptors.keys()
+
+        del Foo.data_hybrid
+
+        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
+
+        assert not hasattr(Foo, "data_hybrid")
+
+    def test_setattr_hybrid_updates_descriptors(self):
+        Base = declarative_base()
+
+        class Foo(Base):
+            __tablename__ = "foo"
+
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+
+        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
+
+        @hybrid_property
+        def data_hybrid(self):
+            return self.data
+
+        Foo.data_hybrid = data_hybrid
+        assert "data_hybrid" in Foo.__mapper__.all_orm_descriptors.keys()
+
+        del Foo.data_hybrid
+
+        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
+
+        assert not hasattr(Foo, "data_hybrid")
+
+    def test_kw_support_in_declarative_meta_init(self, registry):
+        # This will not fail if DeclarativeMeta __init__ supports **kw
+
+        reg = registry
+
+        class Base(metaclass=DeclarativeMeta):
+            __abstract__ = True
+            registry = reg
+            metadata = reg.metadata
+
+        class BaseUser(Base):
+            __tablename__ = "base"
+            id_ = Column(Integer, primary_key=True)
+
+            @classmethod
+            def __init_subclass__(cls, random_keyword=False, **kw):
+                super().__init_subclass__(**kw)
+                cls._set_random_keyword_used_here = random_keyword
+
+        class User(BaseUser):
+            __tablename__ = "user"
+            id_ = Column(Integer, ForeignKey("base.id_"), primary_key=True)
+
+        # Check the default option
+        eq_(User._set_random_keyword_used_here, False)
+
+        # Build the metaclass with a keyword!
+        bases = (BaseUser,)
+        UserType = DeclarativeMeta("UserType", bases, {}, random_keyword=True)
+
+        # Check to see if __init_subclass__ works in supported versions
+        eq_(UserType._set_random_keyword_used_here, True)
+
+    @testing.variation(
+        "basetype",
+        ["DeclarativeBase", "DeclarativeBaseNoMeta", "MappedAsDataclass"],
+    )
+    def test_kw_support_in_declarative_base(self, basetype):
+        """test #10732"""
+
+        if basetype.DeclarativeBase:
+
+            class Base(DeclarativeBase):
+                pass
+
+        elif basetype.DeclarativeBaseNoMeta:
+
+            class Base(DeclarativeBaseNoMeta):
+                pass
+
+        elif basetype.MappedAsDataclass:
+
+            class Base(MappedAsDataclass):
+                pass
+
+        else:
+            basetype.fail()
+
+        class Mixin:
+            def __init_subclass__(cls, random_keyword: bool, **kw) -> None:
+                super().__init_subclass__(**kw)
+                cls._set_random_keyword_used_here = random_keyword
+
+        class User(Base, Mixin, random_keyword=True):
+            __tablename__ = "user"
+            id_ = Column(Integer, primary_key=True)
+
+        eq_(User._set_random_keyword_used_here, True)
+
+    def test_declarative_base_bad_registry(self):
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            "Declarative base class has a 'registry' attribute "
+            "that is not an instance",
+        ):
+
+            class MyClass(DeclarativeBase):
+                registry = {"foo": "bar"}
+
+    def test_declarative_base_registry_and_type_map(self):
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            "Declarative base class has both a 'registry' attribute and a "
+            "type_annotation_map entry.  Per-base type_annotation_maps",
+        ):
+
+            class MyClass(DeclarativeBase):
+                registry = registry()
+                type_annotation_map = {int: Integer}
+
+    @testing.combinations(DeclarativeBase, DeclarativeBaseNoMeta)
+    def test_declarative_base_used_directly(self, base):
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            f"Cannot use {base.__name__!r} directly as a declarative base",
+        ):
+
+            class MyClass(base):
+                __tablename__ = "foobar"
+                id: int = mapped_column(primary_key=True)
+
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            f"Cannot use {base.__name__!r} directly as a declarative base",
+        ):
+
+            class MyClass2(base):
+                __table__ = sa.Table(
+                    "foobar",
+                    sa.MetaData(),
+                    sa.Column("id", Integer, primary_key=True),
+                )
+
+    @testing.combinations(DeclarativeBase, DeclarativeBaseNoMeta)
+    def test_declarative_base_fn_ok(self, base):
+        # __tablename__ or __table__ as declared_attr are ok in the base
+        class MyBase1(base):
+            @declared_attr
+            def __tablename__(cls):
+                return cls.__name__
+
+        class MyBase2(base):
+            @declared_attr
+            def __table__(cls):
+                return sa.Table(
+                    "foobar",
+                    sa.MetaData(),
+                    sa.Column("id", Integer, primary_key=True),
+                )
+
+    def test_cannot_add_to_selectable(self):
+        class Base(DeclarativeBase):
+            pass
+
+        class Foo(Base):
+            __table__ = (
+                select(sa.Column("x", sa.Integer, primary_key=True))
+                .select_from(sa.table("foo"))
+                .subquery("foo")
+            )
+
+        with assertions.expect_raises_message(
+            exc.InvalidRequestError,
+            "Cannot add a new attribute to mapped class 'Foo' "
+            "because it's not mapped against a table",
+        ):
+            Foo.y = mapped_column(sa.Text)
+
+    def test_default_column_order(self, decl_base):
+        class M1:
+            a: Mapped[int]
+            b: Mapped[int] = mapped_column(primary_key=True)
+
+        class M2(decl_base):
+            __abstract__ = True
+            c: Mapped[int]
+            d: Mapped[int]
+
+        class M(M1, M2, decl_base):
+            e: Mapped[int]
+            f: Mapped[int]
+            g: Mapped[int]
+
+            __tablename__ = "m"
+
+        actual = list(M.__table__.c.keys())
+        expected = ["e", "f", "g", "a", "b", "c", "d"]
+        eq_(actual, expected)
+
+    def test_custom_column_sort_order(self, decl_base):
+        class M1:
+            a: Mapped[int] = mapped_column(sort_order=-42)
+            b: Mapped[int] = mapped_column(primary_key=True)
+
+        class M2(decl_base):
+            __abstract__ = True
+            c: Mapped[int] = mapped_column(sort_order=-1)
+            d: Mapped[int]
+
+        class M(M1, M2, decl_base):
+            e: Mapped[int]
+            f: Mapped[int] = mapped_column(sort_order=10)
+            g: Mapped[int] = mapped_column(sort_order=-10)
+
+            __tablename__ = "m"
+
+        actual = list(M.__table__.c.keys())
+        expected = ["a", "g", "c", "e", "b", "d", "f"]
+        eq_(actual, expected)
+
+
+@testing.combinations(
+    ("declarative_base_nometa_superclass",),
+    ("declarative_base_superclass",),
+    ("dynamic",),
+    ("explicit",),
+    argnames="base_style",
+    id_="s",
+)
+class DeclarativeMultiBaseTest(
+    fixtures.TestBase,
+    testing.AssertsExecutionResults,
+    testing.AssertsCompiledSQL,
+):
+    __dialect__ = "default"
+
+    base_style = "dynamic"
+
+    def setup_test(self):
+        global Base
+
+        if self.base_style == "dynamic":
+            Base = declarative_base()
+        elif self.base_style == "explicit":
+            mapper_registry = registry()
+
+            class Base(metaclass=DeclarativeMeta):
+                __abstract__ = True
+                registry = mapper_registry
+                metadata = mapper_registry.metadata
+
+        elif self.base_style == "declarative_base_superclass":
+
+            class Base(DeclarativeBase):
+                pass
+
+        elif self.base_style == "declarative_base_nometa_superclass":
+
+            class Base(DeclarativeBaseNoMeta):
+                pass
+
+        else:
+            assert False
+
+    def teardown_test(self):
+        close_all_sessions()
+        clear_mappers()
+        Base.metadata.drop_all(testing.db)
+
+    @testing.fixture
+    def require_metaclass(self):
+        if type(Base) is type:
+            testing.config.skip_test("current base has no metaclass")
+
     def test_basic(self):
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
 
             id = Column(
@@ -122,7 +1152,7 @@ class DeclarativeTest(DeclarativeTestBase):
             name = Column("name", String(50))
             addresses = relationship("Address", backref="user")
 
-        class Address(Base, fixtures.ComparableEntity):
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
 
             id = Column(
@@ -161,6 +1191,54 @@ class DeclarativeTest(DeclarativeTestBase):
         eq_(a1, Address(email="two"))
         eq_(a1.user, User(name="u1"))
 
+    @testing.variation("mora", ["mixin", "abstract"])
+    def test_abstract_and_or_mixin(self, mora):
+        if mora.abstract:
+
+            class Employee(Base):
+                __abstract__ = True
+
+                id = mapped_column(Integer, primary_key=True, sort_order=-1)
+
+            class Manager(Employee):
+                __tablename__ = "manager"
+                name = mapped_column(String(50))
+                manager_data = mapped_column(String(40))
+
+            class Engineer(Employee):
+                __tablename__ = "engineer"
+
+                name = mapped_column(String(50))
+                engineer_info = mapped_column(String(40))
+
+        elif mora.mixin:
+
+            class Mixin:
+                pass
+
+            class EmployeeMixin:
+                id = mapped_column(Integer, primary_key=True, sort_order=-1)
+
+            class Manager(EmployeeMixin, Base):
+                __tablename__ = "manager"
+                name = mapped_column(String(50))
+                manager_data = mapped_column(String(40))
+
+            class Engineer(EmployeeMixin, Base):
+                __tablename__ = "engineer"
+
+                name = mapped_column(String(50))
+                engineer_info = mapped_column(String(40))
+
+        else:
+            mora.fail()
+
+        self.assert_compile(
+            select(Engineer),
+            "SELECT engineer.id, engineer.name, engineer.engineer_info "
+            "FROM engineer",
+        )
+
     def test_back_populates_setup(self):
         class User(Base):
             __tablename__ = "users"
@@ -188,32 +1266,8 @@ class DeclarativeTest(DeclarativeTestBase):
             in Address.__mapper__.attrs.user._reverse_property
         )
 
-    def test_dispose_attrs(self):
-        reg = registry()
-
-        class Foo(object):
-            __tablename__ = "some_table"
-
-            id = Column(Integer, primary_key=True)
-
-        reg.mapped(Foo)
-
-        is_(Foo.__mapper__, class_mapper(Foo))
-        is_(Foo.__table__, class_mapper(Foo).local_table)
-
-        clear_mappers()
-
-        assert not hasattr(Foo, "__mapper__")
-        assert not hasattr(Foo, "__table__")
-
-        from sqlalchemy.orm import clsregistry
-
-        assert clsregistry._key_is_empty(
-            "Foo", reg._class_registry, lambda cls: cls is Foo
-        )
-
-    def test_deferred_reflection_default_error(self):
-        class MyExt(object):
+    def test_deferred_reflection_default_error(self, require_metaclass):
+        class MyExt:
             @classmethod
             def prepare(cls):
                 "sample prepare method"
@@ -229,6 +1283,8 @@ class DeclarativeTest(DeclarativeTestBase):
             __tablename__ = "user"
             id = Column(Integer, primary_key=True)
 
+        # TODO; this use case only works when using
+        # DeclarativeMeta or DeclarativeAttributeIntercept
         assert_raises_message(
             orm_exc.UnmappedClassError,
             "Class .*User has a deferred "
@@ -245,16 +1301,16 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_unicode_string_resolve(self):
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
 
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
             )
             name = Column("name", String(50))
-            addresses = relationship(util.u("Address"), backref="user")
+            addresses = relationship("Address", backref="user")
 
-        class Address(Base, fixtures.ComparableEntity):
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
 
             id = Column(
@@ -268,7 +1324,7 @@ class DeclarativeTest(DeclarativeTestBase):
         assert User.addresses.property.mapper.class_ is Address
 
     def test_unicode_string_resolve_backref(self):
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
 
             id = Column(
@@ -276,7 +1332,7 @@ class DeclarativeTest(DeclarativeTestBase):
             )
             name = Column("name", String(50))
 
-        class Address(Base, fixtures.ComparableEntity):
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
 
             id = Column(
@@ -288,7 +1344,7 @@ class DeclarativeTest(DeclarativeTestBase):
             )
             user = relationship(
                 User,
-                backref=backref("addresses", order_by=util.u("Address.email")),
+                backref=backref("addresses", order_by="Address.email"),
             )
 
         assert Address.user.property.mapper.class_ is User
@@ -331,7 +1387,7 @@ class DeclarativeTest(DeclarativeTestBase):
 
         assert_raises_message(
             sa.exc.ArgumentError,
-            "Can't add additional column 'foo' when " "specifying __table__",
+            "Can't add additional column 'foo' when specifying __table__",
             go,
         )
 
@@ -345,10 +1401,10 @@ class DeclarativeTest(DeclarativeTestBase):
             class_mapper(Bar).get_property("some_data").columns[0] is t.c.data
         )
 
-    def test_lower_case_c_column_warning(self):
+    def test_non_sql_expression_warning_one(self):
         with assertions.expect_warnings(
             r"Attribute 'x' on class <class .*Foo.* appears to be a "
-            r"non-schema 'sqlalchemy.sql.column\(\)' object; "
+            r"non-schema SQLAlchemy expression object; "
         ):
 
             class Foo(Base):
@@ -358,13 +1414,14 @@ class DeclarativeTest(DeclarativeTestBase):
                 x = sa.sql.expression.column(Integer)
                 y = Column(Integer)
 
-        class MyMixin(object):
+    def test_non_sql_expression_warning_two(self):
+        class MyMixin:
             x = sa.sql.expression.column(Integer)
             y = Column(Integer)
 
         with assertions.expect_warnings(
             r"Attribute 'x' on class <class .*MyMixin.* appears to be a "
-            r"non-schema 'sqlalchemy.sql.column\(\)' object; "
+            r"non-schema SQLAlchemy expression object; "
         ):
 
             class Foo2(MyMixin, Base):
@@ -372,9 +1429,10 @@ class DeclarativeTest(DeclarativeTestBase):
 
                 id = Column(Integer, primary_key=True)
 
+    def test_non_sql_expression_warning_three(self):
         with assertions.expect_warnings(
             r"Attribute 'x' on class <class .*Foo3.* appears to be a "
-            r"non-schema 'sqlalchemy.sql.column\(\)' object; "
+            r"non-schema SQLAlchemy expression object; "
         ):
 
             class Foo3(Base):
@@ -388,12 +1446,13 @@ class DeclarativeTest(DeclarativeTestBase):
 
                 y = Column(Integer)
 
+    def test_non_sql_expression_warning_four(self):
         with assertions.expect_warnings(
             r"Attribute 'x' on class <class .*Foo4.* appears to be a "
-            r"non-schema 'sqlalchemy.sql.column\(\)' object; "
+            r"non-schema SQLAlchemy expression object; "
         ):
 
-            class MyMixin2(object):
+            class MyMixin2:
                 @declared_attr
                 def x(cls):
                     return sa.sql.expression.column(Integer)
@@ -405,13 +1464,123 @@ class DeclarativeTest(DeclarativeTestBase):
 
                 id = Column(Integer, primary_key=True)
 
-    def test_column_named_twice(self):
-        with assertions.expect_deprecated(
-            "A column with name 'x' is already present in table 'foo'"
-        ), expect_warnings(
-            "On class 'Foo', Column object 'x' named directly multiple times, "
-            "only one will be used: x, y",
+    def test_non_sql_expression_warning_five(self):
+        # test for #9537
+        with assertions.expect_warnings(
+            r"Attribute 'x' on class <class .*Foo5.* appears to be a "
+            r"non-schema SQLAlchemy expression object; ",
+            r"Attribute 'y' on class <class .*Foo5.* appears to be a "
+            r"non-schema SQLAlchemy expression object; ",
         ):
+
+            class Foo5(Base):
+                __tablename__ = "foo5"
+
+                id = Column(Integer, primary_key=True)
+                x = Column("x", String()).collate("some collation")
+                y = Column("y", Integer) + 5
+                z = "im not a sqlalchemy thing"
+
+    @testing.variation(
+        "attr_type",
+        [
+            "column",
+            "mapped_column",
+            "relationship",
+            "synonym",
+            "column_property",
+        ],
+    )
+    def test_attr_assigned_to_multiple_keys(self, attr_type, decl_base):
+        """test #3532"""
+
+        column_warning = expect_warnings(
+            "On class 'A', Column object 'a' named directly multiple "
+            "times, only one will be used: a, b. Consider using "
+            "orm.synonym instead"
+        )
+
+        other_warning = expect_warnings(
+            "ORM mapped property A.a being assigned to attribute 'b' is "
+            "already associated with attribute 'a'. The attribute will be "
+            "de-associated from 'a'."
+        )
+        if attr_type.column:
+            with column_warning:
+
+                class A(decl_base):
+                    __tablename__ = "a"
+
+                    id = Column(Integer, primary_key=True)
+
+                    a = Column(Integer)
+
+                    b = a
+
+        elif attr_type.mapped_column:
+            with column_warning:
+
+                class A(decl_base):
+                    __tablename__ = "a"
+
+                    id = mapped_column(Integer, primary_key=True)
+
+                    a = mapped_column(Integer)
+
+                    b = a
+
+        elif attr_type.relationship:
+            with other_warning:
+
+                class B(decl_base):
+                    __tablename__ = "b"
+
+                    id = mapped_column(Integer, primary_key=True)
+                    aid = mapped_column(ForeignKey("a.id"))
+
+                class A(decl_base):
+                    __tablename__ = "a"
+
+                    id = mapped_column(Integer, primary_key=True)
+
+                    a = relationship("B")
+
+                    b = a
+
+                decl_base.registry.configure()
+        elif attr_type.column_property:
+            with other_warning:
+
+                class A(decl_base):
+                    __tablename__ = "a"
+
+                    id = mapped_column(Integer, primary_key=True)
+
+                    a = column_property(literal("foo") + literal("bar"))
+
+                    b = a
+
+        elif attr_type.synonym:
+            with other_warning:
+
+                class A(decl_base):
+                    __tablename__ = "a"
+
+                    id = mapped_column(Integer, primary_key=True)
+                    g = mapped_column(Integer)
+                    a = synonym("g")
+
+                    b = a
+
+        else:
+            attr_type.fail()
+
+    def test_column_named_twice(self):
+        with expect_warnings(
+            "On class 'Foo', Column object 'x' named directly multiple "
+            "times, only one will be used: x, y. Consider using "
+            "orm.synonym instead"
+        ), expect_raises(exc.DuplicateColumnError):
 
             class Foo(Base):
                 __tablename__ = "foo"
@@ -420,21 +1589,35 @@ class DeclarativeTest(DeclarativeTestBase):
                 x = Column("x", Integer)
                 y = Column("x", Integer)
 
-    def test_column_repeated_under_prop(self):
-        with assertions.expect_deprecated(
-            "A column with name 'x' is already present in table 'foo'"
-        ), expect_warnings(
-            "On class 'Foo', Column object 'x' named directly multiple times, "
-            "only one will be used: x, y, z",
-        ):
+    @testing.variation("style", ["old", "new"])
+    def test_column_repeated_under_prop(self, style):
+        with expect_warnings(
+            "On class 'Foo', Column object 'x' named directly multiple "
+            "times, only one will be used: x, y, z. Consider using "
+            "orm.synonym instead"
+        ), expect_raises(exc.DuplicateColumnError):
+            if style.old:
 
-            class Foo(Base):
-                __tablename__ = "foo"
+                class Foo(Base):
+                    __tablename__ = "foo"
 
-                id = Column(Integer, primary_key=True)
-                x = Column("x", Integer)
-                y = column_property(x)
-                z = Column("x", Integer)
+                    id = Column(Integer, primary_key=True)
+                    x = Column("x", Integer)
+                    y = column_property(x)
+                    z = Column("x", Integer)
+
+            elif style.new:
+
+                class Foo(Base):
+                    __tablename__ = "foo"
+
+                    id = mapped_column(Integer, primary_key=True)
+                    x = mapped_column("x", Integer)
+                    y = column_property(x)
+                    z = mapped_column("x", Integer)
+
+            else:
+                style.fail()
 
     def test_using_explicit_prop_in_schema_objects(self):
         class Foo(Base):
@@ -467,22 +1650,21 @@ class DeclarativeTest(DeclarativeTestBase):
         ][0]
         is_(ck.columns.cprop, Bar.__table__.c.cprop)
 
-        if testing.requires.python3.enabled:
-            # test the existing failure case in case something changes
-            def go():
-                class Bat(Base):
-                    __tablename__ = "bat"
+        # test the existing failure case in case something changes
+        def go():
+            class Bat(Base):
+                __tablename__ = "bat"
 
-                    id = Column(Integer, primary_key=True)
-                    cprop = deferred(Column(Integer))
+                id = Column(Integer, primary_key=True)
+                cprop = deferred(Column(Integer))
 
-                    # we still can't do an expression like
-                    # "cprop > 5" because the column property isn't
-                    # a full blown column
+                # we still can't do an expression like
+                # "cprop > 5" because the column property isn't
+                # a full blown column
 
-                    __table_args__ = (CheckConstraint(cprop > 5),)
+                __table_args__ = (CheckConstraint(cprop > 5),)
 
-            assert_raises(TypeError, go)
+        assert_raises(TypeError, go)
 
     def test_relationship_level_msg_for_invalid_callable(self):
         class A(Base):
@@ -520,67 +1702,45 @@ class DeclarativeTest(DeclarativeTestBase):
             configure_mappers,
         )
 
-    def test_difficult_class(self):
-        """test no getattr() errors with a customized class"""
+    # currently "registry" is allowed, "metadata" is not.
+    @testing.combinations(
+        ("metadata", True), ("registry", False), argnames="name, expect_raise"
+    )
+    @testing.variation("attrtype", ["column", "relationship"])
+    def test_reserved_identifiers(
+        self, decl_base, name, expect_raise, attrtype
+    ):
+        if attrtype.column:
+            clsdict = {
+                "__tablename__": "user",
+                "id": Column(Integer, primary_key=True),
+                name: Column(Integer),
+            }
+        elif attrtype.relationship:
+            clsdict = {
+                "__tablename__": "user",
+                "id": Column(Integer, primary_key=True),
+                name: relationship("Address"),
+            }
 
-        # metaclass to mock the way zope.interface breaks getattr()
-        class BrokenMeta(type):
-            def __getattribute__(self, attr):
-                if attr == "xyzzy":
-                    raise AttributeError("xyzzy")
-                else:
-                    return object.__getattribute__(self, attr)
-
-        # even though this class has an xyzzy attribute, getattr(cls,"xyzzy")
-        # fails
-        class BrokenParent(with_metaclass(BrokenMeta)):
-            xyzzy = "magic"
-
-        # _as_declarative() inspects obj.__class__.__bases__
-        class User(BrokenParent, fixtures.ComparableEntity):
-            __tablename__ = "users"
-            id = Column(
-                "id", Integer, primary_key=True, test_needs_autoincrement=True
-            )
-            name = Column("name", String(50))
-
-        reg = registry(metadata=Base.metadata)
-
-        reg.map_declaratively(User)
-
-    def test_reserved_identifiers(self):
-        def go1():
-            class User1(Base):
-                __tablename__ = "user1"
+            class Address(decl_base):
+                __tablename__ = "address"
                 id = Column(Integer, primary_key=True)
-                metadata = Column(Integer)
+                user_id = Column(ForeignKey("user.id"))
 
-        def go2():
-            class User2(Base):
-                __tablename__ = "user2"
-                id = Column(Integer, primary_key=True)
-                metadata = relationship("Address")
+        else:
+            assert False
 
-        for go in (go1, go2):
-            assert_raises_message(
+        if expect_raise:
+            with expect_raises_message(
                 exc.InvalidRequestError,
-                "Attribute name 'metadata' is reserved "
-                "for the MetaData instance when using a "
-                "declarative base class.",
-                go,
-            )
-
-    def test_undefer_column_name(self):
-        # TODO: not sure if there was an explicit
-        # test for this elsewhere
-        foo = Column(Integer)
-        eq_(str(foo), "(no name)")
-        eq_(foo.key, None)
-        eq_(foo.name, None)
-        decl_base._undefer_column_name("foo", foo)
-        eq_(str(foo), "foo")
-        eq_(foo.key, "foo")
-        eq_(foo.name, "foo")
+                f"Attribute name '{name}' is reserved "
+                "when using the Declarative API.",
+            ):
+                type("User", (decl_base,), clsdict)
+        else:
+            User = type("User", (decl_base,), clsdict)
+            assert getattr(User, name).property
 
     def test_recompile_on_othermapper(self):
         """declarative version of the same test in mappers.py"""
@@ -607,8 +1767,7 @@ class DeclarativeTest(DeclarativeTestBase):
         assert User.__mapper__.registry._new_mappers is False
 
     def test_string_dependency_resolution(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -626,8 +1785,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 ),
             )
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -660,21 +1818,19 @@ class DeclarativeTest(DeclarativeTestBase):
             ),
         )
 
-        class Foo(Base, fixtures.ComparableEntity):
-
+        class Foo(Base, ComparableEntity):
             __tablename__ = "foo"
             id = Column(Integer, primary_key=True)
             rel = relationship("User", primaryjoin="User.addresses==Foo.id")
 
         assert_raises_message(
             exc.InvalidRequestError,
-            "'addresses' is not an instance of " "ColumnProperty",
+            "'addresses' is not an instance of ColumnProperty",
             configure_mappers,
         )
 
     def test_string_dependency_resolution_synonym(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -689,8 +1845,7 @@ class DeclarativeTest(DeclarativeTestBase):
         sess.expunge_all()
         eq_(sess.query(User).filter(User.name == "ed").one(), User(name="ed"))
 
-        class Foo(Base, fixtures.ComparableEntity):
-
+        class Foo(Base, ComparableEntity):
             __tablename__ = "foo"
             id = Column(Integer, primary_key=True)
             _user_id = Column(Integer)
@@ -785,34 +1940,33 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_string_dependency_resolution_no_table(self):
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
             )
             name = Column(String(50))
 
-        class Bar(Base, fixtures.ComparableEntity):
+        class Bar(Base, ComparableEntity):
             __tablename__ = "bar"
             id = Column(Integer, primary_key=True)
             rel = relationship("User", primaryjoin="User.id==Bar.__table__.id")
 
         assert_raises_message(
             AttributeError,
-            "does not have a mapped column named " "'__table__'",
+            "does not have a mapped column named '__table__'",
             configure_mappers,
         )
 
     def test_string_w_pj_annotations(self):
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
             )
             name = Column(String(50))
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -831,8 +1985,7 @@ class DeclarativeTest(DeclarativeTestBase):
     def test_string_dependency_resolution_no_magic(self):
         """test that full tinkery expressions work as written"""
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             addresses = relationship(
@@ -840,8 +1993,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 primaryjoin="User.id==Address.user_id.prop.columns[0]",
             )
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(Integer, primary_key=True)
             user_id = Column(Integer, ForeignKey("users.id"))
@@ -853,8 +2005,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_string_dependency_resolution_module_qualified(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             addresses = relationship(
@@ -863,8 +2014,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 % (__name__, __name__),
             )
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(Integer, primary_key=True)
             user_id = Column(Integer, ForeignKey("users.id"))
@@ -876,8 +2026,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_string_dependency_resolution_in_backref(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -887,8 +2036,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 backref="user",
             )
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(Integer, primary_key=True)
             email = Column(String(50))
@@ -901,8 +2049,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_string_dependency_resolution_tables(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -914,8 +2061,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 backref="users",
             )
 
-        class Prop(Base, fixtures.ComparableEntity):
-
+        class Prop(Base, ComparableEntity):
             __tablename__ = "props"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -934,8 +2080,7 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_string_dependency_resolution_table_over_class(self):
         # test for second half of #5774
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -945,8 +2090,7 @@ class DeclarativeTest(DeclarativeTestBase):
                 backref="users",
             )
 
-        class Prop(Base, fixtures.ComparableEntity):
-
+        class Prop(Base, ComparableEntity):
             __tablename__ = "props"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -965,8 +2109,7 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_string_dependency_resolution_class_over_table(self):
         # test for second half of #5774
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(Integer, primary_key=True)
             name = Column(String(50))
@@ -985,119 +2128,8 @@ class DeclarativeTest(DeclarativeTestBase):
             is Secondary.__mapper__
         )
 
-    def test_string_dependency_resolution_schemas(self):
-        Base = declarative_base()
-
-        class User(Base):
-
-            __tablename__ = "users"
-            __table_args__ = {"schema": "fooschema"}
-
-            id = Column(Integer, primary_key=True)
-            name = Column(String(50))
-            props = relationship(
-                "Prop",
-                secondary="fooschema.user_to_prop",
-                primaryjoin="User.id==fooschema.user_to_prop.c.user_id",
-                secondaryjoin="fooschema.user_to_prop.c.prop_id==Prop.id",
-                backref="users",
-            )
-
-        class Prop(Base):
-
-            __tablename__ = "props"
-            __table_args__ = {"schema": "fooschema"}
-
-            id = Column(Integer, primary_key=True)
-            name = Column(String(50))
-
-        user_to_prop = Table(
-            "user_to_prop",
-            Base.metadata,
-            Column("user_id", Integer, ForeignKey("fooschema.users.id")),
-            Column("prop_id", Integer, ForeignKey("fooschema.props.id")),
-            schema="fooschema",
-        )
-        configure_mappers()
-
-        assert (
-            class_mapper(User).get_property("props").secondary is user_to_prop
-        )
-
-    def test_string_dependency_resolution_annotations(self):
-        Base = declarative_base()
-
-        class Parent(Base):
-            __tablename__ = "parent"
-            id = Column(Integer, primary_key=True)
-            name = Column(String)
-            children = relationship(
-                "Child",
-                primaryjoin="Parent.name=="
-                "remote(foreign(func.lower(Child.name_upper)))",
-            )
-
-        class Child(Base):
-            __tablename__ = "child"
-            id = Column(Integer, primary_key=True)
-            name_upper = Column(String)
-
-        configure_mappers()
-        eq_(
-            Parent.children.property._calculated_foreign_keys,
-            set([Child.name_upper.property.columns[0]]),
-        )
-
-    def test_class_has_registry_attr(self):
-        existing_registry = Base.registry
-
-        class A(Base):
-            __tablename__ = "a"
-
-            registry = {"foo": "bar"}
-            id = Column(Integer, primary_key=True)
-            data = Column(String)
-
-        class SubA(A):
-            pass
-
-        is_(Base.registry, existing_registry)
-        is_(inspect(A).registry, existing_registry)
-        eq_(A.registry, {"foo": "bar"})
-
-        is_(inspect(SubA).registry, existing_registry)
-        eq_(SubA.registry, {"foo": "bar"})
-
-    def test_class_does_not_have_registry_attr(self):
-        with assertions.expect_raises_message(
-            exc.InvalidRequestError,
-            r"Declarative base class has no 'registry' attribute, or "
-            r"registry is not a sqlalchemy.orm.registry\(\) object",
-        ):
-
-            class Base(with_metaclass(DeclarativeMeta)):
-                metadata = sa.MetaData()
-
-    def test_shared_class_registry(self):
-        reg = {}
-        Base1 = declarative_base(class_registry=reg)
-        Base2 = declarative_base(class_registry=reg)
-
-        class A(Base1):
-            __tablename__ = "a"
-            id = Column(Integer, primary_key=True)
-
-        class B(Base2):
-            __tablename__ = "b"
-            id = Column(Integer, primary_key=True)
-            aid = Column(Integer, ForeignKey(A.id))
-            as_ = relationship("A")
-
-        assert B.as_.property.mapper.class_ is A
-
     def test_uncompiled_attributes_in_relationship(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1105,8 +2137,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column(String(50))
             user_id = Column(Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1155,13 +2186,11 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_nice_dependency_error(self):
         class User(Base):
-
             __tablename__ = "users"
             id = Column("id", Integer, primary_key=True)
             addresses = relationship("Address")
 
         class Address(Base):
-
             __tablename__ = "addresses"
             id = Column(Integer, primary_key=True)
             foo = sa.orm.column_property(User.id == 5)
@@ -1173,7 +2202,6 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_nice_dependency_error_works_with_hasattr(self):
         class User(Base):
-
             __tablename__ = "users"
             id = Column("id", Integer, primary_key=True)
             addresses = relationship("Address")
@@ -1182,7 +2210,7 @@ class DeclarativeTest(DeclarativeTestBase):
         try:
             hasattr(User.addresses, "property")
         except exc.InvalidRequestError:
-            assert sa.util.compat.py3k
+            assert True
 
         # the exception is preserved.  Remains the
         # same through repeated calls.
@@ -1191,33 +2219,21 @@ class DeclarativeTest(DeclarativeTestBase):
                 sa.exc.InvalidRequestError,
                 "^One or more mappers failed to initialize"
                 " - can't proceed with initialization of other mappers. "
-                r"Triggering mapper: 'mapped class User->users'. "
+                r"Triggering mapper: 'Mapper\[User\(users\)\]'. "
                 "Original exception was: When initializing.*",
                 configure_mappers,
             )
 
-    def test_custom_base(self):
-        class MyBase(object):
-            def foobar(self):
-                return "foobar"
-
-        Base = declarative_base(cls=MyBase)
-        assert hasattr(Base, "metadata")
-        assert Base().foobar() == "foobar"
-
     def test_uses_get_on_class_col_fk(self):
-
         # test [ticket:1492]
 
         class Topic(Base):
-
             __tablename__ = "topic"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
             )
 
         class Detail(Base):
-
             __tablename__ = "detail"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1262,51 +2278,95 @@ class DeclarativeTest(DeclarativeTestBase):
         # tables create fine
         Base.metadata.create_all(testing.db)
 
-    def test_add_prop(self):
-        class User(Base, fixtures.ComparableEntity):
+    @testing.fixture
+    def assert_user_address_mapping(self, connection):
+        def go(User, Address):
+            User.metadata.create_all(connection)
 
-            __tablename__ = "users"
-            id = Column(
-                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            u1 = User(
+                name="u1",
+                addresses=[Address(email="one"), Address(email="two")],
             )
 
-        User.name = Column("name", String(50))
+            with Session(connection) as sess:
+                sess.add(u1)
+                sess.flush()
+                sess.expunge_all()
+                eq_(
+                    sess.query(User).all(),
+                    [
+                        User(
+                            name="u1",
+                            addresses=[
+                                Address(email="one"),
+                                Address(email="two"),
+                            ],
+                        )
+                    ],
+                )
+                a1 = sess.query(Address).filter(Address.email == "two").one()
+                eq_(a1, Address(email="two"))
+                eq_(a1.user, User(name="u1"))
+
+        yield go
+
+    @testing.combinations(Column, mapped_column, argnames="_column")
+    def test_add_prop_auto(
+        self, require_metaclass, assert_user_address_mapping, _column
+    ):
+        class User(Base, ComparableEntity):
+            __tablename__ = "users"
+            id = Column("id", Integer, primary_key=True)
+
+        User.name = _column("name", String(50))
         User.addresses = relationship("Address", backref="user")
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
-            id = Column(
-                Integer, primary_key=True, test_needs_autoincrement=True
-            )
+            id = _column(Integer, primary_key=True)
 
-        Address.email = Column(String(50), key="_email")
-        Address.user_id = Column(
+        Address.email = _column(String(50), key="_email")
+        Address.user_id = _column(
             "user_id", Integer, ForeignKey("users.id"), key="_user_id"
         )
-        Base.metadata.create_all(testing.db)
+
         eq_(Address.__table__.c["id"].name, "id")
         eq_(Address.__table__.c["_email"].name, "email")
         eq_(Address.__table__.c["_user_id"].name, "user_id")
-        u1 = User(
-            name="u1", addresses=[Address(email="one"), Address(email="two")]
+
+        assert_user_address_mapping(User, Address)
+
+    @testing.combinations(Column, mapped_column, argnames="_column")
+    def test_add_prop_manual(self, assert_user_address_mapping, _column):
+        class User(Base, ComparableEntity):
+            __tablename__ = "users"
+            id = _column("id", Integer, primary_key=True)
+
+        add_mapped_attribute(User, "name", _column("name", String(50)))
+        add_mapped_attribute(
+            User, "addresses", relationship("Address", backref="user")
         )
-        sess = fixture_session()
-        sess.add(u1)
-        sess.flush()
-        sess.expunge_all()
-        eq_(
-            sess.query(User).all(),
-            [
-                User(
-                    name="u1",
-                    addresses=[Address(email="one"), Address(email="two")],
-                )
-            ],
+
+        class Address(Base, ComparableEntity):
+            __tablename__ = "addresses"
+            id = _column(Integer, primary_key=True)
+
+        add_mapped_attribute(
+            Address, "email", _column(String(50), key="_email")
         )
-        a1 = sess.query(Address).filter(Address.email == "two").one()
-        eq_(a1, Address(email="two"))
-        eq_(a1.user, User(name="u1"))
+        add_mapped_attribute(
+            Address,
+            "user_id",
+            _column(
+                "user_id", Integer, ForeignKey("users.id"), key="_user_id"
+            ),
+        )
+
+        eq_(Address.__table__.c["id"].name, "id")
+        eq_(Address.__table__.c["_email"].name, "email")
+        eq_(Address.__table__.c["_user_id"].name, "user_id")
+
+        assert_user_address_mapping(User, Address)
 
     def test_alt_name_attr_subclass_column_inline(self):
         # [ticket:2900]
@@ -1346,7 +2406,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
         ASub(brap=B())
 
-    def test_alt_name_attr_subclass_column_attrset(self):
+    def test_alt_name_attr_subclass_column_attrset(self, require_metaclass):
         # [ticket:2900]
         class A(Base):
             __tablename__ = "a"
@@ -1359,7 +2419,9 @@ class DeclarativeTest(DeclarativeTestBase):
             A.brap.original_property, descriptor_props.SynonymProperty
         )
 
-    def test_alt_name_attr_subclass_relationship_attrset(self):
+    def test_alt_name_attr_subclass_relationship_attrset(
+        self, require_metaclass
+    ):
         # [ticket:2900]
         class A(Base):
             __tablename__ = "a"
@@ -1380,8 +2442,7 @@ class DeclarativeTest(DeclarativeTestBase):
         A(brap=B())
 
     def test_eager_order_by(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1389,8 +2450,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column("email", String(50))
             user_id = Column("user_id", Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1417,8 +2477,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_order_by_multi(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1426,8 +2485,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column("email", String(50))
             user_id = Column("user_id", Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1448,99 +2506,18 @@ class DeclarativeTest(DeclarativeTestBase):
         u = sess.query(User).filter(User.name == "u1").one()
         u.addresses
 
-    def test_as_declarative(self):
-        class User(fixtures.ComparableEntity):
-
-            __tablename__ = "users"
-            id = Column(
-                "id", Integer, primary_key=True, test_needs_autoincrement=True
-            )
-            name = Column("name", String(50))
-            addresses = relationship("Address", backref="user")
-
-        class Address(fixtures.ComparableEntity):
-
-            __tablename__ = "addresses"
-            id = Column(
-                "id", Integer, primary_key=True, test_needs_autoincrement=True
-            )
-            email = Column("email", String(50))
-            user_id = Column("user_id", Integer, ForeignKey("users.id"))
-
-        reg = registry(metadata=Base.metadata)
-        reg.mapped(User)
-        reg.mapped(Address)
-        reg.metadata.create_all(testing.db)
-        u1 = User(
-            name="u1", addresses=[Address(email="one"), Address(email="two")]
-        )
-        with Session(testing.db) as sess:
-            sess.add(u1)
-            sess.commit()
-        with Session(testing.db) as sess:
-            eq_(
-                sess.query(User).all(),
-                [
-                    User(
-                        name="u1",
-                        addresses=[Address(email="one"), Address(email="two")],
-                    )
-                ],
-            )
-
-    def test_custom_mapper_attribute(self):
-        def mymapper(cls, tbl, **kwargs):
-            m = sa.orm.mapper(cls, tbl, **kwargs)
-            m.CHECK = True
-            return m
-
-        base = declarative_base()
-
-        class Foo(base):
-            __tablename__ = "foo"
-            __mapper_cls__ = mymapper
-            id = Column(Integer, primary_key=True)
-
-        eq_(Foo.__mapper__.CHECK, True)
-
-    def test_custom_mapper_argument(self):
-        def mymapper(cls, tbl, **kwargs):
-            m = sa.orm.mapper(cls, tbl, **kwargs)
-            m.CHECK = True
-            return m
-
-        base = declarative_base(mapper=mymapper)
-
-        class Foo(base):
-            __tablename__ = "foo"
-            id = Column(Integer, primary_key=True)
-
-        eq_(Foo.__mapper__.CHECK, True)
-
-    def test_no_change_to_all_descriptors(self):
-        base = declarative_base()
-
-        class Foo(base):
-            __tablename__ = "foo"
-            id = Column(Integer, primary_key=True)
-
-        eq_(Foo.__mapper__.all_orm_descriptors.keys(), ["id"])
-
     def test_oops(self):
-
         with testing.expect_warnings(
-            "Ignoring declarative-like tuple value of " "attribute 'name'"
+            "Ignoring declarative-like tuple value of attribute 'name'"
         ):
 
-            class User(Base, fixtures.ComparableEntity):
-
+            class User(Base, ComparableEntity):
                 __tablename__ = "users"
                 id = Column("id", Integer, primary_key=True)
                 name = (Column("name", String(50)),)
 
     def test_table_args_no_dict(self):
         class Foo1(Base):
-
             __tablename__ = "foo"
             __table_args__ = (ForeignKeyConstraint(["id"], ["foo.bar"]),)
             id = Column("id", Integer, primary_key=True)
@@ -1551,7 +2528,6 @@ class DeclarativeTest(DeclarativeTestBase):
     def test_table_args_type(self):
         def err():
             class Foo1(Base):
-
                 __tablename__ = "foo"
                 __table_args__ = ForeignKeyConstraint(["id"], ["foo.id"])
                 id = Column("id", Integer, primary_key=True)
@@ -1562,7 +2538,6 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_table_args_none(self):
         class Foo2(Base):
-
             __tablename__ = "foo"
             __table_args__ = None
             id = Column("id", Integer, primary_key=True)
@@ -1571,7 +2546,6 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_table_args_dict_format(self):
         class Foo2(Base):
-
             __tablename__ = "foo"
             __table_args__ = {"mysql_engine": "InnoDB"}
             id = Column("id", Integer, primary_key=True)
@@ -1580,13 +2554,11 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_table_args_tuple_format(self):
         class Foo2(Base):
-
             __tablename__ = "foo"
             __table_args__ = {"mysql_engine": "InnoDB"}
             id = Column("id", Integer, primary_key=True)
 
         class Bar(Base):
-
             __tablename__ = "bar"
             __table_args__ = (
                 ForeignKeyConstraint(["id"], ["foo.id"]),
@@ -1611,9 +2583,11 @@ class DeclarativeTest(DeclarativeTestBase):
         eq_(Foo.__table__.name, "foobat")
 
     def test_table_cls_attribute_return_none(self):
-        from sqlalchemy.schema import Column, PrimaryKeyConstraint
+        # this is separate from the "fixture" version of Column used in the
+        # rest of this suite
+        from sqlalchemy.schema import Column
 
-        class AutoTable(object):
+        class AutoTable:
             @declared_attr
             def __tablename__(cls):
                 return cls.__name__
@@ -1636,9 +2610,8 @@ class DeclarativeTest(DeclarativeTestBase):
 
         is_(inspect(Employee).local_table, Person.__table__)
 
-    def test_expression(self):
-        class User(Base, fixtures.ComparableEntity):
-
+    def test_expression(self, require_metaclass):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1646,8 +2619,7 @@ class DeclarativeTest(DeclarativeTestBase):
             name = Column("name", String(50))
             addresses = relationship("Address", backref="user")
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1680,8 +2652,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_useless_declared_attr(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1689,8 +2660,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column("email", String(50))
             user_id = Column("user_id", Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1763,9 +2733,8 @@ class DeclarativeTest(DeclarativeTestBase):
                 def somecol(cls):
                     return Column(Integer)
 
-    def test_column(self):
-        class User(Base, fixtures.ComparableEntity):
-
+    def test_column(self, require_metaclass):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1784,9 +2753,28 @@ class DeclarativeTest(DeclarativeTestBase):
         sess.expunge_all()
         eq_(sess.query(User).all(), [User(name="u1", a="a", b="b")])
 
-    def test_column_properties(self):
-        class Address(Base, fixtures.ComparableEntity):
+    def test_active_history_columns(self):
+        class Foo(Base):
+            __tablename__ = "foo"
 
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
+            a = column_property(Column(String), active_history=True)
+            b = mapped_column(String, active_history=True)
+            c = column_property(Column(String))
+            d = mapped_column(String)
+
+        self.assert_compile(
+            select(Foo), "SELECT foo.id, foo.a, foo.b, foo.c, foo.d FROM foo"
+        )
+        eq_(Foo.a.impl.active_history, True)
+        eq_(Foo.b.impl.active_history, True)
+        eq_(Foo.c.impl.active_history, False)
+        eq_(Foo.d.impl.active_history, False)
+
+    def test_column_properties(self):
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1794,8 +2782,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column(String(50))
             user_id = Column(Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1829,15 +2816,13 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_column_properties_2(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(Integer, primary_key=True)
             email = Column(String(50))
             user_id = Column(Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column("id", Integer, primary_key=True)
             name = Column("name", String(50))
@@ -1847,12 +2832,11 @@ class DeclarativeTest(DeclarativeTestBase):
 
             adr_count = Address.id
 
-        eq_(set(User.__table__.c.keys()), set(["id", "name"]))
-        eq_(set(Address.__table__.c.keys()), set(["id", "email", "user_id"]))
+        eq_(set(User.__table__.c.keys()), {"id", "name"})
+        eq_(set(Address.__table__.c.keys()), {"id", "email", "user_id"})
 
     def test_deferred(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1873,7 +2857,7 @@ class DeclarativeTest(DeclarativeTestBase):
         self.assert_sql_count(testing.db, go, 1)
 
     def test_composite_inline(self):
-        class AddressComposite(fixtures.ComparableEntity):
+        class AddressComposite(ComparableEntity):
             def __init__(self, street, state):
                 self.street = street
                 self.state = state
@@ -1881,7 +2865,7 @@ class DeclarativeTest(DeclarativeTestBase):
             def __composite_values__(self):
                 return [self.street, self.state]
 
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "user"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1902,7 +2886,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_composite_separate(self):
-        class AddressComposite(fixtures.ComparableEntity):
+        class AddressComposite(ComparableEntity):
             def __init__(self, street, state):
                 self.street = street
                 self.state = state
@@ -1910,7 +2894,7 @@ class DeclarativeTest(DeclarativeTestBase):
             def __composite_values__(self):
                 return [self.street, self.state]
 
-        class User(Base, fixtures.ComparableEntity):
+        class User(Base, ComparableEntity):
             __tablename__ = "user"
             id = Column(
                 Integer, primary_key=True, test_needs_autoincrement=True
@@ -1957,8 +2941,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_synonym_inline(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -1989,14 +2972,12 @@ class DeclarativeTest(DeclarativeTestBase):
         from sqlalchemy.orm.properties import ColumnProperty
 
         class CustomCompare(ColumnProperty.Comparator):
-
             __hash__ = None
 
             def __eq__(self, other):
                 return self.__clause_element__() == other + " FOO"
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2011,9 +2992,8 @@ class DeclarativeTest(DeclarativeTestBase):
         sess.flush()
         eq_(sess.query(User).filter(User.name == "someuser").one(), u1)
 
-    def test_synonym_added(self):
-        class User(Base, fixtures.ComparableEntity):
-
+    def test_synonym_added(self, require_metaclass):
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2040,8 +3020,7 @@ class DeclarativeTest(DeclarativeTestBase):
         )
 
     def test_reentrant_compile_via_foreignkey(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2049,8 +3028,7 @@ class DeclarativeTest(DeclarativeTestBase):
             name = Column("name", String(50))
             addresses = relationship("Address", backref="user")
 
-        class Address(Base, fixtures.ComparableEntity):
-
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2085,9 +3063,8 @@ class DeclarativeTest(DeclarativeTestBase):
             ],
         )
 
-    def test_relationship_reference(self):
-        class Address(Base, fixtures.ComparableEntity):
-
+    def test_relationship_reference(self, require_metaclass):
+        class Address(Base, ComparableEntity):
             __tablename__ = "addresses"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2095,8 +3072,7 @@ class DeclarativeTest(DeclarativeTestBase):
             email = Column("email", String(50))
             user_id = Column("user_id", Integer, ForeignKey("users.id"))
 
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2132,7 +3108,6 @@ class DeclarativeTest(DeclarativeTestBase):
 
     def test_pk_with_fk_init(self):
         class Bar(Base):
-
             __tablename__ = "bar"
             id = sa.Column(
                 sa.Integer, sa.ForeignKey("foo.id"), primary_key=True
@@ -2140,7 +3115,6 @@ class DeclarativeTest(DeclarativeTestBase):
             ex = sa.Column(sa.Integer, primary_key=True)
 
         class Foo(Base):
-
             __tablename__ = "foo"
             id = sa.Column(sa.Integer, primary_key=True)
             bars = sa.orm.relationship(Bar)
@@ -2160,7 +3134,6 @@ class DeclarativeTest(DeclarativeTestBase):
         meta.create_all(testing.db)
 
         class MyObj(Base):
-
             __table__ = Table("t1", Base.metadata, autoload_with=testing.db)
 
         sess = fixture_session()
@@ -2170,8 +3143,7 @@ class DeclarativeTest(DeclarativeTestBase):
         eq_(sess.execute(t1.select()).fetchall(), [("someid", "somedata")])
 
     def test_synonym_for(self):
-        class User(Base, fixtures.ComparableEntity):
-
+        class User(Base, ComparableEntity):
             __tablename__ = "users"
             id = Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -2214,7 +3186,7 @@ class DeclarativeTest(DeclarativeTestBase):
 
         canary = mock.Mock()
 
-        @event.listens_for(mapper, "instrument_class")
+        @event.listens_for(Mapper, "instrument_class")
         def instrument_class(mp, cls):
             canary.instrument_class(mp, cls)
 
@@ -2234,77 +3206,6 @@ class DeclarativeTest(DeclarativeTestBase):
             ],
         )
 
-    def test_cls_docstring(self):
-        class MyBase(object):
-            """MyBase Docstring"""
-
-        Base = declarative_base(cls=MyBase)
-
-        eq_(Base.__doc__, MyBase.__doc__)
-
-    def test_delattr_mapped_raises(self):
-        Base = declarative_base()
-
-        class Foo(Base):
-            __tablename__ = "foo"
-
-            id = Column(Integer, primary_key=True)
-            data = Column(String)
-
-        def go():
-            del Foo.data
-
-        assert_raises_message(
-            NotImplementedError,
-            "Can't un-map individual mapped attributes on a mapped class.",
-            go,
-        )
-
-    def test_delattr_hybrid_fine(self):
-        Base = declarative_base()
-
-        class Foo(Base):
-            __tablename__ = "foo"
-
-            id = Column(Integer, primary_key=True)
-            data = Column(String)
-
-            @hybrid_property
-            def data_hybrid(self):
-                return self.data
-
-        assert "data_hybrid" in Foo.__mapper__.all_orm_descriptors.keys()
-
-        del Foo.data_hybrid
-
-        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
-
-        assert not hasattr(Foo, "data_hybrid")
-
-    def test_setattr_hybrid_updates_descriptors(self):
-        Base = declarative_base()
-
-        class Foo(Base):
-            __tablename__ = "foo"
-
-            id = Column(Integer, primary_key=True)
-            data = Column(String)
-
-        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
-
-        @hybrid_property
-        def data_hybrid(self):
-            return self.data
-
-        Foo.data_hybrid = data_hybrid
-        assert "data_hybrid" in Foo.__mapper__.all_orm_descriptors.keys()
-
-        del Foo.data_hybrid
-
-        assert "data_hybrid" not in Foo.__mapper__.all_orm_descriptors.keys()
-
-        assert not hasattr(Foo, "data_hybrid")
-
     def test_classes_can_override_new(self):
         class MyTable(Base):
             __tablename__ = "my_table"
@@ -2323,29 +3224,229 @@ class DeclarativeTest(DeclarativeTestBase):
         mt = MyTable(id=5)
         eq_(mt.id, 5)
 
-    @testing.requires.python36
-    def test_kw_support_in_declarative_meta_init(self):
-        # This will not fail if DeclarativeMeta __init__ supports **kw
 
-        class BaseUser(Base):
-            __tablename__ = "base"
-            id_ = Column(Integer, primary_key=True)
+class NamedAttrOrderingTest(fixtures.TestBase):
+    """test for #8705"""
 
-            @classmethod
-            def __init_subclass__(cls, random_keyword=False, **kw):
-                super().__init_subclass__(**kw)
-                cls._set_random_keyword_used_here = random_keyword
+    @testing.variation(
+        "mapping_style",
+        [
+            "decl_base_fn",
+            "decl_base_base",
+            "classical_mapping",
+        ],
+    )
+    def test_ordering_of_attrs_cols_named_or_unnamed(self, mapping_style):
+        seen_names = {"noname"}
 
-        class User(BaseUser):
-            __tablename__ = "user"
-            id_ = Column(Integer, ForeignKey("base.id_"), primary_key=True)
+        is_declarative = (
+            mapping_style.decl_base_fn or mapping_style.decl_base_base
+        )
 
-        # Check the default option
-        eq_(User._set_random_keyword_used_here, False)
+        def make_name():
+            name = "noname"
 
-        # Build the metaclass with a keyword!
-        bases = (BaseUser,)
-        UserType = DeclarativeMeta("UserType", bases, {}, random_keyword=True)
+            while name in seen_names:
+                uppercase = random.randint(1, 3) == 1
+                name = "".join(
+                    random.choice("abcdefghijklmnopqrstuvxyz")
+                    for i in range(random.randint(4, 10))
+                )
+                if uppercase:
+                    name = random.choice("ABCDEFGHIJKLMNOP") + name
+            seen_names.add(name)
+            return name
 
-        # Check to see if __init_subclass__ works in supported versions
-        eq_(UserType._set_random_keyword_used_here, True)
+        def make_column(assign_col_name):
+            use_key = random.randint(1, 3) == 1
+            use_name = random.randint(1, 3) == 1
+
+            args = []
+            kw = {}
+            name = col_name = make_name()
+
+            if use_name:
+                use_different_name = random.randint(1, 3) != 3
+                if use_different_name:
+                    col_name = make_name()
+
+                args.append(col_name)
+            elif assign_col_name:
+                args.append(col_name)
+
+            if use_key:
+                kw["key"] = name
+                expected_c_name = name
+            else:
+                expected_c_name = col_name
+
+            args.append(Integer)
+
+            use_mapped_column = is_declarative and random.randint(1, 2) == 1
+
+            if use_mapped_column:
+                col = mapped_column(*args, **kw)
+            else:
+                col = Column(*args, **kw)
+
+            use_explicit_property = (
+                not use_mapped_column and random.randint(1, 6) == 1
+            )
+            if use_explicit_property:
+                col_prop = column_property(col)
+            else:
+                col_prop = col
+
+            return name, expected_c_name, col, col_prop
+
+        assign_col_name = mapping_style.classical_mapping
+
+        names = [
+            make_column(assign_col_name) for i in range(random.randint(10, 15))
+        ]
+        len_names = len(names)
+
+        pk_col = names[random.randint(0, len_names - 1)][2]
+        if isinstance(pk_col, MappedColumn):
+            pk_col.column.primary_key = True
+        else:
+            pk_col.primary_key = True
+
+        names_only = [name for name, _, _, _ in names]
+        col_names_only = [col_name for _, col_name, _, _ in names]
+        cols_only = [col for _, _, col, _ in names]
+
+        if is_declarative:
+            if mapping_style.decl_base_fn:
+                Base = declarative_base()
+            elif mapping_style.decl_base_base:
+
+                class Base(DeclarativeBase):
+                    pass
+
+            else:
+                assert False
+
+            clsdict = {
+                "__tablename__": "new_table",
+            }
+            clsdict.update({name: colprop for name, _, _, colprop in names})
+
+            new_cls = type("NewCls", (Base,), clsdict)
+
+        elif mapping_style.classical_mapping:
+
+            class new_cls:
+                pass
+
+            reg = registry()
+            t = Table("new_table", reg.metadata, *cols_only)
+
+            reg.map_imperatively(
+                new_cls,
+                t,
+                properties={
+                    key: colprop
+                    for key, col_name, col, colprop in names
+                    if col_name != key
+                },
+            )
+        else:
+            mapping_style.fail()
+
+        eq_(new_cls.__table__.c.keys(), col_names_only)
+        eq_(new_cls.__mapper__.attrs.keys(), names_only)
+        eq_(list(new_cls._sa_class_manager.keys()), names_only)
+        eq_([k for k in new_cls.__dict__ if not k.startswith("_")], names_only)
+
+        stmt = select(new_cls)
+        eq_(stmt.selected_columns.keys(), col_names_only)
+
+    @testing.variation(
+        "mapping_style",
+        [
+            "decl_base_fn",
+            "decl_base_base",
+            "decl_base_no_meta",
+            "map_declaratively",
+            "decorator",
+            "mapped_as_dataclass",
+        ],
+    )
+    def test_no_imperative_with_declarative_table(self, mapping_style):
+        if mapping_style.decl_base_fn:
+            Base = declarative_base()
+
+            class DecModel(Base):
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        elif mapping_style.decl_base_base:
+
+            class Base(DeclarativeBase):
+                pass
+
+            class DecModel(Base):
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        elif mapping_style.decl_base_no_meta:
+
+            class Base(DeclarativeBaseNoMeta):
+                pass
+
+            class DecModel(Base):
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        elif mapping_style.decorator:
+            r = registry()
+
+            @r.mapped
+            class DecModel:
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        elif mapping_style.map_declaratively:
+
+            class DecModel:
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+            registry().map_declaratively(DecModel)
+        elif mapping_style.decorator:
+            r = registry()
+
+            @r.mapped
+            class DecModel:
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        elif mapping_style.mapped_as_dataclass:
+            r = registry()
+
+            @r.mapped_as_dataclass
+            class DecModel:
+                __tablename__ = "foo"
+                id: Mapped[int] = mapped_column(primary_key=True)
+                data: Mapped[str]
+
+        else:
+            assert False
+
+        class ImpModel:
+            id: int
+            data: str
+
+        with expect_raises_message(
+            exc.ArgumentError,
+            "FROM expression, such as a Table or alias.. object expected "
+            "for argument 'local_table'; got",
+        ):
+            registry().map_imperatively(ImpModel, DecModel)

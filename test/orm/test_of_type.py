@@ -30,7 +30,7 @@ from .inheritance._poly_fixtures import Manager
 from .inheritance._poly_fixtures import Person
 
 
-class _PolymorphicTestBase(object):
+class _PolymorphicTestBase:
     __dialect__ = "default"
 
     def test_any_one(self):
@@ -957,7 +957,6 @@ class SubclassRelationshipTest(
 class SubclassRelationshipTest2(
     testing.AssertsCompiledSQL, fixtures.DeclarativeMappedTest
 ):
-
     run_setup_classes = "once"
     run_setup_mappers = "once"
     run_inserts = "once"
@@ -1103,7 +1102,6 @@ class SubclassRelationshipTest2(
 class SubclassRelationshipTest3(
     testing.AssertsCompiledSQL, fixtures.DeclarativeMappedTest
 ):
-
     run_setup_classes = "once"
     run_setup_mappers = "once"
     run_inserts = "once"

@@ -5,6 +5,10 @@
 Changing Attribute Behavior
 ===========================
 
+This section will discuss features and techniques used to modify the
+behavior of ORM mapped attributes, including those mapped with
+:func:`_orm.mapped_column`, :func:`_orm.relationship`, and others.
+
 .. _simple_validators:
 
 Simple Validators
@@ -23,20 +27,14 @@ issued when the ORM is populating the object::
     class EmailAddress(Base):
         __tablename__ = "address"
 
-        id = Column(Integer, primary_key=True)
-        email = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        email = mapped_column(String)
 
         @validates("email")
         def validate_email(self, key, address):
             if "@" not in address:
                 raise ValueError("failed simple email validation")
             return address
-
-.. versionchanged:: 1.0.0 - validators are no longer triggered within
-   the flush process when the newly fetched values for primary key
-   columns as well as some python- or server-side defaults are fetched.
-   Prior to 1.0, validators may be triggered in those cases as well.
-
 
 Validators also receive collection append events, when items are added to a
 collection::
@@ -135,11 +133,11 @@ different name. Below we illustrate this using Python 2.6-style properties::
     class EmailAddress(Base):
         __tablename__ = "email_address"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
         # name the attribute with an underscore,
         # different from the column name
-        _email = Column("email", String)
+        _email = mapped_column("email", String)
 
         # then create an ".email" attribute
         # to get/set "._email"
@@ -155,7 +153,7 @@ The approach above will work, but there's more we can add. While our
 ``EmailAddress`` object will shuttle the value through the ``email``
 descriptor and into the ``_email`` mapped attribute, the class level
 ``EmailAddress.email`` attribute does not have the usual expression semantics
-usable with :class:`_query.Query`. To provide these, we instead use the
+usable with :class:`_sql.Select`. To provide these, we instead use the
 :mod:`~sqlalchemy.ext.hybrid` extension as follows::
 
     from sqlalchemy.ext.hybrid import hybrid_property
@@ -164,9 +162,9 @@ usable with :class:`_query.Query`. To provide these, we instead use the
     class EmailAddress(Base):
         __tablename__ = "email_address"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
-        _email = Column("email", String)
+        _email = mapped_column("email", String)
 
         @hybrid_property
         def email(self):
@@ -183,22 +181,25 @@ that is, from the ``EmailAddress`` class directly:
 .. sourcecode:: python+sql
 
     from sqlalchemy.orm import Session
+    from sqlalchemy import select
 
     session = Session()
 
-    {sql}address = session.query(EmailAddress).\
-                     filter(EmailAddress.email == 'address@example.com').\
-                     one()
-    SELECT address.email AS address_email, address.id AS address_id
+    address = session.scalars(
+        select(EmailAddress).where(EmailAddress.email == "address@example.com")
+    ).one()
+    {execsql}SELECT address.email AS address_email, address.id AS address_id
     FROM address
     WHERE address.email = ?
     ('address@example.com',)
+    {stop}
 
     address.email = "otheraddress@example.com"
-    {sql}session.commit()
-    UPDATE address SET email=? WHERE address.id = ?
+    session.commit()
+    {execsql}UPDATE address SET email=? WHERE address.id = ?
     ('otheraddress@example.com', 1)
     COMMIT
+    {stop}
 
 The :class:`~.hybrid_property` also allows us to change the behavior of the
 attribute, including defining separate behaviors when the attribute is
@@ -210,9 +211,9 @@ logic::
     class EmailAddress(Base):
         __tablename__ = "email_address"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
-        _email = Column("email", String)
+        _email = mapped_column("email", String)
 
         @hybrid_property
         def email(self):
@@ -242,11 +243,14 @@ attribute, a SQL function is rendered which produces the same effect:
 
 .. sourcecode:: python+sql
 
-    {sql}address = session.query(EmailAddress).filter(EmailAddress.email == 'address').one()
-    SELECT address.email AS address_email, address.id AS address_id
+    address = session.scalars(
+        select(EmailAddress).where(EmailAddress.email == "address")
+    ).one()
+    {execsql}SELECT address.email AS address_email, address.id AS address_id
     FROM address
     WHERE substr(address.email, ?, length(address.email) - ?) = ?
     (0, 12, 'address')
+    {stop}
 
 Read more about Hybrids at :ref:`hybrids_toplevel`.
 
@@ -267,20 +271,22 @@ attribute available by an additional name::
     class MyClass(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
-        job_status = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        job_status = mapped_column(String(50))
 
         status = synonym("job_status")
 
 The above class ``MyClass`` has two attributes, ``.job_status`` and
 ``.status`` that will behave as one attribute, both at the expression
-level::
+level:
+
+.. sourcecode:: pycon+sql
 
     >>> print(MyClass.job_status == "some_status")
-    my_table.job_status = :job_status_1
+    {printsql}my_table.job_status = :job_status_1{stop}
 
     >>> print(MyClass.status == "some_status")
-    my_table.job_status = :job_status_1
+    {printsql}my_table.job_status = :job_status_1{stop}
 
 and at the instance level::
 
@@ -303,8 +309,8 @@ a user-defined :term:`descriptor`.  We can supply our
     class MyClass(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
-        status = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        status = mapped_column(String(50))
 
         @property
         def job_status(self):
@@ -321,8 +327,8 @@ using the :func:`.synonym_for` decorator::
     class MyClass(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
-        status = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        status = mapped_column(String(50))
 
         @synonym_for("status")
         @property

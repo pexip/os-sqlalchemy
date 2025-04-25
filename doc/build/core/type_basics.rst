@@ -63,9 +63,9 @@ not every backend has a real "boolean" datatype; some make use of integers
 or BIT values 0 and 1, some have boolean literal constants ``true`` and
 ``false`` while others dont.   For this datatype, :class:`_types.Boolean`
 may render ``BOOLEAN`` on a backend such as PostgreSQL, ``BIT`` on the
-MySQL backend and ``SMALLINT`` on Oracle.  As data is sent and received
-from the database using this type, based on the dialect in use it may be
-interpreting Python numeric or boolean values.
+MySQL backend and ``SMALLINT`` on Oracle Database.  As data is sent and
+received from the database using this type, based on the dialect in use it
+may be interpreting Python numeric or boolean values.
 
 The typical SQLAlchemy application will likely wish to use primarily
 "CamelCase" types in the general case, as they will generally provide the best
@@ -141,7 +141,7 @@ makes use of the :meth:`_types.TypeEngine.with_variant` method in order to
 
 Such as, to use the :class:`_types.String` datatype, but when running on MySQL
 to make use of the :paramref:`_mysql.VARCHAR.charset` parameter of
-:class:`_mysql.VARCHAR` when the table is created on MySQL,
+:class:`_mysql.VARCHAR` when the table is created on MySQL or MariaDB,
 :meth:`_types.TypeEngine.with_variant` may be used as below::
 
     from sqlalchemy import MetaData
@@ -156,14 +156,14 @@ to make use of the :paramref:`_mysql.VARCHAR.charset` parameter of
         Column("user_name", String(100), primary_key=True),
         Column(
             "bio",
-            String(255).with_variant(VARCHAR(255, charset="utf8"), "mysql"),
+            String(255).with_variant(VARCHAR(255, charset="utf8"), "mysql", "mariadb"),
         ),
     )
 
 In the above table definition, the ``"bio"`` column will have string-behaviors
 on all backends. On most backends it will render in DDL as ``VARCHAR``. However
-on MySQL (indicated by database URLs that start with ``mysql``), it will
-render as ``VARCHAR(255) CHARACTER SET utf8``.
+on MySQL and MariaDB (indicated by database URLs that start with ``mysql`` or
+``mariadb``), it will render as ``VARCHAR(255) CHARACTER SET utf8``.
 
 .. seealso::
 
@@ -195,6 +195,9 @@ type is emitted in ``CREATE TABLE``, such as ``VARCHAR`` see
 
 .. autoclass:: Enum
   :members: __init__, create, drop
+
+.. autoclass:: Double
+   :members:
 
 .. autoclass:: Float
   :members:
@@ -239,6 +242,9 @@ type is emitted in ``CREATE TABLE``, such as ``VARCHAR`` see
 .. autoclass:: UnicodeText
    :members:
 
+.. autoclass:: Uuid
+  :members:
+
 .. _types_sqlstandard:
 
 SQL Standard and Multiple Vendor "UPPERCASE" Types
@@ -253,7 +259,9 @@ its exact name in DDL with ``CREATE TABLE`` is issued.
 
 
 .. autoclass:: ARRAY
-   :members:
+    :members: __init__, Comparator
+    :member-order: bysource
+
 
 .. autoclass:: BIGINT
 
@@ -281,6 +289,9 @@ its exact name in DDL with ``CREATE TABLE`` is issued.
 
 .. autoclass:: DECIMAL
 
+.. autoclass:: DOUBLE
+
+.. autoclass:: DOUBLE_PRECISION
 
 .. autoclass:: FLOAT
 
@@ -319,9 +330,9 @@ its exact name in DDL with ``CREATE TABLE`` is issued.
     :members:
 
 
+.. autoclass:: UUID
+
 .. autoclass:: VARBINARY
 
 
 .. autoclass:: VARCHAR
-
-

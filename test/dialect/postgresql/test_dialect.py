@@ -1,8 +1,9 @@
-# coding: utf-8
+import asyncio
+import dataclasses
 import datetime
-import itertools
 import logging
 import logging.handlers
+import re
 
 from sqlalchemy import BigInteger
 from sqlalchemy import bindparam
@@ -17,7 +18,6 @@ from sqlalchemy import extract
 from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import literal
-from sqlalchemy import literal_column
 from sqlalchemy import MetaData
 from sqlalchemy import Numeric
 from sqlalchemy import schema
@@ -29,15 +29,17 @@ from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import TypeDecorator
-from sqlalchemy import util
+from sqlalchemy.dialects.postgresql import asyncpg as asyncpg_dialect
 from sqlalchemy.dialects.postgresql import base as postgresql
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.postgresql import HSTORE
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import psycopg as psycopg_dialect
 from sqlalchemy.dialects.postgresql import psycopg2 as psycopg2_dialect
-from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_BATCH
-from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_PLAIN
+from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.dialects.postgresql.psycopg2 import EXECUTEMANY_VALUES
-from sqlalchemy.engine import cursor as _cursor
-from sqlalchemy.engine import engine_from_config
+from sqlalchemy.dialects.postgresql.psycopg2 import (
+    EXECUTEMANY_VALUES_PLUS_BATCH,
+)
 from sqlalchemy.engine import url
 from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import config
@@ -54,19 +56,149 @@ from sqlalchemy.testing.assertions import AssertsCompiledSQL
 from sqlalchemy.testing.assertions import AssertsExecutionResults
 from sqlalchemy.testing.assertions import eq_
 from sqlalchemy.testing.assertions import eq_regex
+from sqlalchemy.testing.assertions import expect_raises
 from sqlalchemy.testing.assertions import ne_
-from sqlalchemy.util import u
-from sqlalchemy.util import ue
-from ...engine import test_deprecations
 
-if True:
-    from sqlalchemy.dialects.postgresql.psycopg2 import (
-        EXECUTEMANY_VALUES_PLUS_BATCH,
+
+def _fk_expected(
+    constrained_columns,
+    referred_table,
+    referred_columns,
+    referred_schema=None,
+    match=None,
+    onupdate=None,
+    ondelete=None,
+    deferrable=None,
+    initially=None,
+):
+    return (
+        constrained_columns,
+        referred_schema,
+        referred_table,
+        referred_columns,
+        f"MATCH {match}" if match else None,
+        match,
+        f"ON UPDATE {onupdate}" if onupdate else None,
+        onupdate,
+        f"ON DELETE {ondelete}" if ondelete else None,
+        ondelete,
+        deferrable,
+        f"INITIALLY {initially}" if initially else None,
+        initially,
     )
 
 
 class DialectTest(fixtures.TestBase):
     """python-side dialect tests."""
+
+    @testing.combinations(
+        (
+            "FOREIGN KEY (tid) REFERENCES some_table(id)",
+            _fk_expected("tid", "some_table", "id"),
+        ),
+        (
+            'FOREIGN KEY (tid) REFERENCES "(2)"(id)',
+            _fk_expected("tid", '"(2)"', "id"),
+        ),
+        (
+            'FOREIGN KEY (tid) REFERENCES some_table("(2)")',
+            _fk_expected("tid", "some_table", '"(2)"'),
+        ),
+        (
+            'FOREIGN KEY (tid1, tid2) REFERENCES some_table("(2)", "(3)")',
+            _fk_expected("tid1, tid2", "some_table", '"(2)", "(3)"'),
+        ),
+        (
+            "FOREIGN KEY (tid) REFERENCES some_table(id) "
+            "DEFERRABLE INITIALLY DEFERRED",
+            _fk_expected(
+                "tid",
+                "some_table",
+                "id",
+                deferrable="DEFERRABLE",
+                initially="DEFERRED",
+            ),
+        ),
+        (
+            "FOREIGN KEY (tid1, tid2) "
+            "REFERENCES some_schema.some_table(id1, id2)",
+            _fk_expected(
+                "tid1, tid2",
+                "some_table",
+                "id1, id2",
+                referred_schema="some_schema",
+            ),
+        ),
+        (
+            "FOREIGN KEY (tid1, tid2) "
+            "REFERENCES some_schema.some_table(id1, id2) "
+            "MATCH FULL "
+            "ON UPDATE CASCADE "
+            "ON DELETE CASCADE "
+            "DEFERRABLE INITIALLY DEFERRED",
+            _fk_expected(
+                "tid1, tid2",
+                "some_table",
+                "id1, id2",
+                referred_schema="some_schema",
+                onupdate="CASCADE",
+                ondelete="CASCADE",
+                match="FULL",
+                deferrable="DEFERRABLE",
+                initially="DEFERRED",
+            ),
+        ),
+    )
+    def test_fk_parsing(self, condef, expected):
+        FK_REGEX = postgresql.dialect()._fk_regex_pattern
+        groups = re.search(FK_REGEX, condef).groups()
+
+        eq_(groups, expected)
+
+    def test_range_constructor(self):
+        """test kwonly argments in the range constructor, as we had
+        to do dataclasses backwards compat operations"""
+
+        r1 = Range(None, 5)
+        eq_(dataclasses.astuple(r1), (None, 5, "[)", False))
+
+        r1 = Range(10, 5, bounds="()")
+        eq_(dataclasses.astuple(r1), (10, 5, "()", False))
+
+        with expect_raises(TypeError):
+            Range(10, 5, "()")  # type: ignore
+
+        with expect_raises(TypeError):
+            Range(None, None, "()", True)  # type: ignore
+
+    def test_range_frozen(self):
+        r1 = Range(None, 5)
+        eq_(dataclasses.astuple(r1), (None, 5, "[)", False))
+
+        with expect_raises(dataclasses.FrozenInstanceError):
+            r1.lower = 8  # type: ignore
+
+    @testing.only_on("postgresql+asyncpg")
+    def test_asyncpg_terminate_catch(self):
+        """test for #11005"""
+
+        with testing.db.connect() as connection:
+            emulated_dbapi_connection = connection.connection.dbapi_connection
+
+            async def boom():
+                raise OSError("boom")
+
+            with mock.patch.object(
+                emulated_dbapi_connection,
+                "_connection",
+                mock.Mock(close=mock.Mock(return_value=boom())),
+            ) as mock_asyncpg_connection:
+                emulated_dbapi_connection.terminate()
+
+            eq_(
+                mock_asyncpg_connection.mock_calls,
+                [mock.call.close(timeout=2), mock.call.terminate()],
+            )
 
     def test_version_parsing(self):
         def mock_conn(res):
@@ -123,7 +255,6 @@ class DialectTest(fixtures.TestBase):
     def test_ensure_version_is_qualified(
         self, future_connection, testing_engine, metadata
     ):
-
         default_schema_name = future_connection.dialect.default_schema_name
         event.listen(
             metadata,
@@ -166,158 +297,42 @@ $$ LANGUAGE plpgsql;"""
             future_connection.dialect.server_version_info,
         )
 
-    @testing.requires.python3
-    @testing.requires.psycopg2_compatibility
-    def test_pg_dialect_no_native_unicode_in_python3(self, testing_engine):
-        with testing.expect_raises_message(
-            exc.ArgumentError,
-            "psycopg2 native_unicode mode is required under Python 3",
-        ):
-            testing_engine(options=dict(use_native_unicode=False))
-
-    @testing.requires.python2
-    @testing.requires.psycopg2_compatibility
-    def test_pg_dialect_no_native_unicode_in_python2(self, testing_engine):
-        e = testing_engine(options=dict(use_native_unicode=False))
-        with e.connect() as conn:
-            eq_(
-                conn.exec_driver_sql(u"SELECT '🐍 voix m’a réveillé'").scalar(),
-                u"🐍 voix m’a réveillé".encode("utf-8"),
-            )
-
-    @testing.requires.python2
-    @testing.requires.psycopg2_compatibility
-    def test_pg_dialect_use_native_unicode_from_config(self):
-        config = {
-            "sqlalchemy.url": testing.db.url,
-            "sqlalchemy.use_native_unicode": "false",
-        }
-
-        e = engine_from_config(config, _initialize=False)
-        eq_(e.dialect.use_native_unicode, False)
-
-        config = {
-            "sqlalchemy.url": testing.db.url,
-            "sqlalchemy.use_native_unicode": "true",
-        }
-
-        e = engine_from_config(config, _initialize=False)
-        eq_(e.dialect.use_native_unicode, True)
-
     def test_psycopg2_empty_connection_string(self):
         dialect = psycopg2_dialect.dialect()
-        u = url.make_url("postgresql://")
+        u = url.make_url("postgresql+psycopg2://")
         cargs, cparams = dialect.create_connect_args(u)
         eq_(cargs, [""])
         eq_(cparams, {})
 
     def test_psycopg2_nonempty_connection_string(self):
         dialect = psycopg2_dialect.dialect()
-        u = url.make_url("postgresql://host")
+        u = url.make_url("postgresql+psycopg2://host")
         cargs, cparams = dialect.create_connect_args(u)
         eq_(cargs, [])
         eq_(cparams, {"host": "host"})
 
     def test_psycopg2_empty_connection_string_w_query_one(self):
         dialect = psycopg2_dialect.dialect()
-        u = url.make_url("postgresql:///?service=swh-log")
+        u = url.make_url("postgresql+psycopg2:///?service=swh-log")
         cargs, cparams = dialect.create_connect_args(u)
         eq_(cargs, [])
         eq_(cparams, {"service": "swh-log"})
 
     def test_psycopg2_empty_connection_string_w_query_two(self):
         dialect = psycopg2_dialect.dialect()
-        u = url.make_url("postgresql:///?any_random_thing=yes")
+        u = url.make_url("postgresql+psycopg2:///?any_random_thing=yes")
         cargs, cparams = dialect.create_connect_args(u)
         eq_(cargs, [])
         eq_(cparams, {"any_random_thing": "yes"})
 
     def test_psycopg2_nonempty_connection_string_w_query(self):
         dialect = psycopg2_dialect.dialect()
-        u = url.make_url("postgresql://somehost/?any_random_thing=yes")
+        u = url.make_url(
+            "postgresql+psycopg2://somehost/?any_random_thing=yes"
+        )
         cargs, cparams = dialect.create_connect_args(u)
         eq_(cargs, [])
         eq_(cparams, {"host": "somehost", "any_random_thing": "yes"})
-
-    @testing.combinations(
-        (
-            "postgresql+psycopg2://USER:PASS@/DB?host=hostA",
-            {
-                "database": "DB",
-                "user": "USER",
-                "password": "PASS",
-                "host": "hostA",
-            },
-        ),
-        (
-            "postgresql+psycopg2://USER:PASS@/DB"
-            "?host=hostA&host=hostB&host=hostC",
-            {
-                "database": "DB",
-                "user": "USER",
-                "password": "PASS",
-                "host": "hostA,hostB,hostC",
-                "port": ",,",
-            },
-        ),
-        (
-            "postgresql+psycopg2://USER:PASS@/DB"
-            "?host=hostA&host=hostB:portB&host=hostC:portC",
-            {
-                "database": "DB",
-                "user": "USER",
-                "password": "PASS",
-                "host": "hostA,hostB,hostC",
-                "port": ",portB,portC",
-            },
-        ),
-        (
-            "postgresql+psycopg2://USER:PASS@/DB?"
-            "host=hostA:portA&host=hostB:portB&host=hostC:portC",
-            {
-                "database": "DB",
-                "user": "USER",
-                "password": "PASS",
-                "host": "hostA,hostB,hostC",
-                "port": "portA,portB,portC",
-            },
-        ),
-        (
-            "postgresql+psycopg2:///"
-            "?host=hostA:portA&host=hostB:portB&host=hostC:portC",
-            {"host": "hostA,hostB,hostC", "port": "portA,portB,portC"},
-        ),
-        (
-            "postgresql+psycopg2:///"
-            "?host=hostA:portA&host=hostB:portB&host=hostC:portC",
-            {"host": "hostA,hostB,hostC", "port": "portA,portB,portC"},
-        ),
-        (
-            "postgresql+psycopg2:///"
-            "?host=hostA,hostB,hostC&port=portA,portB,portC",
-            {"host": "hostA,hostB,hostC", "port": "portA,portB,portC"},
-        ),
-        argnames="url_string,expected",
-    )
-    def test_psycopg_multi_hosts(self, url_string, expected):
-        dialect = psycopg2_dialect.dialect()
-        u = url.make_url(url_string)
-        cargs, cparams = dialect.create_connect_args(u)
-        eq_(cargs, [])
-        eq_(cparams, expected)
-
-    @testing.combinations(
-        "postgresql+psycopg2:///?host=H&host=H&port=5432,5432",
-        "postgresql+psycopg2://user:pass@/dbname?host=H&host=H&port=5432,5432",
-        argnames="url_string",
-    )
-    def test_psycopg_no_mix_hosts(self, url_string):
-        dialect = psycopg2_dialect.dialect()
-        with expect_raises_message(
-            exc.ArgumentError, "Can't mix 'multihost' formats together"
-        ):
-            u = url.make_url(url_string)
-            dialect.create_connect_args(u)
 
     def test_psycopg2_disconnect(self):
         class Error(Exception):
@@ -336,7 +351,7 @@ $$ LANGUAGE plpgsql;"""
             "connection not open",
             "could not receive data from server",
             "could not send data to server",
-            # psycopg2 client errors, psycopg2/conenction.h,
+            # psycopg2 client errors, psycopg2/connection.h,
             # psycopg2/cursor.h
             "connection already closed",
             "cursor already closed",
@@ -350,25 +365,452 @@ $$ LANGUAGE plpgsql;"""
             "SSL SYSCALL error: EOF detected",
             "SSL SYSCALL error: Operation timed out",
             "SSL SYSCALL error: Bad address",
+            "SSL SYSCALL error: Success",
         ]:
             eq_(dialect.is_disconnect(Error(error), None, None), True)
 
         eq_(dialect.is_disconnect("not an error", None, None), False)
 
 
+class MultiHostConnectTest(fixtures.TestBase):
+    def working_combinations():
+        psycopg_combinations = [
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=hostA",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA",
+                },
+            ),
+            (
+                # issue #10069 -if there is just one host as x:y with no
+                # integers, treat it as a hostname, to accommodate as many
+                # third party scenarios as possible
+                "postgresql+psycopg2://USER:PASS@/DB?host=hostA:xyz",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA:xyz",
+                },
+            ),
+            (
+                # also issue #10069 - this parsing is not "defined" right now
+                # but err on the side of single host
+                "postgresql+psycopg2://USER:PASS@/DB?host=hostA:123.456",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA:123.456",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=192.168.1.50",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "192.168.1.50",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=192.168.1.50:",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "192.168.1.50",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=192.168.1.50:5678",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "192.168.1.50",
+                    "port": "5678",
+                    "asyncpg_port": 5678,
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=hostA:",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=HOSTNAME",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "HOSTNAME",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=HOSTNAME:1234",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "HOSTNAME",
+                    "port": "1234",
+                    "asyncpg_port": 1234,
+                },
+            ),
+            (
+                # issue #10069
+                "postgresql+psycopg2://USER:PASS@/DB?"
+                "host=/cloudsql/my-gcp-project:us-central1:mydbisnstance",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "/cloudsql/my-gcp-project:"
+                    "us-central1:mydbisnstance",
+                },
+            ),
+            (
+                # issue #10069
+                "postgresql+psycopg2://USER:PASS@/DB?"
+                "host=/cloudsql/my-gcp-project:4567",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    # full host,because the "hostname" contains slashes.
+                    # this corresponds to PG's "host" mechanics
+                    # at https://www.postgresql.org/docs/current
+                    # /libpq-connect.html#LIBPQ-PARAMKEYWORDS
+                    # "If a host name looks like an absolute path name, it
+                    # specifies Unix-domain communication "
+                    "host": "/cloudsql/my-gcp-project:4567",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?host=hostA:1234",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA",
+                    "port": "1234",
+                    "asyncpg_port": 1234,
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB"
+                "?host=hostA&host=hostB&host=hostC",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA,hostB,hostC",
+                    "port": ",,",
+                    "asyncpg_error": "All ports are required to be present"
+                    " for asyncpg multiple host URL",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB"
+                "?host=hostA&host=hostB:222&host=hostC:333",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA,hostB,hostC",
+                    "port": ",222,333",
+                    "asyncpg_error": "All ports are required to be present"
+                    " for asyncpg multiple host URL",
+                },
+            ),
+            (
+                "postgresql+psycopg2://USER:PASS@/DB?"
+                "host=hostA:111&host=hostB:222&host=hostC:333",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "host": "hostA,hostB,hostC",
+                    "port": "111,222,333",
+                    "asyncpg_host": ["hostA", "hostB", "hostC"],
+                    "asyncpg_port": [111, 222, 333],
+                },
+            ),
+            (
+                "postgresql+psycopg2:///"
+                "?host=hostA:111&host=hostB:222&host=hostC:333",
+                {
+                    "host": "hostA,hostB,hostC",
+                    "port": "111,222,333",
+                    "asyncpg_host": ["hostA", "hostB", "hostC"],
+                    "asyncpg_port": [111, 222, 333],
+                },
+            ),
+            (
+                "postgresql+psycopg2:///"
+                "?host=hostA:111&host=hostB:222&host=hostC:333",
+                {
+                    "host": "hostA,hostB,hostC",
+                    "port": "111,222,333",
+                    "asyncpg_host": ["hostA", "hostB", "hostC"],
+                    "asyncpg_port": [111, 222, 333],
+                },
+            ),
+            (
+                "postgresql+psycopg2:///"
+                "?host=hostA,hostB,hostC&port=111,222,333",
+                {
+                    "host": "hostA,hostB,hostC",
+                    "port": "111,222,333",
+                    "asyncpg_host": ["hostA", "hostB", "hostC"],
+                    "asyncpg_port": [111, 222, 333],
+                },
+            ),
+            (
+                "postgresql+asyncpg://USER:PASS@/DB"
+                "?host=hostA,hostB,&port=111,222,333",
+                {
+                    "host": "hostA,hostB,",
+                    "port": "111,222,333",
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "asyncpg_error": "All hosts are required to be present"
+                    " for asyncpg multiple host URL",
+                },
+            ),
+            (
+                # fixed host + multihost formats.
+                "postgresql+psycopg2://USER:PASS@hostfixed/DB?port=111",
+                {
+                    "host": "hostfixed",
+                    "port": "111",
+                    "asyncpg_port": 111,
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                },
+            ),
+            (
+                # fixed host + multihost formats.  **silently ignore**
+                # the fixed host.  See #10076
+                "postgresql+psycopg2://USER:PASS@hostfixed/DB?host=hostA:111",
+                {
+                    "host": "hostA",
+                    "port": "111",
+                    "asyncpg_port": 111,
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                },
+            ),
+            (
+                # fixed host + multihost formats.  **silently ignore**
+                # the fixed host.  See #10076
+                "postgresql+psycopg2://USER:PASS@hostfixed/DB"
+                "?host=hostA&port=111",
+                {
+                    "host": "hostA",
+                    "port": "111",
+                    "asyncpg_port": 111,
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                },
+            ),
+            (
+                # fixed host + multihost formats.  **silently ignore**
+                # the fixed host.  See #10076
+                "postgresql+psycopg2://USER:PASS@hostfixed/DB?host=hostA",
+                {
+                    "host": "hostA",
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                },
+            ),
+            (
+                # fixed host + multihost formats.  if there is only one port
+                # or only one host after the query string, assume that's the
+                # host/port
+                "postgresql+psycopg2://USER:PASS@/DB?port=111",
+                {
+                    "dbname": "DB",
+                    "user": "USER",
+                    "password": "PASS",
+                    "port": "111",
+                    "asyncpg_port": 111,
+                },
+            ),
+        ]
+        for url_string, expected_psycopg in psycopg_combinations:
+            asyncpg_error = expected_psycopg.pop("asyncpg_error", False)
+            asyncpg_host = expected_psycopg.pop("asyncpg_host", False)
+            asyncpg_port = expected_psycopg.pop("asyncpg_port", False)
+
+            expected_asyncpg = dict(expected_psycopg)
+
+            if "dbname" in expected_asyncpg:
+                expected_asyncpg["database"] = expected_asyncpg.pop("dbname")
+
+            if asyncpg_error:
+                expected_asyncpg["error"] = asyncpg_error
+            if asyncpg_host is not False:
+                expected_asyncpg["host"] = asyncpg_host
+
+            if asyncpg_port is not False:
+                expected_asyncpg["port"] = asyncpg_port
+
+            yield url_string, expected_psycopg, expected_asyncpg
+
+    @testing.combinations_list(
+        working_combinations(),
+        argnames="url_string,expected_psycopg,expected_asyncpg",
+    )
+    @testing.combinations(
+        psycopg2_dialect.dialect(),
+        psycopg_dialect.dialect(),
+        asyncpg_dialect.dialect(),
+        argnames="dialect",
+    )
+    def test_multi_hosts(
+        self, dialect, url_string, expected_psycopg, expected_asyncpg
+    ):
+        url_string = url_string.replace("psycopg2", dialect.driver)
+
+        u = url.make_url(url_string)
+
+        if dialect.driver == "asyncpg":
+            if "error" in expected_asyncpg:
+                with expect_raises_message(
+                    exc.ArgumentError, expected_asyncpg["error"]
+                ):
+                    dialect.create_connect_args(u)
+                return
+
+            expected = expected_asyncpg
+        else:
+            expected = expected_psycopg
+
+        cargs, cparams = dialect.create_connect_args(u)
+        eq_(cparams, expected)
+        eq_(cargs, [])
+
+    @testing.combinations(
+        (
+            "postgresql+psycopg2://USER:PASS@/DB"
+            "?host=hostA:111&host=hostB:vvv&host=hostC:333",
+        ),
+        (
+            "postgresql+psycopg2://USER:PASS@/DB"
+            "?host=hostA,hostB:,hostC&port=111,vvv,333",
+        ),
+        (
+            "postgresql+psycopg2://USER:PASS@/DB"
+            "?host=hostA:xyz&host=hostB:123",
+        ),
+        ("postgresql+psycopg2://USER:PASS@/DB?host=hostA&port=xyz",),
+        # for single host with :xyz, as of #10069 this is treated as a
+        # hostname by itself, w/ colon plus digits
+        argnames="url_string",
+    )
+    @testing.combinations(
+        psycopg2_dialect.dialect(),
+        psycopg_dialect.dialect(),
+        asyncpg_dialect.dialect(),
+        argnames="dialect",
+    )
+    def test_non_int_port_disallowed(self, dialect, url_string):
+        url_string = url_string.replace("psycopg2", dialect.driver)
+
+        u = url.make_url(url_string)
+
+        with expect_raises_message(
+            exc.ArgumentError,
+            r"Received non-integer port arguments: \((?:'.*?',?)+\)",
+        ):
+            dialect.create_connect_args(u)
+
+    @testing.combinations(
+        (
+            "postgresql+psycopg2://USER:PASS@/DB"
+            "?host=hostA,hostC&port=111,222,333",
+        ),
+        ("postgresql+psycopg2://USER:PASS@/DB?host=hostA&port=111,222",),
+        (
+            "postgresql+asyncpg://USER:PASS@/DB"
+            "?host=hostA,hostB,hostC&port=111,333",
+        ),
+        argnames="url_string",
+    )
+    @testing.combinations(
+        psycopg2_dialect.dialect(),
+        psycopg_dialect.dialect(),
+        asyncpg_dialect.dialect(),
+        argnames="dialect",
+    )
+    def test_num_host_port_doesnt_match(self, dialect, url_string):
+        url_string = url_string.replace("psycopg2", dialect.driver)
+
+        u = url.make_url(url_string)
+
+        with expect_raises_message(
+            exc.ArgumentError, "number of hosts and ports don't match"
+        ):
+            dialect.create_connect_args(u)
+
+    @testing.combinations(
+        "postgresql+psycopg2:///?host=H&host=H&port=5432,5432",
+        "postgresql+psycopg2://user:pass@/dbname?host=H&host=H&port=5432,5432",
+        argnames="url_string",
+    )
+    @testing.combinations(
+        psycopg2_dialect.dialect(),
+        psycopg_dialect.dialect(),
+        asyncpg_dialect.dialect(),
+        argnames="dialect",
+    )
+    def test_dont_mix_multihost_formats(self, dialect, url_string):
+        url_string = url_string.replace("psycopg2", dialect.name)
+
+        u = url.make_url(url_string)
+
+        with expect_raises_message(
+            exc.ArgumentError, "Can't mix 'multihost' formats together"
+        ):
+            dialect.create_connect_args(u)
+
+
 class BackendDialectTest(fixtures.TestBase):
     __backend__ = True
 
-    @testing.only_on(["+psycopg", "+psycopg2"])
+    @testing.only_on(["+psycopg", "+psycopg2", "+asyncpg"])
     @testing.combinations(
-        "host=H:P&host=H:P&host=H:P",
-        "host=H:P&host=H&host=H",
-        "host=H:P&host=H&host=H:P",
-        "host=H&host=H:P&host=H",
-        "host=H,H,H&port=P,P,P",
+        ("postgresql+D://U:PS@/DB?host=H:P&host=H:P&host=H:P", True),
+        ("postgresql+D://U:PS@/DB?host=H:P&host=H&host=H", False),
+        ("postgresql+D://U:PS@/DB?host=H:P&host=H&host=H:P", False),
+        ("postgresql+D://U:PS@/DB?host=H&host=H:P&host=H", False),
+        ("postgresql+D://U:PS@/DB?host=H,H,H&port=P,P,P", True),
+        ("postgresql+D://U:PS@H:P/DB", True),
+        argnames="pattern,has_all_ports",
     )
-    def test_connect_psycopg_multiple_hosts(self, pattern):
-        """test the fix for #4392"""
+    def test_multiple_host_real_connect(
+        self, testing_engine, pattern, has_all_ports
+    ):
+        """test the fix for #4392.
+
+        Additionally add multiple host tests for #10004's additional
+        use cases
+
+        """
 
         tdb_url = testing.db.url
 
@@ -377,16 +819,25 @@ class BackendDialectTest(fixtures.TestBase):
             host = "localhost"
         port = str(tdb_url.port) if tdb_url.port else "5432"
 
-        query_str = pattern.replace("H", host).replace("P", port)
-        url_string = "%s://%s:" "%s@/%s?%s" % (
-            tdb_url.drivername,
-            tdb_url.username,
-            tdb_url.password,
-            tdb_url.database,
-            query_str,
+        url_string = (
+            pattern.replace("DB", tdb_url.database)
+            .replace("postgresql+D", tdb_url.drivername)
+            .replace("U", tdb_url.username)
+            .replace("PS", tdb_url.password)
+            .replace("H", host)
+            .replace("P", port)
         )
 
-        e = create_engine(url_string)
+        if testing.against("+asyncpg") and not has_all_ports:
+            with expect_raises_message(
+                exc.ArgumentError,
+                "All ports are required to be present "
+                "for asyncpg multiple host URL",
+            ):
+                testing_engine(url_string)
+            return
+
+        e = testing_engine(url_string)
         with e.connect() as conn:
             eq_(conn.exec_driver_sql("select 1").scalar(), 1)
 
@@ -408,14 +859,16 @@ class PGCodeTest(fixtures.TestBase):
         if testing.against("postgresql+pg8000"):
             # TODO: is there another way we're supposed to see this?
             eq_(errmsg.orig.args[0]["C"], "23505")
-        else:
+        elif not testing.against("postgresql+psycopg"):
             eq_(errmsg.orig.pgcode, "23505")
 
-        if testing.against("postgresql+asyncpg"):
+        if testing.against("postgresql+asyncpg") or testing.against(
+            "postgresql+psycopg"
+        ):
             eq_(errmsg.orig.sqlstate, "23505")
 
 
-class ExecuteManyMode(object):
+class ExecuteManyMode:
     __only_on__ = "postgresql+psycopg2"
     __backend__ = True
 
@@ -450,196 +903,23 @@ class ExecuteManyMode(object):
         )
 
         Table(
-            u("Unitéble2"),
+            "Unitéble2",
             metadata,
-            Column(u("méil"), Integer, primary_key=True),
-            Column(ue("\u6e2c\u8a66"), Integer),
-        )
-
-    @testing.combinations(
-        "insert", "pg_insert", "pg_insert_on_conflict", argnames="insert_type"
-    )
-    def test_insert(self, connection, insert_type):
-        from psycopg2 import extras
-
-        values_page_size = connection.dialect.executemany_values_page_size
-        batch_page_size = connection.dialect.executemany_batch_page_size
-        if connection.dialect.executemany_mode & EXECUTEMANY_VALUES:
-            meth = extras.execute_values
-            stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {
-                "template": "(%(x)s, %(y)s)",
-                "page_size": values_page_size,
-                "fetch": False,
-            }
-        elif connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
-            meth = extras.execute_batch
-            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
-            expected_kwargs = {"page_size": batch_page_size}
-        else:
-            assert False
-
-        if insert_type == "pg_insert_on_conflict":
-            stmt += " ON CONFLICT DO NOTHING"
-
-        with mock.patch.object(
-            extras, meth.__name__, side_effect=meth
-        ) as mock_exec:
-            if insert_type == "insert":
-                ins_stmt = self.tables.data.insert()
-            elif insert_type == "pg_insert":
-                ins_stmt = pg_insert(self.tables.data)
-            elif insert_type == "pg_insert_on_conflict":
-                ins_stmt = pg_insert(self.tables.data).on_conflict_do_nothing()
-            else:
-                assert False
-
-            connection.execute(
-                ins_stmt,
-                [
-                    {"x": "x1", "y": "y1"},
-                    {"x": "x2", "y": "y2"},
-                    {"x": "x3", "y": "y3"},
-                ],
-            )
-
-            eq_(
-                connection.execute(select(self.tables.data)).fetchall(),
-                [
-                    (1, "x1", "y1", 5),
-                    (2, "x2", "y2", 5),
-                    (3, "x3", "y3", 5),
-                ],
-            )
-        eq_(
-            mock_exec.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    stmt,
-                    (
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ),
-                    **expected_kwargs
-                )
-            ],
-        )
-
-    def test_insert_no_page_size(self, connection):
-        from psycopg2 import extras
-
-        values_page_size = connection.dialect.executemany_values_page_size
-        batch_page_size = connection.dialect.executemany_batch_page_size
-
-        if connection.dialect.executemany_mode & EXECUTEMANY_VALUES:
-            meth = extras.execute_values
-            stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {
-                "template": "(%(x)s, %(y)s)",
-                "page_size": values_page_size,
-                "fetch": False,
-            }
-        elif connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
-            meth = extras.execute_batch
-            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
-            expected_kwargs = {"page_size": batch_page_size}
-        else:
-            assert False
-
-        with mock.patch.object(
-            extras, meth.__name__, side_effect=meth
-        ) as mock_exec:
-            connection.execute(
-                self.tables.data.insert(),
-                [
-                    {"x": "x1", "y": "y1"},
-                    {"x": "x2", "y": "y2"},
-                    {"x": "x3", "y": "y3"},
-                ],
-            )
-
-        eq_(
-            mock_exec.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    stmt,
-                    (
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ),
-                    **expected_kwargs
-                )
-            ],
-        )
-
-    def test_insert_page_size(self):
-        from psycopg2 import extras
-
-        opts = self.options.copy()
-        opts["executemany_batch_page_size"] = 500
-        opts["executemany_values_page_size"] = 1000
-
-        eng = engines.testing_engine(options=opts)
-
-        if eng.dialect.executemany_mode & EXECUTEMANY_VALUES:
-            meth = extras.execute_values
-            stmt = "INSERT INTO data (x, y) VALUES %s"
-            expected_kwargs = {
-                "fetch": False,
-                "page_size": 1000,
-                "template": "(%(x)s, %(y)s)",
-            }
-        elif eng.dialect.executemany_mode & EXECUTEMANY_BATCH:
-            meth = extras.execute_batch
-            stmt = "INSERT INTO data (x, y) VALUES (%(x)s, %(y)s)"
-            expected_kwargs = {"page_size": 500}
-        else:
-            assert False
-
-        with mock.patch.object(
-            extras, meth.__name__, side_effect=meth
-        ) as mock_exec:
-            with eng.begin() as conn:
-                conn.execute(
-                    self.tables.data.insert(),
-                    [
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ],
-                )
-
-        eq_(
-            mock_exec.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    stmt,
-                    (
-                        {"x": "x1", "y": "y1"},
-                        {"x": "x2", "y": "y2"},
-                        {"x": "x3", "y": "y3"},
-                    ),
-                    **expected_kwargs
-                )
-            ],
+            Column("méil", Integer, primary_key=True),
+            Column("\u6e2c\u8a66", Integer),
         )
 
     def test_insert_unicode_keys(self, connection):
-        table = self.tables[u("Unitéble2")]
+        table = self.tables["Unitéble2"]
 
         stmt = table.insert()
 
         connection.execute(
             stmt,
             [
-                {u("méil"): 1, ue("\u6e2c\u8a66"): 1},
-                {u("méil"): 2, ue("\u6e2c\u8a66"): 2},
-                {u("méil"): 3, ue("\u6e2c\u8a66"): 3},
+                {"méil": 1, "\u6e2c\u8a66": 1},
+                {"méil": 2, "\u6e2c\u8a66": 2},
+                {"méil": 3, "\u6e2c\u8a66": 3},
             ],
         )
 
@@ -666,18 +946,21 @@ class ExecuteManyMode(object):
                 ],
             )
 
-        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+        if (
+            connection.dialect.executemany_mode
+            is EXECUTEMANY_VALUES_PLUS_BATCH
+        ):
             eq_(
                 mock_exec.mock_calls,
                 [
                     mock.call(
                         mock.ANY,
                         stmt,
-                        (
+                        [
                             {"xval": "x1", "yval": "y5"},
                             {"xval": "x3", "yval": "y6"},
-                        ),
-                        **expected_kwargs
+                        ],
+                        **expected_kwargs,
                     )
                 ],
             )
@@ -685,7 +968,10 @@ class ExecuteManyMode(object):
             eq_(mock_exec.mock_calls, [])
 
     def test_not_sane_rowcount(self, connection):
-        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
+        if (
+            connection.dialect.executemany_mode
+            is EXECUTEMANY_VALUES_PLUS_BATCH
+        ):
             assert not connection.dialect.supports_sane_multi_rowcount
         else:
             assert connection.dialect.supports_sane_multi_rowcount
@@ -714,247 +1000,14 @@ class ExecuteManyMode(object):
         )
 
 
-class ExecutemanyBatchModeTest(ExecuteManyMode, fixtures.TablesTest):
-    options = {"executemany_mode": "batch"}
-
-
-class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
-    options = {"executemany_mode": "values_only"}
-
-    def test_insert_returning_values(self, connection):
-        """the psycopg2 dialect needs to assemble a fully buffered result
-        with the return value of execute_values().
-
-        """
-        t = self.tables.data
-
-        conn = connection
-        page_size = conn.dialect.executemany_values_page_size or 100
-        data = [
-            {"x": "x%d" % i, "y": "y%d" % i}
-            for i in range(1, page_size * 5 + 27)
-        ]
-        result = conn.execute(t.insert().returning(t.c.x, t.c.y), data)
-
-        eq_([tup[0] for tup in result.cursor.description], ["x", "y"])
-        eq_(result.keys(), ["x", "y"])
-        assert t.c.x in result.keys()
-        assert t.c.id not in result.keys()
-        assert not result._soft_closed
-        assert isinstance(
-            result.cursor_strategy,
-            _cursor.FullyBufferedCursorFetchStrategy,
-        )
-        assert not result.cursor.closed
-        assert not result.closed
-        eq_(result.mappings().all(), data)
-
-        assert result._soft_closed
-        # assert result.closed
-        assert result.cursor is None
-
-    def test_insert_returning_preexecute_pk(self, metadata, connection):
-        counter = itertools.count(1)
-
-        t = Table(
-            "t",
-            self.metadata,
-            Column(
-                "id",
-                Integer,
-                primary_key=True,
-                default=lambda: util.next(counter),
-            ),
-            Column("data", Integer),
-        )
-        metadata.create_all(connection)
-
-        result = connection.execute(
-            t.insert().return_defaults(),
-            [{"data": 1}, {"data": 2}, {"data": 3}],
-        )
-
-        eq_(result.inserted_primary_key_rows, [(1,), (2,), (3,)])
-
-    def test_insert_returning_defaults(self, connection):
-        t = self.tables.data
-
-        conn = connection
-
-        result = conn.execute(t.insert(), {"x": "x0", "y": "y0"})
-        first_pk = result.inserted_primary_key[0]
-
-        page_size = conn.dialect.executemany_values_page_size or 100
-        total_rows = page_size * 5 + 27
-        data = [{"x": "x%d" % i, "y": "y%d" % i} for i in range(1, total_rows)]
-        result = conn.execute(t.insert().returning(t.c.id, t.c.z), data)
-
-        eq_(
-            result.all(),
-            [(pk, 5) for pk in range(1 + first_pk, total_rows + first_pk)],
-        )
-
-    def test_insert_return_pks_default_values(self, connection):
-        """test sending multiple, empty rows into an INSERT and getting primary
-        key values back.
-
-        This has to use a format that indicates at least one DEFAULT in
-        multiple parameter sets, i.e. "INSERT INTO table (anycol) VALUES
-        (DEFAULT) (DEFAULT) (DEFAULT) ... RETURNING col"
-
-        """
-        t = self.tables.data
-
-        conn = connection
-
-        result = conn.execute(t.insert(), {"x": "x0", "y": "y0"})
-        first_pk = result.inserted_primary_key[0]
-
-        page_size = conn.dialect.executemany_values_page_size or 100
-        total_rows = page_size * 5 + 27
-        data = [{} for i in range(1, total_rows)]
-        result = conn.execute(t.insert().returning(t.c.id), data)
-
-        eq_(
-            result.all(),
-            [(pk,) for pk in range(1 + first_pk, total_rows + first_pk)],
-        )
-
-    def test_insert_w_newlines(self, connection):
-        from psycopg2 import extras
-
-        t = self.tables.data
-
-        ins = (
-            t.insert()
-            .inline()
-            .values(
-                id=bindparam("id"),
-                x=select(literal_column("5"))
-                .select_from(self.tables.data)
-                .scalar_subquery(),
-                y=bindparam("y"),
-                z=bindparam("z"),
-            )
-        )
-        # compiled SQL has a newline in it
-        eq_(
-            str(ins.compile(testing.db)),
-            "INSERT INTO data (id, x, y, z) VALUES (%(id)s, "
-            "(SELECT 5 \nFROM data), %(y)s, %(z)s)",
-        )
-        meth = extras.execute_values
-        with mock.patch.object(
-            extras, "execute_values", side_effect=meth
-        ) as mock_exec:
-
-            connection.execute(
-                ins,
-                [
-                    {"id": 1, "y": "y1", "z": 1},
-                    {"id": 2, "y": "y2", "z": 2},
-                    {"id": 3, "y": "y3", "z": 3},
-                ],
-            )
-
-        eq_(
-            mock_exec.mock_calls,
-            [
-                mock.call(
-                    mock.ANY,
-                    "INSERT INTO data (id, x, y, z) VALUES %s",
-                    (
-                        {"id": 1, "y": "y1", "z": 1},
-                        {"id": 2, "y": "y2", "z": 2},
-                        {"id": 3, "y": "y3", "z": 3},
-                    ),
-                    template="(%(id)s, (SELECT 5 \nFROM data), %(y)s, %(z)s)",
-                    fetch=False,
-                    page_size=connection.dialect.executemany_values_page_size,
-                )
-            ],
-        )
-
-    def test_insert_modified_by_event(self, connection):
-        from psycopg2 import extras
-
-        t = self.tables.data
-
-        ins = (
-            t.insert()
-            .inline()
-            .values(
-                id=bindparam("id"),
-                x=select(literal_column("5"))
-                .select_from(self.tables.data)
-                .scalar_subquery(),
-                y=bindparam("y"),
-                z=bindparam("z"),
-            )
-        )
-        # compiled SQL has a newline in it
-        eq_(
-            str(ins.compile(testing.db)),
-            "INSERT INTO data (id, x, y, z) VALUES (%(id)s, "
-            "(SELECT 5 \nFROM data), %(y)s, %(z)s)",
-        )
-        meth = extras.execute_batch
-        with mock.patch.object(
-            extras, "execute_values"
-        ) as mock_values, mock.patch.object(
-            extras, "execute_batch", side_effect=meth
-        ) as mock_batch:
-
-            # create an event hook that will change the statement to
-            # something else, meaning the dialect has to detect that
-            # insert_single_values_expr is no longer useful
-            @event.listens_for(
-                connection, "before_cursor_execute", retval=True
-            )
-            def before_cursor_execute(
-                conn, cursor, statement, parameters, context, executemany
-            ):
-                statement = (
-                    "INSERT INTO data (id, y, z) VALUES "
-                    "(%(id)s, %(y)s, %(z)s)"
-                )
-                return statement, parameters
-
-            connection.execute(
-                ins,
-                [
-                    {"id": 1, "y": "y1", "z": 1},
-                    {"id": 2, "y": "y2", "z": 2},
-                    {"id": 3, "y": "y3", "z": 3},
-                ],
-            )
-
-        eq_(mock_values.mock_calls, [])
-
-        if connection.dialect.executemany_mode & EXECUTEMANY_BATCH:
-            eq_(
-                mock_batch.mock_calls,
-                [
-                    mock.call(
-                        mock.ANY,
-                        "INSERT INTO data (id, y, z) VALUES "
-                        "(%(id)s, %(y)s, %(z)s)",
-                        (
-                            {"id": 1, "y": "y1", "z": 1},
-                            {"id": 2, "y": "y2", "z": 2},
-                            {"id": 3, "y": "y3", "z": 3},
-                        ),
-                    )
-                ],
-            )
-        else:
-            eq_(mock_batch.mock_calls, [])
-
-
 class ExecutemanyValuesPlusBatchInsertsTest(
     ExecuteManyMode, fixtures.TablesTest
 ):
     options = {"executemany_mode": "values_plus_batch"}
+
+
+class ExecutemanyValuesInsertsTest(ExecuteManyMode, fixtures.TablesTest):
+    options = {"executemany_mode": "values_only"}
 
 
 class ExecutemanyFlagOptionsTest(fixtures.TablesTest):
@@ -963,8 +1016,6 @@ class ExecutemanyFlagOptionsTest(fixtures.TablesTest):
 
     def test_executemany_correct_flag_options(self):
         for opt, expected in [
-            (None, EXECUTEMANY_PLAIN),
-            ("batch", EXECUTEMANY_BATCH),
             ("values_only", EXECUTEMANY_VALUES),
             ("values_plus_batch", EXECUTEMANY_VALUES_PLUS_BATCH),
         ]:
@@ -986,9 +1037,14 @@ class ExecutemanyFlagOptionsTest(fixtures.TablesTest):
 class MiscBackendTest(
     fixtures.TestBase, AssertsExecutionResults, AssertsCompiledSQL
 ):
-
     __only_on__ = "postgresql"
     __backend__ = True
+
+    @testing.fails_on(["+psycopg2"])
+    def test_empty_sql_string(self, connection):
+
+        result = connection.exec_driver_sql("")
+        assert result._soft_closed
 
     @testing.provide_metadata
     def test_date_reflection(self):
@@ -1012,19 +1068,19 @@ class MiscBackendTest(
             ".".join(str(x) for x in v)
         )
 
-    @testing.combinations(
-        ((8, 1), False, False),
-        ((8, 1), None, False),
-        ((11, 5), True, False),
-        ((11, 5), False, True),
-    )
-    def test_backslash_escapes_detection(
-        self, version, explicit_setting, expected
-    ):
-        engine = engines.testing_engine()
+    @testing.only_on("postgresql+psycopg")
+    def test_psycopg_version(self):
+        v = testing.db.dialect.psycopg_version
+        assert testing.db.dialect.dbapi.__version__.startswith(
+            ".".join(str(x) for x in v)
+        )
 
-        def _server_version(conn):
-            return version
+    @testing.combinations(
+        (True, False),
+        (False, True),
+    )
+    def test_backslash_escapes_detection(self, explicit_setting, expected):
+        engine = engines.testing_engine()
 
         if explicit_setting is not None:
 
@@ -1038,11 +1094,8 @@ class MiscBackendTest(
                 )
                 dbapi_connection.commit()
 
-        with mock.patch.object(
-            engine.dialect, "_get_server_version_info", _server_version
-        ):
-            with engine.connect():
-                eq_(engine.dialect._backslash_escapes, expected)
+        with engine.connect():
+            eq_(engine.dialect._backslash_escapes, expected)
 
     def test_dbapi_autocommit_attribute(self):
         """all the supported DBAPIs have an .autocommit attribute.  make
@@ -1061,7 +1114,6 @@ class MiscBackendTest(
             is_false(dbapi_conn.autocommit)
 
             with conn.begin():
-
                 existing_isolation = conn.exec_driver_sql(
                     "show transaction isolation level"
                 ).scalar()
@@ -1083,7 +1135,6 @@ class MiscBackendTest(
             dbapi_conn.autocommit = False
 
             with conn.begin():
-
                 existing_isolation = conn.exec_driver_sql(
                     "show transaction isolation level"
                 ).scalar()
@@ -1197,9 +1248,9 @@ class MiscBackendTest(
     def test_autocommit_pre_ping(self, testing_engine, autocommit):
         engine = testing_engine(
             options={
-                "isolation_level": "AUTOCOMMIT"
-                if autocommit
-                else "SERIALIZABLE",
+                "isolation_level": (
+                    "AUTOCOMMIT" if autocommit else "SERIALIZABLE"
+                ),
                 "pool_pre_ping": True,
             }
         )
@@ -1209,6 +1260,50 @@ class MiscBackendTest(
 
                 dbapi_conn = conn.connection.dbapi_connection
                 eq_(dbapi_conn.autocommit, autocommit)
+
+    @testing.only_on("+asyncpg")
+    @testing.combinations((True,), (False,), argnames="autocommit")
+    def test_asyncpg_transactional_ping(self, testing_engine, autocommit):
+        """test #10226"""
+
+        engine = testing_engine(
+            options={
+                "isolation_level": (
+                    "AUTOCOMMIT" if autocommit else "SERIALIZABLE"
+                ),
+                "pool_pre_ping": True,
+            }
+        )
+        conn = engine.connect()
+        dbapi_conn = conn.connection.dbapi_connection
+        conn.close()
+
+        future = asyncio.Future()
+        future.set_result(None)
+
+        rollback = mock.Mock(return_value=future)
+        transaction = mock.Mock(
+            return_value=mock.Mock(
+                start=mock.Mock(return_value=future),
+                rollback=rollback,
+            )
+        )
+        mock_asyncpg_connection = mock.Mock(
+            fetchrow=mock.Mock(return_value=future), transaction=transaction
+        )
+
+        with mock.patch.object(
+            dbapi_conn, "_connection", mock_asyncpg_connection
+        ):
+            conn = engine.connect()
+            conn.close()
+
+        if autocommit:
+            eq_(transaction.mock_calls, [])
+            eq_(rollback.mock_calls, [])
+        else:
+            eq_(transaction.mock_calls, [mock.call()])
+            eq_(rollback.mock_calls, [mock.call()])
 
     def test_deferrable_flag_engine(self):
         engine = engines.testing_engine(
@@ -1240,25 +1335,30 @@ class MiscBackendTest(
                 dbapi_conn.rollback()
             eq_(val, "off")
 
-    @testing.requires.psycopg2_compatibility
-    def test_psycopg2_non_standard_err(self):
+    @testing.requires.any_psycopg_compatibility
+    def test_psycopg_non_standard_err(self):
         # note that psycopg2 is sometimes called psycopg2cffi
         # depending on platform
-        psycopg2 = testing.db.dialect.dbapi
-        TransactionRollbackError = __import__(
-            "%s.extensions" % psycopg2.__name__
-        ).extensions.TransactionRollbackError
+        psycopg = testing.db.dialect.dbapi
+        if psycopg.__version__.startswith("3"):
+            TransactionRollbackError = __import__(
+                "%s.errors" % psycopg.__name__
+            ).errors.TransactionRollback
+        else:
+            TransactionRollbackError = __import__(
+                "%s.extensions" % psycopg.__name__
+            ).extensions.TransactionRollbackError
 
         exception = exc.DBAPIError.instance(
             "some statement",
             {},
             TransactionRollbackError("foo"),
-            psycopg2.Error,
+            psycopg.Error,
         )
         assert isinstance(exception, exc.OperationalError)
 
     @testing.requires.no_coverage
-    @testing.requires.psycopg2_compatibility
+    @testing.requires.any_psycopg_compatibility
     def test_notice_logging(self):
         log = logging.getLogger("sqlalchemy.dialects.postgresql")
         buf = logging.handlers.BufferingHandler(100)
@@ -1283,17 +1383,18 @@ $$ LANGUAGE plpgsql;
                 conn.exec_driver_sql("SELECT note('another note')")
             finally:
                 trans.rollback()
+                conn.close()
         finally:
             log.removeHandler(buf)
             log.setLevel(lev)
-        msgs = " ".join(b.msg for b in buf.buffer)
+        msgs = " ".join(b.getMessage() for b in buf.buffer)
         eq_regex(
             msgs,
-            "NOTICE:  notice: hi there(\nCONTEXT: .*?)? "
-            "NOTICE:  notice: another note(\nCONTEXT: .*?)?",
+            "NOTICE: [ ]?notice: hi there(\nCONTEXT: .*?)? "
+            "NOTICE: [ ]?notice: another note(\nCONTEXT: .*?)?",
         )
 
-    @testing.requires.psycopg2_or_pg8000_compatibility
+    @testing.requires.psycopg_or_pg8000_compatibility
     @engines.close_open_connections
     def test_client_encoding(self):
         c = testing.db.connect()
@@ -1314,7 +1415,7 @@ $$ LANGUAGE plpgsql;
         new_encoding = c.exec_driver_sql("show client_encoding").fetchone()[0]
         eq_(new_encoding, test_encoding)
 
-    @testing.requires.psycopg2_or_pg8000_compatibility
+    @testing.requires.psycopg_or_pg8000_compatibility
     @engines.close_open_connections
     def test_autocommit_isolation_level(self):
         c = testing.db.connect().execution_options(
@@ -1360,6 +1461,26 @@ $$ LANGUAGE plpgsql;
         seq.drop(connection)
         connection.execute(text("CREATE SEQUENCE fooseq"))
         t.create(connection, checkfirst=True)
+
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_sequence_detection_tricky_names(
+        self, metadata, connection, implicit_returning
+    ):
+        for tname, cname in [
+            ("tb1" * 30, "abc"),
+            ("tb2", "abc" * 30),
+            ("tb3" * 30, "abc" * 30),
+            ("tb4", "abc"),
+        ]:
+            t = Table(
+                tname[:57],
+                metadata,
+                Column(cname[:57], Integer, primary_key=True),
+                implicit_returning=implicit_returning,
+            )
+            t.create(connection)
+            r = connection.execute(t.insert())
+            eq_(r.inserted_primary_key, (1,))
 
     @testing.provide_metadata
     def test_schema_roundtrips(self, connection):
@@ -1453,90 +1574,192 @@ $$ LANGUAGE plpgsql;
         assert result == [(1, "user", "lala")]
         connection.execute(text("DROP TABLE speedy_users"))
 
-    @testing.requires.psycopg2_or_pg8000_compatibility
+    @testing.requires.psycopg_or_pg8000_compatibility
     def test_numeric_raise(self, connection):
         stmt = text("select cast('hi' as char) as hi").columns(hi=Numeric)
         assert_raises(exc.InvalidRequestError, connection.execute, stmt)
 
-    @testing.only_on("postgresql+psycopg2")
-    def test_serial_integer(self):
-        class BITD(TypeDecorator):
-            impl = Integer
+    @testing.combinations(
+        (None, Integer, "SERIAL"),
+        (None, BigInteger, "BIGSERIAL"),
+        ((9, 1), SmallInteger, "SMALLINT"),
+        ((9, 2), SmallInteger, "SMALLSERIAL"),
+        (None, SmallInteger, "SMALLSERIAL"),
+        (None, postgresql.INTEGER, "SERIAL"),
+        (None, postgresql.BIGINT, "BIGSERIAL"),
+        (
+            None,
+            Integer().with_variant(BigInteger(), "postgresql"),
+            "BIGSERIAL",
+        ),
+        (
+            None,
+            Integer().with_variant(postgresql.BIGINT, "postgresql"),
+            "BIGSERIAL",
+        ),
+        (
+            (9, 2),
+            Integer().with_variant(SmallInteger, "postgresql"),
+            "SMALLSERIAL",
+        ),
+        (None, "BITD()", "BIGSERIAL"),
+        argnames="version, type_, expected",
+    )
+    def test_serial_integer(self, version, type_, expected, testing_engine):
+        if type_ == "BITD()":
 
-            cache_ok = True
+            class BITD(TypeDecorator):
+                impl = Integer
 
-            def load_dialect_impl(self, dialect):
-                if dialect.name == "postgresql":
-                    return BigInteger()
-                else:
-                    return Integer()
+                cache_ok = True
 
-        for version, type_, expected in [
-            (None, Integer, "SERIAL"),
-            (None, BigInteger, "BIGSERIAL"),
-            ((9, 1), SmallInteger, "SMALLINT"),
-            ((9, 2), SmallInteger, "SMALLSERIAL"),
-            (None, postgresql.INTEGER, "SERIAL"),
-            (None, postgresql.BIGINT, "BIGSERIAL"),
-            (
-                None,
-                Integer().with_variant(BigInteger(), "postgresql"),
-                "BIGSERIAL",
-            ),
-            (
-                None,
-                Integer().with_variant(postgresql.BIGINT, "postgresql"),
-                "BIGSERIAL",
-            ),
-            (
-                (9, 2),
-                Integer().with_variant(SmallInteger, "postgresql"),
-                "SMALLSERIAL",
-            ),
-            (None, BITD(), "BIGSERIAL"),
-        ]:
-            m = MetaData()
+                def load_dialect_impl(self, dialect):
+                    if dialect.name == "postgresql":
+                        return BigInteger()
+                    else:
+                        return Integer()
 
-            t = Table("t", m, Column("c", type_, primary_key=True))
+            type_ = BITD()
+        t = Table("t", MetaData(), Column("c", type_, primary_key=True))
 
-            if version:
-                dialect = testing.db.dialect.__class__()
-                dialect._get_server_version_info = mock.Mock(
-                    return_value=version
-                )
-                dialect.initialize(testing.db.connect())
-            else:
-                dialect = testing.db.dialect
+        if version:
+            engine = testing_engine()
+            dialect = engine.dialect
+            dialect._get_server_version_info = mock.Mock(return_value=version)
+            engine.connect().close()  # initialize the dialect
+        else:
+            dialect = testing.db.dialect
 
-            ddl_compiler = dialect.ddl_compiler(dialect, schema.CreateTable(t))
-            eq_(
-                ddl_compiler.get_column_specification(t.c.c),
-                "c %s NOT NULL" % expected,
-            )
+        ddl_compiler = dialect.ddl_compiler(dialect, schema.CreateTable(t))
+        eq_(
+            ddl_compiler.get_column_specification(t.c.c),
+            "c %s NOT NULL" % expected,
+        )
 
     @testing.requires.psycopg2_compatibility
-    def test_initial_transaction_state(self):
+    def test_initial_transaction_state_psycopg2(self):
         from psycopg2.extensions import STATUS_IN_TRANSACTION
 
         engine = engines.testing_engine()
         with engine.connect() as conn:
             ne_(conn.connection.status, STATUS_IN_TRANSACTION)
 
+    @testing.only_on("postgresql+psycopg")
+    def test_initial_transaction_state_psycopg(self):
+        from psycopg.pq import TransactionStatus
 
-class AutocommitTextTest(test_deprecations.AutocommitTextTest):
-    __only_on__ = "postgresql"
+        engine = engines.testing_engine()
+        with engine.connect() as conn:
+            ne_(
+                conn.connection.dbapi_connection.info.transaction_status,
+                TransactionStatus.INTRANS,
+            )
 
-    def test_grant(self):
-        self._test_keyword("GRANT USAGE ON SCHEMA fooschema TO foorole")
+    def test_select_rowcount(self):
+        conn = testing.db.connect()
+        cursor = conn.exec_driver_sql("SELECT 1")
+        eq_(cursor.rowcount, 1)
 
-    def test_import_foreign_schema(self):
-        self._test_keyword("IMPORT FOREIGN SCHEMA foob")
 
-    def test_refresh_view(self):
-        self._test_keyword("REFRESH MATERIALIZED VIEW fooview")
+class Psycopg3Test(fixtures.TestBase):
+    __only_on__ = ("postgresql+psycopg",)
 
-    def test_revoke(self):
-        self._test_keyword("REVOKE USAGE ON SCHEMA fooschema FROM foorole")
+    def test_json_correctly_registered(self, testing_engine):
+        import json
 
-    def test_truncate(self):
-        self._test_keyword("TRUNCATE footable")
+        def loads(value):
+            value = json.loads(value)
+            value["x"] = value["x"] + "_loads"
+            return value
+
+        def dumps(value):
+            value = dict(value)
+            value["x"] = "dumps_y"
+            return json.dumps(value)
+
+        engine = testing_engine(
+            options=dict(json_serializer=dumps, json_deserializer=loads)
+        )
+        engine2 = testing_engine(
+            options=dict(
+                json_serializer=json.dumps, json_deserializer=json.loads
+            )
+        )
+
+        s = select(cast({"key": "value", "x": "q"}, JSONB))
+        with engine.begin() as conn:
+            eq_(conn.scalar(s), {"key": "value", "x": "dumps_y_loads"})
+            with engine.begin() as conn:
+                eq_(conn.scalar(s), {"key": "value", "x": "dumps_y_loads"})
+                with engine2.begin() as conn:
+                    eq_(conn.scalar(s), {"key": "value", "x": "q"})
+                with engine.begin() as conn:
+                    eq_(conn.scalar(s), {"key": "value", "x": "dumps_y_loads"})
+
+    @testing.requires.hstore
+    def test_hstore_correctly_registered(self, testing_engine):
+        engine = testing_engine(options=dict(use_native_hstore=True))
+        engine2 = testing_engine(options=dict(use_native_hstore=False))
+
+        def rp(self, *a):
+            return lambda a: {"a": "b"}
+
+        with mock.patch.object(HSTORE, "result_processor", side_effect=rp):
+            s = select(cast({"key": "value", "x": "q"}, HSTORE))
+            with engine.begin() as conn:
+                eq_(conn.scalar(s), {"key": "value", "x": "q"})
+                with engine.begin() as conn:
+                    eq_(conn.scalar(s), {"key": "value", "x": "q"})
+                    with engine2.begin() as conn:
+                        eq_(conn.scalar(s), {"a": "b"})
+                    with engine.begin() as conn:
+                        eq_(conn.scalar(s), {"key": "value", "x": "q"})
+
+    def test_get_dialect(self):
+        u = url.URL.create("postgresql://")
+        d = psycopg_dialect.PGDialect_psycopg.get_dialect_cls(u)
+        is_(d, psycopg_dialect.PGDialect_psycopg)
+        d = psycopg_dialect.PGDialect_psycopg.get_async_dialect_cls(u)
+        is_(d, psycopg_dialect.PGDialectAsync_psycopg)
+        d = psycopg_dialect.PGDialectAsync_psycopg.get_dialect_cls(u)
+        is_(d, psycopg_dialect.PGDialectAsync_psycopg)
+        d = psycopg_dialect.PGDialectAsync_psycopg.get_dialect_cls(u)
+        is_(d, psycopg_dialect.PGDialectAsync_psycopg)
+
+    def test_async_version(self):
+        e = create_engine("postgresql+psycopg_async://")
+        is_true(isinstance(e.dialect, psycopg_dialect.PGDialectAsync_psycopg))
+
+    @testing.skip_if(lambda c: c.db.dialect.is_async)
+    def test_client_side_cursor(self, testing_engine):
+        from psycopg import ClientCursor
+
+        engine = testing_engine(
+            options={"connect_args": {"cursor_factory": ClientCursor}}
+        )
+
+        with engine.connect() as c:
+            res = c.execute(select(1, 2, 3)).one()
+            eq_(res, (1, 2, 3))
+            with c.connection.driver_connection.cursor() as cursor:
+                is_true(isinstance(cursor, ClientCursor))
+
+    @config.async_test
+    @testing.skip_if(lambda c: not c.db.dialect.is_async)
+    async def test_async_client_side_cursor(self, testing_engine):
+        from psycopg import AsyncClientCursor
+
+        engine = testing_engine(
+            options={"connect_args": {"cursor_factory": AsyncClientCursor}},
+            asyncio=True,
+        )
+
+        async with engine.connect() as c:
+            res = (await c.execute(select(1, 2, 3))).one()
+            eq_(res, (1, 2, 3))
+            async with (
+                await c.get_raw_connection()
+            ).driver_connection.cursor() as cursor:
+                is_true(isinstance(cursor, AsyncClientCursor))
+
+        await engine.dispose()

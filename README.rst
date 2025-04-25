@@ -11,8 +11,8 @@ SQLAlchemy
     :target: https://pypi.org/project/sqlalchemy
     :alt: PyPI - Python Version
 
-.. |Downloads| image:: https://img.shields.io/pypi/dm/sqlalchemy
-    :target: https://pypi.org/project/sqlalchemy
+.. |Downloads| image:: https://static.pepy.tech/badge/sqlalchemy/month
+    :target: https://pepy.tech/project/sqlalchemy
     :alt: PyPI - Downloads
 
 
@@ -103,8 +103,8 @@ SQLAlchemy's philosophy:
   queries, including how joins are organized,
   how subqueries and correlation is used, what
   columns are requested.  Everything SQLAlchemy
-  does is ultimately the result of a developer-
-  initiated decision.
+  does is ultimately the result of a developer-initiated 
+  decision.
 * Don't use an ORM if the problem doesn't need one.
   SQLAlchemy consists of a Core and separate ORM
   component.   The Core offers a full SQL expression

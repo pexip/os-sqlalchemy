@@ -1,7 +1,7 @@
-# coding: utf-8
 """Tests unitofwork operations."""
 
 import datetime
+import re
 
 import sqlalchemy as sa
 from sqlalchemy import Boolean
@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.persistence import _sort_states
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
+from sqlalchemy.testing import config
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_true
@@ -30,16 +31,17 @@ from sqlalchemy.testing.assertions import expect_raises_message
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.entities import BasicEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
+from sqlalchemy.testing.provision import normalize_sequence
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.util import OrderedDict
-from sqlalchemy.util import u
-from sqlalchemy.util import ue
 from test.orm import _fixtures
 
 
-class UnitOfWorkTest(object):
+class UnitOfWorkTest:
     pass
 
 
@@ -71,7 +73,7 @@ class HistoryTest(_fixtures.FixtureTest):
             ),
         )
 
-        session = fixture_session(autocommit=False)
+        session = fixture_session()
 
         u = User(name="u1")
         a = Address(email_address="u1@e")
@@ -126,11 +128,11 @@ class UnicodeTest(fixtures.MappedTest):
 
         self.mapper_registry.map_imperatively(Test, uni_t1)
 
-        txt = ue("\u0160\u0110\u0106\u010c\u017d")
+        txt = "\u0160\u0110\u0106\u010c\u017d"
         t1 = Test(id=1, txt=txt)
         self.assert_(t1.txt == txt)
 
-        session = fixture_session(autocommit=False)
+        session = fixture_session()
         session.add(t1)
         session.commit()
 
@@ -149,11 +151,11 @@ class UnicodeTest(fixtures.MappedTest):
         )
         self.mapper_registry.map_imperatively(Test2, uni_t2)
 
-        txt = ue("\u0160\u0110\u0106\u010c\u017d")
+        txt = "\u0160\u0110\u0106\u010c\u017d"
         t1 = Test(txt=txt)
         t1.t2s.append(Test2())
         t1.t2s.append(Test2())
-        session = fixture_session(autocommit=False, expire_on_commit=False)
+        session = fixture_session(expire_on_commit=False)
         session.add(t1)
         session.commit()
         session.close()
@@ -174,31 +176,31 @@ class UnicodeSchemaTest(fixtures.MappedTest):
             "unitable1",
             metadata,
             Column(
-                u("méil"),
+                "méil",
                 Integer,
                 primary_key=True,
                 key="a",
                 test_needs_autoincrement=True,
             ),
-            Column(ue("\u6e2c\u8a66"), Integer, key="b"),
+            Column("\u6e2c\u8a66", Integer, key="b"),
             Column("type", String(20)),
             test_needs_fk=True,
             test_needs_autoincrement=True,
         )
         t2 = Table(
-            u("Unitéble2"),
+            "Unitéble2",
             metadata,
             Column(
-                u("méil"),
+                "méil",
                 Integer,
                 primary_key=True,
                 key="cc",
                 test_needs_autoincrement=True,
             ),
             Column(
-                ue("\u6e2c\u8a66"), Integer, ForeignKey("unitable1.a"), key="d"
+                "\u6e2c\u8a66", Integer, ForeignKey("unitable1.a"), key="d"
             ),
-            Column(ue("\u6e2c\u8a66_2"), Integer, key="e"),
+            Column("\u6e2c\u8a66_2", Integer, key="e"),
             test_needs_fk=True,
             test_needs_autoincrement=True,
         )
@@ -209,10 +211,10 @@ class UnicodeSchemaTest(fixtures.MappedTest):
     def test_mapping(self):
         t2, t1 = self.tables.t2, self.tables.t1
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -251,7 +253,7 @@ class UnicodeSchemaTest(fixtures.MappedTest):
     def test_inheritance_mapping(self):
         t2, t1 = self.tables.t2, self.tables.t1
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
         class B(A):
@@ -629,7 +631,7 @@ class ClauseAttributesTest(fixtures.MappedTest):
         eq_(hb.value, False)
 
     def test_clauseelement_accessor(self):
-        class Thing(object):
+        class Thing:
             def __init__(self, value):
                 self.value = value
 
@@ -1030,12 +1032,11 @@ class ColumnCollisionTest(fixtures.MappedTest):
     def test_naming(self):
         book = self.tables.book
 
-        class Book(fixtures.ComparableEntity):
+        class Book(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(Book, book)
         with fixture_session() as sess:
-
             b1 = Book(book_id="abc", title="def")
             sess.add(b1)
             sess.flush()
@@ -1112,7 +1113,7 @@ class DefaultTest(fixtures.MappedTest):
                 Column(
                     "secondary_id",
                     Integer,
-                    sa.Sequence("sec_id_seq"),
+                    normalize_sequence(config, sa.Sequence("sec_id_seq")),
                     unique=True,
                 )
             )
@@ -1136,8 +1137,8 @@ class DefaultTest(fixtures.MappedTest):
         class Secondary(cls.Comparable):
             pass
 
-    @testing.fails_on("firebird", "Data type unknown on the parameter")
-    def test_insert(self):
+    @testing.variation("eager_defaults", ["auto", True, False])
+    def test_insert(self, eager_defaults):
         althohoval, hohoval, default_t, Hoho = (
             self.other.althohoval,
             self.other.hohoval,
@@ -1145,7 +1146,13 @@ class DefaultTest(fixtures.MappedTest):
             self.classes.Hoho,
         )
 
-        self.mapper_registry.map_imperatively(Hoho, default_t)
+        mp = self.mapper_registry.map_imperatively(
+            Hoho,
+            default_t,
+            eager_defaults=(
+                "auto" if eager_defaults.auto else bool(eager_defaults)
+            ),
+        )
 
         h1 = Hoho(hoho=althohoval)
         h2 = Hoho(counter=12)
@@ -1153,7 +1160,7 @@ class DefaultTest(fixtures.MappedTest):
         h4 = Hoho()
         h5 = Hoho(foober="im the new foober")
 
-        session = fixture_session(autocommit=False, expire_on_commit=False)
+        session = fixture_session(expire_on_commit=False)
         session.add_all((h1, h2, h3, h4, h5))
         session.commit()
 
@@ -1164,12 +1171,18 @@ class DefaultTest(fixtures.MappedTest):
             # test deferred load of attributes, one select per instance
             self.assert_(h2.hoho == h4.hoho == h5.hoho == hohoval)
 
-        self.sql_count_(3, go)
+        if mp._prefer_eager_defaults(testing.db.dialect, default_t):
+            self.sql_count_(0, go)
+        else:
+            self.sql_count_(3, go)
 
         def go():
             self.assert_(h1.counter == h4.counter == h5.counter == 7)
 
-        self.sql_count_(1, go)
+        if mp._prefer_eager_defaults(testing.db.dialect, default_t):
+            self.sql_count_(0, go)
+        else:
+            self.sql_count_(1, go)
 
         def go():
             self.assert_(h3.counter == h2.counter == 12)
@@ -1190,8 +1203,6 @@ class DefaultTest(fixtures.MappedTest):
         self.assert_(h2.foober == h3.foober == h4.foober == "im foober")
         eq_(h5.foober, "im the new foober")
 
-    @testing.fails_on("firebird", "Data type unknown on the parameter")
-    @testing.fails_on("oracle+cx_oracle", "seems like a cx_oracle bug")
     def test_eager_defaults(self):
         hohoval, default_t, Hoho = (
             self.other.hohoval,
@@ -1218,7 +1229,7 @@ class DefaultTest(fixtures.MappedTest):
         session = fixture_session()
         session.add(h1)
 
-        if testing.db.dialect.implicit_returning:
+        if testing.db.dialect.insert_returning:
             self.sql_count_(1, session.flush)
         else:
             self.sql_count_(2, session.flush)
@@ -1251,7 +1262,6 @@ class DefaultTest(fixtures.MappedTest):
 
         self.sql_count_(0, go)
 
-    @testing.fails_on("firebird", "Data type unknown on the parameter")
     def test_update(self):
         default_t, Hoho = self.tables.default_t, self.classes.Hoho
 
@@ -1267,7 +1277,6 @@ class DefaultTest(fixtures.MappedTest):
         session.flush()
         eq_(h1.foober, "im the update")
 
-    @testing.fails_on("firebird", "Data type unknown on the parameter")
     def test_used_in_relationship(self):
         """A server-side default can be used as the target of a foreign key"""
 
@@ -1460,7 +1469,6 @@ class ColumnPropertyTest(fixtures.MappedTest):
         Data = self.classes.Data
 
         with fixture_session() as sess:
-
             d1 = Data(a="hello", b="there")
             sess.add(d1)
             sess.flush()
@@ -1903,7 +1911,7 @@ class SaveTest(_fixtures.FixtureTest):
     def test_synonym(self):
         users = self.tables.users
 
-        class SUser(fixtures.BasicEntity):
+        class SUser(BasicEntity):
             def _get_name(self):
                 return "User:" + self.name
 
@@ -2015,7 +2023,7 @@ class SaveTest(_fixtures.FixtureTest):
 
         # don't set deferred attribute, commit session
         o = Order(id=42)
-        session = fixture_session(autocommit=False)
+        session = fixture_session()
         session.add(o)
         session.commit()
 
@@ -2197,7 +2205,7 @@ class SaveTest(_fixtures.FixtureTest):
 
         names = []
 
-        class Events(object):
+        class Events:
             def before_insert(self, mapper, connection, instance):
                 self.current_instance = instance
                 names.append(instance.name)
@@ -2291,7 +2299,7 @@ class ManyToOneTest(_fixtures.FixtureTest):
             testing.db,
             session.flush,
             CompiledSQL(
-                "INSERT INTO users (name) " "VALUES (:name)",
+                "INSERT INTO users (name) VALUES (:name)",
                 {"name": "imnewlyadded"},
             ),
             AllOf(
@@ -2570,7 +2578,7 @@ class ManyToManyTest(_fixtures.FixtureTest):
         session = fixture_session()
 
         objects = []
-        _keywords = dict([(k.name, k) for k in session.query(Keyword)])
+        _keywords = {k.name: k for k in session.query(Keyword)}
 
         for elem in data[1:]:
             item = Item(description=elem["description"])
@@ -2608,7 +2616,7 @@ class ManyToManyTest(_fixtures.FixtureTest):
                 {"description": "item4updated", "items_id": objects[4].id},
             ),
             CompiledSQL(
-                "INSERT INTO keywords (name) " "VALUES (:name)",
+                "INSERT INTO keywords (name) VALUES (:name)",
                 {"name": "yellow"},
             ),
             CompiledSQL(
@@ -2767,7 +2775,7 @@ class ManyToManyTest(_fixtures.FixtureTest):
             self.classes.Item,
         )
 
-        class IKAssociation(fixtures.ComparableEntity):
+        class IKAssociation(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(Keyword, keywords)
@@ -2802,7 +2810,7 @@ class ManyToManyTest(_fixtures.FixtureTest):
         session = fixture_session()
 
         def fixture():
-            _kw = dict([(k.name, k) for k in session.query(Keyword)])
+            _kw = {k.name: k for k in session.query(Keyword)}
             for n in (
                 "big",
                 "green",
@@ -2875,12 +2883,14 @@ class SaveTest2(_fixtures.FixtureTest):
                 testing.db.dialect.insert_executemany_returning,
                 [
                     CompiledSQL(
-                        "INSERT INTO users (name) VALUES (:name)",
+                        "INSERT INTO users (name) VALUES (:name) "
+                        "RETURNING users.id",
                         [{"name": "u1"}, {"name": "u2"}],
                     ),
                     CompiledSQL(
                         "INSERT INTO addresses (user_id, email_address) "
-                        "VALUES (:user_id, :email_address)",
+                        "VALUES (:user_id, :email_address) "
+                        "RETURNING addresses.id",
                         [
                             {"user_id": 1, "email_address": "a1"},
                             {"user_id": 2, "email_address": "a2"},
@@ -3018,7 +3028,7 @@ class BooleanColTest(fixtures.MappedTest):
         t1_t = self.tables.t1_t
 
         # use the regular mapper
-        class T(fixtures.ComparableEntity):
+        class T(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(T, t1_t)
@@ -3235,7 +3245,7 @@ class RowSwitchTest(fixtures.MappedTest):
                     t5t7.select(),
                 )
             ),
-            set([(1, 1), (1, 2)]),
+            {(1, 1), (1, 2)},
         )
         eq_(
             list(
@@ -3406,7 +3416,7 @@ class InheritingRowSwitchTest(fixtures.MappedTest):
             # sync operation during _save_obj().update, this is safe to remove
             # again.
             CompiledSQL(
-                "UPDATE child SET pid=:pid " "WHERE child.cid = :child_cid",
+                "UPDATE child SET pid=:pid WHERE child.cid = :child_cid",
                 {"pid": 1, "child_cid": 1},
             ),
         )
@@ -3504,20 +3514,20 @@ class PartialNullPKTest(fixtures.MappedTest):
 class NoRowInsertedTest(fixtures.TestBase):
     """test #7594.
 
-    failure modes when INSERT doesnt actually insert a row.
+    failure modes when INSERT doesn't actually insert a row.
+    s
     """
 
+    # the test manipulates INSERTS to become UPDATES to simulate
+    # "INSERT that returns no row" so both are needed; the manipulations
+    # are currently postgresql or SQLite specific
     __backend__ = True
-    __requires__ = ("returning",)
+    __only_on__ = ("postgresql", "sqlite")
 
     @testing.fixture
-    @testing.skip_if(
-        "+asyncpg",
-        "1.4's asyncpg architecture doesn't let us change parameters",
-    )
     def null_server_default_fixture(self, registry, connection):
         @registry.mapped
-        class MyClass(object):
+        class MyClass:
             __tablename__ = "my_table"
 
             id = Column(Integer, primary_key=True)
@@ -3529,30 +3539,35 @@ class NoRowInsertedTest(fixtures.TestBase):
         def revert_insert(
             conn, cursor, statement, parameters, context, executemany
         ):
-            if statement.startswith("INSERT"):
-                if statement.endswith("RETURNING my_table.id"):
-                    if executemany:
-                        # remove some rows, so the count is wrong
-                        parameters = parameters[0:1]
-                    else:
-                        # statement should return no rows
-                        statement = (
-                            "UPDATE my_table SET id=NULL WHERE 1!=1 "
-                            "RETURNING my_table.id"
-                        )
-                        parameters = {}
+            if re.match(r"INSERT.* RETURNING (?:my_table.)?id", statement):
+                if executemany and isinstance(parameters, list):
+                    # remove some rows, so the count is wrong
+                    parameters = parameters[0:1]
                 else:
-                    assert not testing.against(
-                        "postgresql"
-                    ), "this test has to at least run on PostgreSQL"
-                    testing.config.skip_test(
-                        "backend doesn't support the expected form of "
-                        "RETURNING for this test to work"
+                    # statement should return no rows
+                    statement = (
+                        "UPDATE my_table SET id=NULL WHERE 1!=1 "
+                        "RETURNING my_table.id"
                     )
+                    parameters = {}
+            else:
+                assert not testing.against(
+                    "postgresql"
+                ), "this test has to at least run on PostgreSQL"
+                testing.config.skip_test(
+                    "backend doesn't support the expected form of "
+                    "RETURNING for this test to work"
+                )
+
             return statement, parameters
 
         return MyClass
 
+    @testing.only_on(
+        "postgresql",
+        "only postgresql uses RETURNING for a single-row "
+        "INSERT among the DBs we are using in this test",
+    )
     def test_insert_single_no_pk_correct_exception(
         self, null_server_default_fixture, connection
     ):
@@ -3599,7 +3614,7 @@ class NoRowInsertedTest(fixtures.TestBase):
 
 
 class EnsurePKSortableTest(fixtures.MappedTest):
-    class SomeEnum(object):
+    class SomeEnum:
         # Implements PEP 435 in the minimal fashion needed by SQLAlchemy
         __members__ = OrderedDict()
 
@@ -3680,7 +3695,7 @@ class EnsurePKSortableTest(fixtures.MappedTest):
 
         class T3(cls.Basic):
             def __str__(self):
-                return "T3(id={})".format(self.id)
+                return f"T3(id={self.id})"
 
     @classmethod
     def setup_mappers(cls):
@@ -3697,21 +3712,18 @@ class EnsurePKSortableTest(fixtures.MappedTest):
 
         a.data = "bar"
         b.data = "foo"
-        if sa.util.py3k:
-            message = (
-                r"Could not sort objects by primary key; primary key "
-                r"values must be sortable in Python \(was: '<' not "
-                r"supported between instances of 'MyNotSortableEnum'"
-                r" and 'MyNotSortableEnum'\)"
-            )
+        message = (
+            r"Could not sort objects by primary key; primary key "
+            r"values must be sortable in Python \(was: '<' not "
+            r"supported between instances of 'MyNotSortableEnum'"
+            r" and 'MyNotSortableEnum'\)"
+        )
 
-            assert_raises_message(
-                sa.exc.InvalidRequestError,
-                message,
-                s.flush,
-            )
-        else:
-            s.flush()
+        assert_raises_message(
+            sa.exc.InvalidRequestError,
+            message,
+            s.flush,
+        )
         s.close()
 
     def test_persistent_flush_sortable(self):

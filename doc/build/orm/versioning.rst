@@ -57,9 +57,9 @@ mapper options::
     class User(Base):
         __tablename__ = "user"
 
-        id = Column(Integer, primary_key=True)
-        version_id = Column(Integer, nullable=False)
-        name = Column(String(50), nullable=False)
+        id = mapped_column(Integer, primary_key=True)
+        version_id = mapped_column(Integer, nullable=False)
+        name = mapped_column(String(50), nullable=False)
 
         __mapper_args__ = {"version_id_col": version_id}
 
@@ -71,11 +71,13 @@ Above, the ``User`` mapping tracks integer versions using the column
 ``version_id``.   When an object of type ``User`` is first flushed, the
 ``version_id`` column will be given a value of "1".   Then, an UPDATE
 of the table later on will always be emitted in a manner similar to the
-following::
+following:
+
+.. sourcecode:: sql
 
     UPDATE user SET version_id=:version_id, name=:name
     WHERE user.id = :user_id AND user.version_id = :user_version_id
-    {"name": "new name", "version_id": 2, "user_id": 1, "user_version_id": 1}
+    -- {"name": "new name", "version_id": 2, "user_id": 1, "user_version_id": 1}
 
 The above UPDATE statement is updating the row that not only matches
 ``user.id = 1``, it also is requiring that ``user.version_id = 1``, where "1"
@@ -107,9 +109,9 @@ support a native GUID type, but we illustrate here using a simple string)::
     class User(Base):
         __tablename__ = "user"
 
-        id = Column(Integer, primary_key=True)
-        version_uuid = Column(String(32), nullable=False)
-        name = Column(String(50), nullable=False)
+        id = mapped_column(Integer, primary_key=True)
+        version_uuid = mapped_column(String(32), nullable=False)
+        name = mapped_column(String(50), nullable=False)
 
         __mapper_args__ = {
             "version_id_col": version_uuid,
@@ -151,9 +153,9 @@ class as follows::
     class User(Base):
         __tablename__ = "user"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50), nullable=False)
-        xmin = Column("xmin", String, system=True, server_default=FetchedValue())
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50), nullable=False)
+        xmin = mapped_column("xmin", String, system=True, server_default=FetchedValue())
 
         __mapper_args__ = {"version_id_col": xmin, "version_id_generator": False}
 
@@ -172,7 +174,7 @@ automatically providing the new value of the version id counter.
 The ORM typically does not actively fetch the values of database-generated
 values when it emits an INSERT or UPDATE, instead leaving these columns as
 "expired" and to be fetched when they are next accessed, unless the ``eager_defaults``
-:func:`.mapper` flag is set.  However, when a
+:class:`_orm.Mapper` flag is set.  However, when a
 server side version column is used, the ORM needs to actively fetch the newly
 generated value.  This is so that the version counter is set up *before*
 any concurrent transaction may update it again.   This fetching is also
@@ -181,32 +183,33 @@ otherwise if emitting a SELECT statement afterwards, there is still a potential
 race condition where the version counter may change before it can be fetched.
 
 When the target database supports RETURNING, an INSERT statement for our ``User`` class will look
-like this::
+like this:
+
+.. sourcecode:: sql
 
     INSERT INTO "user" (name) VALUES (%(name)s) RETURNING "user".id, "user".xmin
-    {'name': 'ed'}
+    -- {'name': 'ed'}
 
 Where above, the ORM can acquire any newly generated primary key values along
 with server-generated version identifiers in one statement.   When the backend
 does not support RETURNING, an additional SELECT must be emitted for **every**
 INSERT and UPDATE, which is much less efficient, and also introduces the possibility of
-missed version counters::
+missed version counters:
+
+.. sourcecode:: sql
 
     INSERT INTO "user" (name) VALUES (%(name)s)
-    {'name': 'ed'}
+    -- {'name': 'ed'}
 
     SELECT "user".version_id AS user_version_id FROM "user" where
     "user".id = :param_1
-    {"param_1": 1}
+    -- {"param_1": 1}
 
 It is *strongly recommended* that server side version counters only be used
 when absolutely necessary and only on backends that support :term:`RETURNING`,
-e.g. PostgreSQL, Oracle, SQL Server (though SQL Server has
-`major caveats <https://blogs.msdn.com/b/sqlprogrammability/archive/2008/07/11/update-with-output-clause-triggers-and-sqlmoreresults.aspx>`_ when triggers are used), Firebird.
+currently PostgreSQL, Oracle Database, MariaDB 10.5, SQLite 3.35, and SQL
+Server.
 
-.. versionadded:: 0.9.0
-
-    Support for server side version identifier tracking.
 
 Programmatic or Conditional Version Counters
 --------------------------------------------
@@ -223,9 +226,9 @@ at our choosing::
     class User(Base):
         __tablename__ = "user"
 
-        id = Column(Integer, primary_key=True)
-        version_uuid = Column(String(32), nullable=False)
-        name = Column(String(50), nullable=False)
+        id = mapped_column(Integer, primary_key=True)
+        version_uuid = mapped_column(String(32), nullable=False)
+        name = mapped_column(String(50), nullable=False)
 
         __mapper_args__ = {"version_id_col": version_uuid, "version_id_generator": False}
 
@@ -250,8 +253,3 @@ issues::
     # will leave version_uuid unchanged
     u1.name = "u3"
     session.commit()
-
-.. versionadded:: 0.9.0
-
-    Support for programmatic and conditional version identifier tracking.
-

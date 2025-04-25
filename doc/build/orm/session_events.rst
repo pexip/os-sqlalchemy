@@ -45,7 +45,7 @@ interception of a query, which includes those emitted by
 provides accessors to allow modifications to statements, parameters, and
 options::
 
-    Session = sessionmaker(engine, future=True)
+    Session = sessionmaker(engine)
 
 
     @event.listens_for(Session, "do_orm_execute")
@@ -84,12 +84,11 @@ may be used on its own, or is ideally suited to be used within the
 
     from sqlalchemy.orm import with_loader_criteria
 
-    Session = sessionmaker(engine, future=True)
+    Session = sessionmaker(engine)
 
 
     @event.listens_for(Session, "do_orm_execute")
     def _do_orm_execute(orm_execute_state):
-
         if (
             orm_execute_state.is_select
             and not orm_execute_state.is_column_load
@@ -117,18 +116,18 @@ Given a series of classes based on a mixin called ``HasTimestamp``::
     import datetime
 
 
-    class HasTimestamp(object):
-        timestamp = Column(DateTime, default=datetime.datetime.now)
+    class HasTimestamp:
+        timestamp = mapped_column(DateTime, default=datetime.datetime.now)
 
 
     class SomeEntity(HasTimestamp, Base):
         __tablename__ = "some_entity"
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 
     class SomeOtherEntity(HasTimestamp, Base):
         __tablename__ = "some_entity"
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 The above classes ``SomeEntity`` and ``SomeOtherEntity`` will each have a column
 ``timestamp`` that defaults to the current date and time.   An event may be used
@@ -335,16 +334,16 @@ hook continually adds new state to be flushed each time it is called.
 
 .. _session_persistence_mapper:
 
-Mapper-level Events
-^^^^^^^^^^^^^^^^^^^
+Mapper-level Flush Events
+^^^^^^^^^^^^^^^^^^^^^^^^^
 
-In addition to the flush-level hooks, there is also a suite of hooks
-that are more fine-grained, in that they are called on a per-object
-basis and are broken out based on INSERT, UPDATE or DELETE.   These
-are the mapper persistence hooks, and they too are very popular,
-however these events need to be approached more cautiously, as they
-proceed within the context of the flush process that is already
-ongoing; many operations are not safe to proceed here.
+In addition to the flush-level hooks, there is also a suite of hooks that are
+more fine-grained, in that they are called on a per-object basis and are broken
+out based on INSERT, UPDATE or DELETE within the flush process. These are the
+mapper persistence hooks, and they too are very popular, however these events
+need to be approached more cautiously, as they proceed within the context of
+the flush process that is already ongoing; many operations are not safe to
+proceed here.
 
 The events are:
 
@@ -354,6 +353,14 @@ The events are:
 * :meth:`.MapperEvents.after_update`
 * :meth:`.MapperEvents.before_delete`
 * :meth:`.MapperEvents.after_delete`
+
+.. note::
+
+  It is important to note that these events apply **only** to the
+  :ref:`session flush operation <session_flushing>` , and **not** to the
+  ORM-level INSERT/UPDATE/DELETE functionality described at
+  :ref:`orm_expression_update_delete`. To intercept ORM-level DML, use the
+  :meth:`_orm.SessionEvents.do_orm_execute` event.
 
 Each event is passed the :class:`_orm.Mapper`,
 the mapped object itself, and the :class:`_engine.Connection` which is being
@@ -383,8 +390,6 @@ events include:
 The reason the :class:`_engine.Connection` is passed is that it is encouraged that
 **simple SQL operations take place here**, directly on the :class:`_engine.Connection`,
 such as incrementing counters or inserting extra rows within log tables.
-When dealing with the :class:`_engine.Connection`, it is expected that Core-level
-SQL operations will be used; e.g. those described in :ref:`sqlexpression_toplevel`.
 
 There are also many per-object operations that don't need to be handled
 within a flush event at all.   The most common alternative is to simply
@@ -403,9 +408,6 @@ Object Lifecycle Events
 
 Another use case for events is to track the lifecycle of objects.  This
 refers to the states first introduced at :ref:`session_object_states`.
-
-.. versionadded:: 1.1 added a system of events that intercept all possible
-   state transitions of an object within the :class:`.Session`.
 
 All the states above can be tracked fully with events.   Each event
 represents a distinct state transition, meaning, the starting state
@@ -460,10 +462,12 @@ wanted to intercept when any transient object is created, the
 event is applied to a specific class or superclass.  For example, to
 intercept all new objects for a particular declarative base::
 
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
     from sqlalchemy import event
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     @event.listens_for(Base, "init", propagate=True)

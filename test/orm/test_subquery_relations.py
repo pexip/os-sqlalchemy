@@ -989,7 +989,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         )
 
     def test_double_w_ac_against_subquery(self):
-
         (
             users,
             orders,
@@ -1053,7 +1052,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         self._run_double_test()
 
     def test_double_w_ac(self):
-
         (
             users,
             orders,
@@ -1768,10 +1766,10 @@ class OrderBySecondaryTest(fixtures.MappedTest):
     def test_ordering(self):
         a, m2m, b = (self.tables.a, self.tables.m2m, self.tables.b)
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1894,7 +1892,6 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
 
     @classmethod
     def insert_data(cls, connection):
-
         e1 = Engineer(primary_language="java")
         e2 = Engineer(primary_language="c++")
         e1.paperwork = [
@@ -2443,7 +2440,7 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_basic(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -2519,7 +2516,7 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_lazy_fallback_doesnt_affect_eager(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -2565,7 +2562,7 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_with_deferred(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -2626,7 +2623,7 @@ class SelfReferentialTest(fixtures.MappedTest):
     def test_options(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -2683,7 +2680,7 @@ class SelfReferentialTest(fixtures.MappedTest):
 
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -2897,13 +2894,13 @@ class CyclicalInheritingEagerTestOne(fixtures.MappedTest):
     def test_basic(self):
         t2, t1 = self.tables.t2, self.tables.t1
 
-        class T(object):
+        class T:
             pass
 
         class SubT(T):
             pass
 
-        class T2(object):
+        class T2:
             pass
 
         class SubT2(T2):
@@ -3090,7 +3087,6 @@ class SubqueryloadDistinctTest(
         self._run_test_m2o(None, False)
 
     def _run_test_m2o(self, director_strategy_level, photo_strategy_level):
-
         # test where the innermost is m2o, e.g.
         # Movie->director
 
@@ -3538,7 +3534,6 @@ class FromSubqTest(fixtures.DeclarativeMappedTest):
         cache = {}
 
         for i in range(3):
-
             subq = (
                 s.query(B)
                 .join(B.a)
@@ -3616,7 +3611,6 @@ class FromSubqTest(fixtures.DeclarativeMappedTest):
             s.close()
 
     def test_subq_w_from_self_two(self):
-
         A, B, C = self.classes("A", "B", "C")
 
         s = fixture_session()
@@ -3625,7 +3619,6 @@ class FromSubqTest(fixtures.DeclarativeMappedTest):
         for i in range(3):
 
             def go():
-
                 subq = s.query(B).join(B.a).subquery()
 
                 bq = aliased(B, subq)
@@ -3766,3 +3759,81 @@ class Issue6149Test(fixtures.DeclarativeMappedTest):
                 ),
             )
             s.close()
+
+
+class Issue11173Test(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class SubItem(Base):
+            __tablename__ = "sub_items"
+
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            item_id = Column(Integer, ForeignKey("items.id"))
+            name = Column(String(50))
+            number = Column(Integer)
+
+        class Item(Base):
+            __tablename__ = "items"
+
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            name = Column(String(50))
+            number = Column(Integer)
+            sub_items = relationship("SubItem", backref="item")
+
+    @classmethod
+    def insert_data(cls, connection):
+        Item, SubItem = cls.classes("Item", "SubItem")
+
+        with Session(connection) as sess:
+            number_of_items = 50
+            number_of_sub_items = 5
+
+            items = [
+                Item(name=f"Item:{i}", number=i)
+                for i in range(number_of_items)
+            ]
+            sess.add_all(items)
+            for item in items:
+                item.sub_items = [
+                    SubItem(name=f"SubItem:{item.id}:{i}", number=i)
+                    for i in range(number_of_sub_items)
+                ]
+            sess.commit()
+
+    @testing.variation("use_in", [True, False])
+    def test_multiple_queries(self, use_in):
+        Item, SubItem = self.classes("Item", "SubItem")
+
+        for sub_item_number in (1, 2, 3):
+            s = fixture_session()
+            base_query = s.query(Item)
+
+            base_query = base_query.filter(Item.number > 5, Item.number <= 10)
+
+            if use_in:
+                base_query = base_query.options(
+                    subqueryload(
+                        Item.sub_items.and_(
+                            SubItem.number.in_([sub_item_number, 18, 12])
+                        )
+                    )
+                )
+            else:
+                base_query = base_query.options(
+                    subqueryload(
+                        Item.sub_items.and_(SubItem.number == sub_item_number)
+                    )
+                )
+
+            items = list(base_query)
+
+            eq_(len(items), 5)
+
+            for item in items:
+                sub_items = list(item.sub_items)
+                eq_(len(sub_items), 1)
+
+                for sub_item in sub_items:
+                    eq_(sub_item.number, sub_item_number)

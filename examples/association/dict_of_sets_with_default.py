@@ -23,17 +23,17 @@ from sqlalchemy.ext.associationproxy import association_proxy
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-from sqlalchemy.orm.collections import MappedCollection
+from sqlalchemy.orm.collections import KeyFuncDict
 
 
-class Base(object):
+class Base:
     id = Column(Integer, primary_key=True)
 
 
 Base = declarative_base(cls=Base)
 
 
-class GenDefaultCollection(MappedCollection):
+class GenDefaultCollection(KeyFuncDict):
     def __missing__(self, key):
         self[key] = b = B(key)
         return b
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     # only "A" is referenced explicitly.  Using "collections",
     # we deal with a dict of key/sets of integers directly.
 
-    session.add_all([A(collections={"1": set([1, 2, 3])})])
+    session.add_all([A(collections={"1": {1, 2, 3}})])
     session.commit()
 
     a1 = session.query(A).first()

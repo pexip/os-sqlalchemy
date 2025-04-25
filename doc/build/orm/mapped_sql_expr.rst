@@ -24,9 +24,9 @@ will provide for us the ``fullname``, which is the string concatenation of the t
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
-        firstname = Column(String(50))
-        lastname = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        firstname = mapped_column(String(50))
+        lastname = mapped_column(String(50))
 
         @hybrid_property
         def fullname(self):
@@ -35,12 +35,14 @@ will provide for us the ``fullname``, which is the string concatenation of the t
 Above, the ``fullname`` attribute is interpreted at both the instance and
 class level, so that it is available from an instance::
 
-    some_user = session.query(User).first()
+    some_user = session.scalars(select(User).limit(1)).first()
     print(some_user.fullname)
 
 as well as usable within queries::
 
-    some_user = session.query(User).filter(User.fullname == "John Smith").first()
+    some_user = session.scalars(
+        select(User).where(User.fullname == "John Smith").limit(1)
+    ).first()
 
 The string concatenation example is a simple one, where the Python expression
 can be dual purposed at the instance and class level.  Often, the SQL expression
@@ -55,9 +57,9 @@ needs to be present inside the hybrid, using the ``if`` statement in Python and 
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
-        firstname = Column(String(50))
-        lastname = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        firstname = mapped_column(String(50))
+        lastname = mapped_column(String(50))
 
         @hybrid_property
         def fullname(self):
@@ -69,9 +71,7 @@ needs to be present inside the hybrid, using the ``if`` statement in Python and 
         @fullname.expression
         def fullname(cls):
             return case(
-                [
-                    (cls.firstname != None, cls.firstname + " " + cls.lastname),
-                ],
+                (cls.firstname != None, cls.firstname + " " + cls.lastname),
                 else_=cls.lastname,
             )
 
@@ -103,9 +103,9 @@ follows::
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
-        firstname = Column(String(50))
-        lastname = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        firstname = mapped_column(String(50))
+        lastname = mapped_column(String(50))
         fullname = column_property(firstname + " " + lastname)
 
 Correlated subqueries may be used as well. Below we use the
@@ -117,20 +117,22 @@ of ``Address`` objects available for a particular ``User``::
     from sqlalchemy import select, func
     from sqlalchemy import Column, Integer, String, ForeignKey
 
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Address(Base):
         __tablename__ = "address"
-        id = Column(Integer, primary_key=True)
-        user_id = Column(Integer, ForeignKey("user.id"))
+        id = mapped_column(Integer, primary_key=True)
+        user_id = mapped_column(Integer, ForeignKey("user.id"))
 
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
         address_count = column_property(
             select(func.count(Address.id))
             .where(Address.user_id == id)
@@ -166,10 +168,36 @@ being inadvertently omitted from the FROM list in the case of a long string
 of joins between ``User`` and ``Address`` tables where SELECT statements against
 ``Address`` are nested.
 
+For a :func:`.column_property` that refers to columns linked from a
+many-to-many relationship, use :func:`.and_` to join the fields of the
+association table to both tables in a relationship::
+
+    from sqlalchemy import and_
+
+
+    class Author(Base):
+        # ...
+
+        book_count = column_property(
+            select(func.count(books.c.id))
+            .where(
+                and_(
+                    book_authors.c.author_id == authors.c.id,
+                    book_authors.c.book_id == books.c.id,
+                )
+            )
+            .scalar_subquery()
+        )
+
+Adding column_property() to an existing Declarative mapped class
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
 If import issues prevent the :func:`.column_property` from being defined
 inline with the class, it can be assigned to the class after both
-are configured.   When using mappings that make use of a :func:`_orm.declarative_base`
-base class, this attribute assignment has the effect of calling :meth:`_orm.Mapper.add_property`
+are configured.   When using mappings that make use of a Declarative
+base class (i.e. produced by the :class:`_orm.DeclarativeBase` superclass
+or legacy functions such as :func:`_orm.declarative_base`),
+this attribute assignment has the effect of calling :meth:`_orm.Mapper.add_property`
 to add an additional property after the fact::
 
     # only works if a declarative base class is in use
@@ -177,7 +205,7 @@ to add an additional property after the fact::
         select(func.count(Address.id)).where(Address.user_id == User.id).scalar_subquery()
     )
 
-When using mapping styles that don't use :func:`_orm.declarative_base`,
+When using mapping styles that don't use Declarative base classes
 such as the :meth:`_orm.registry.mapped` decorator, the :meth:`_orm.Mapper.add_property`
 method may be invoked explicitly on the underlying :class:`_orm.Mapper` object,
 which can be obtained using :func:`_sa.inspect`::
@@ -207,26 +235,10 @@ which can be obtained using :func:`_sa.inspect`::
         )
     )
 
-For a :func:`.column_property` that refers to columns linked from a
-many-to-many relationship, use :func:`.and_` to join the fields of the
-association table to both tables in a relationship::
+.. seealso::
 
-    from sqlalchemy import and_
+  :ref:`orm_declarative_table_adding_columns`
 
-
-    class Author(Base):
-        # ...
-
-        book_count = column_property(
-            select(func.count(books.c.id))
-            .where(
-                and_(
-                    book_authors.c.author_id == authors.c.id,
-                    book_authors.c.book_id == books.c.id,
-                )
-            )
-            .scalar_subquery()
-        )
 
 .. _mapper_column_property_sql_expressions_composed:
 
@@ -250,9 +262,9 @@ attribute, which is itself a :class:`.ColumnProperty`::
     class File(Base):
         __tablename__ = "file"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(64))
-        extension = Column(String(8))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(64))
+        extension = mapped_column(String(8))
         filename = column_property(name + "." + extension)
         path = column_property("C:/" + filename.expression)
 
@@ -261,7 +273,32 @@ assigned to ``filename`` and ``path`` are usable directly.  The use of the
 :attr:`.ColumnProperty.expression` attribute is only necessary when using
 the :class:`.ColumnProperty` directly within the mapping definition::
 
-    q = session.query(File.path).filter(File.filename == "foo.txt")
+    stmt = select(File.path).where(File.filename == "foo.txt")
+
+Using Column Deferral with ``column_property()``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The column deferral feature introduced in the :ref:`queryguide_toplevel`
+at :ref:`orm_queryguide_column_deferral` may be applied at mapping time
+to a SQL expression mapped by :func:`_orm.column_property` by using the
+:func:`_orm.deferred` function in place of :func:`_orm.column_property`::
+
+    from sqlalchemy.orm import deferred
+
+
+    class User(Base):
+        __tablename__ = "user"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        firstname: Mapped[str] = mapped_column()
+        lastname: Mapped[str] = mapped_column()
+        fullname: Mapped[str] = deferred(firstname + " " + lastname)
+
+.. seealso::
+
+    :ref:`orm_queryguide_deferred_imperative`
+
+
 
 Using a plain descriptor
 ------------------------
@@ -281,9 +318,9 @@ which is then used to emit a query::
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
-        firstname = Column(String(50))
-        lastname = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        firstname = mapped_column(String(50))
+        lastname = mapped_column(String(50))
 
         @property
         def address_count(self):
@@ -300,94 +337,11 @@ it needs to emit a SQL query upon each access.
 Query-time SQL expressions as mapped attributes
 -----------------------------------------------
 
-When using :meth:`.Session.query`, we have the option to specify not just
-mapped entities but ad-hoc SQL expressions as well.  Suppose if a class
-``A`` had integer attributes ``.x`` and ``.y``, we could query for ``A``
-objects, and additionally the sum of ``.x`` and ``.y``, as follows::
-
-    q = session.query(A, A.x + A.y)
-
-The above query returns tuples of the form ``(A object, integer)``.
-
-An option exists which can apply the ad-hoc ``A.x + A.y`` expression to the
-returned ``A`` objects instead of as a separate tuple entry; this is the
-:func:`.with_expression` query option in conjunction with the
-:func:`.query_expression` attribute mapping.    The class is mapped
-to include a placeholder attribute where any particular SQL expression
-may be applied::
-
-    from sqlalchemy.orm import query_expression
-
-
-    class A(Base):
-        __tablename__ = "a"
-        id = Column(Integer, primary_key=True)
-        x = Column(Integer)
-        y = Column(Integer)
-
-        expr = query_expression()
-
-We can then query for objects of type ``A``, applying an arbitrary
-SQL expression to be populated into ``A.expr``::
-
-    from sqlalchemy.orm import with_expression
-
-    q = session.query(A).options(with_expression(A.expr, A.x + A.y))
-
-The :func:`.query_expression` mapping has these caveats:
-
-* On an object where :func:`.query_expression` were not used to populate
-  the attribute, the attribute on an object instance will have the value
-  ``None``, unless the :paramref:`_orm.query_expression.default_expr`
-  parameter is set to an alternate SQL expression.
-
-* The query_expression value **does not populate on an object that is
-  already loaded**.  That is, this will **not work**::
-
-    obj = session.query(A).first()
-
-    obj = session.query(A).options(with_expression(A.expr, some_expr)).first()
-
-  To ensure the attribute is re-loaded, use :meth:`_orm.Query.populate_existing`::
-
-    obj = (
-        session.query(A)
-        .populate_existing()
-        .options(with_expression(A.expr, some_expr))
-        .first()
-    )
-
-* The query_expression value **does not refresh when the object is
-  expired**.  Once the object is expired, either via :meth:`.Session.expire`
-  or via the expire_on_commit behavior of :meth:`.Session.commit`, the value is
-  removed from the attribute and will return ``None`` on subsequent access.
-  Only by running a new :class:`_query.Query` that touches the object which includes
-  a new :func:`.with_expression` directive will the attribute be set to a
-  non-None value.
-
-* The mapped attribute currently **cannot** be applied to other parts of the
-  query, such as the WHERE clause, the ORDER BY clause, and make use of the
-  ad-hoc expression; that is, this won't work::
-
-    # wont work
-    q = (
-        session.query(A)
-        .options(with_expression(A.expr, A.x + A.y))
-        .filter(A.expr > 5)
-        .order_by(A.expr)
-    )
-
-  The ``A.expr`` expression will resolve to NULL in the above WHERE clause
-  and ORDER BY clause. To use the expression throughout the query, assign to a
-  variable and use that::
-
-    a_expr = A.x + A.y
-    q = (
-        session.query(A)
-        .options(with_expression(A.expr, a_expr))
-        .filter(a_expr > 5)
-        .order_by(a_expr)
-    )
-
-.. versionadded:: 1.2
+In addition to being able to configure fixed SQL expressions on mapped classes,
+the SQLAlchemy ORM also includes a feature wherein objects may be loaded
+with the results of arbitrary SQL expressions which are set up at query time as part
+of their state.  This behavior is available by configuring an ORM mapped
+attribute using :func:`_orm.query_expression` and then using the
+:func:`_orm.with_expression` loader option at query time.  See the section
+:ref:`orm_queryguide_with_expression` for an example mapping and usage.
 

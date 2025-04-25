@@ -10,6 +10,8 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.entities import BasicEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -17,6 +19,7 @@ from sqlalchemy.testing.schema import Table
 
 class TriggerDefaultsTest(fixtures.MappedTest):
     __requires__ = ("row_triggers",)
+    __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
@@ -39,6 +42,7 @@ class TriggerDefaultsTest(fixtures.MappedTest):
                 sa.schema.FetchedValue(),
                 sa.schema.FetchedValue(for_update=True),
             ),
+            implicit_returning=False,
         )
 
         dialect_name = testing.db.dialect.name
@@ -206,7 +210,7 @@ class ExcludedDefaultsTest(fixtures.MappedTest):
     def test_exclude(self):
         dt = self.tables.dt
 
-        class Foo(fixtures.BasicEntity):
+        class Foo(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -278,31 +282,31 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
 
         asserter.assert_(
             Conditional(
-                eager and testing.db.dialect.implicit_returning,
+                eager and testing.db.dialect.insert_returning,
                 [
                     Conditional(
                         testing.db.dialect.insert_executemany_returning,
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (id, foo) "
-                                "VALUES (%(id)s, %(foo)s) "
-                                "RETURNING test.bar",
+                            RegexSQL(
+                                r"INSERT INTO test \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.bar, test.id",
                                 [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
                                 dialect="postgresql",
                             ),
                         ],
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (id, foo) "
-                                "VALUES (%(id)s, %(foo)s) "
-                                "RETURNING test.bar",
+                            RegexSQL(
+                                r"INSERT INTO test \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.bar, test.id",
                                 [{"foo": 5, "id": 1}],
                                 dialect="postgresql",
                             ),
-                            CompiledSQL(
-                                "INSERT INTO test (id, foo) "
-                                "VALUES (%(id)s, %(foo)s) "
-                                "RETURNING test.bar",
+                            RegexSQL(
+                                r"INSERT INTO test \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.bar, test.id",
                                 [{"foo": 10, "id": 2}],
                                 dialect="postgresql",
                             ),
@@ -361,7 +365,7 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
             eq_(t1.bar, 5 + 42)
             eq_(t2.bar, 6 + 42)
 
-        if eager and testing.db.dialect.implicit_returning:
+        if eager and testing.db.dialect.update_returning:
             asserter.assert_(
                 CompiledSQL(
                     "UPDATE test SET foo=%(foo)s "
@@ -382,21 +386,20 @@ class ComputedDefaultsOnUpdateTest(fixtures.MappedTest):
             asserter.assert_(
                 CompiledSQL(
                     "UPDATE test SET foo=:foo WHERE test.id = :test_id",
-                    [{"foo": 5, "test_id": 1}],
-                ),
-                CompiledSQL(
-                    "UPDATE test SET foo=:foo WHERE test.id = :test_id",
-                    [{"foo": 6, "test_id": 2}],
+                    [{"foo": 5, "test_id": 1}, {"foo": 6, "test_id": 2}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
                     "WHERE test.id = :pk_1",
                     [{"pk_1": 1}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "SELECT test.bar AS test_bar FROM test "
                     "WHERE test.id = :pk_1",
                     [{"pk_1": 2}],
+                    enable_returning=False,
                 ),
             )
         else:
@@ -462,28 +465,28 @@ class IdentityDefaultsOnUpdateTest(fixtures.MappedTest):
 
         asserter.assert_(
             Conditional(
-                testing.db.dialect.implicit_returning,
+                testing.db.dialect.insert_returning,
                 [
                     Conditional(
                         testing.db.dialect.insert_executemany_returning,
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (foo) VALUES (%(foo)s) "
-                                "RETURNING test.id",
+                            RegexSQL(
+                                r"INSERT INTO test \(foo\).*VALUES (.*).* "
+                                r"RETURNING test.id, test.id AS id__1",
                                 [{"foo": 5}, {"foo": 10}],
                                 dialect="postgresql",
                             ),
                         ],
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (foo) VALUES (%(foo)s) "
-                                "RETURNING test.id",
+                            RegexSQL(
+                                r"INSERT INTO test \(foo\).*VALUES (.*).* "
+                                r"RETURNING test.id, test.id AS id__1",
                                 [{"foo": 5}],
                                 dialect="postgresql",
                             ),
-                            CompiledSQL(
-                                "INSERT INTO test (foo) VALUES (%(foo)s) "
-                                "RETURNING test.id",
+                            RegexSQL(
+                                r"INSERT INTO test \(foo\).*VALUES (.*).* "
+                                r"RETURNING test.id, test.id AS id__1",
                                 [{"foo": 10}],
                                 dialect="postgresql",
                             ),

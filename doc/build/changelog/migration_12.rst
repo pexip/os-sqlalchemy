@@ -87,7 +87,9 @@ Given a query as below::
     )
 
 The SQL produced would be the query against ``User`` followed by the
-subqueryload for ``User.addresses`` (note the parameters are also listed)::
+subqueryload for ``User.addresses`` (note the parameters are also listed):
+
+.. sourcecode:: sql
 
     SELECT users.id AS users_id, users.name AS users_name
     FROM users
@@ -114,7 +116,9 @@ actual primary key values loaded in the parent query::
         .options(selectinload(User.addresses))
     )
 
-Produces::
+Produces:
+
+.. sourcecode:: sql
 
     SELECT users.id AS users_id, users.name AS users_name
     FROM users
@@ -176,16 +180,16 @@ loading that allows the loading of the base entity to proceed with a simple
 SELECT statement, but then the attributes of the additional subclasses
 are loaded with additional SELECT statements:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
-    from sqlalchemy.orm import selectin_polymorphic
+    >>> from sqlalchemy.orm import selectin_polymorphic
 
-    query = session.query(Employee).options(
-        selectin_polymorphic(Employee, [Manager, Engineer])
-    )
+    >>> query = session.query(Employee).options(
+    ...     selectin_polymorphic(Employee, [Manager, Engineer])
+    ... )
 
-    {opensql}query.all()
-    SELECT
+    >>> query.all()
+    {execsql}SELECT
         employee.id AS employee_id,
         employee.name AS employee_name,
         employee.type AS employee_type
@@ -574,7 +578,7 @@ query across the two proxies ``A.b_values``, ``AtoB.b_value``:
 .. sourcecode:: pycon+sql
 
     >>> s.query(A).filter(A.b_values.contains("hi")).all()
-    {opensql}SELECT a.id AS a_id
+    {execsql}SELECT a.id AS a_id
     FROM a
     WHERE EXISTS (SELECT 1
     FROM atob
@@ -588,7 +592,7 @@ to query across the two proxies ``A.c_values``, ``AtoB.c_value``:
 .. sourcecode:: pycon+sql
 
     >>> s.query(A).filter(A.c_values.any(value="x")).all()
-    {opensql}SELECT a.id AS a_id
+    {execsql}SELECT a.id AS a_id
     FROM a
     WHERE EXISTS (SELECT 1
     FROM atob
@@ -740,7 +744,9 @@ this condition is also removed.  The old behavior is available using the
 
 In SQL, the IN and NOT IN operators do not support comparison to a
 collection of values that is explicitly empty; meaning, this syntax is
-illegal::
+illegal:
+
+.. sourcecode:: sql
 
     mycolumn IN ()
 
@@ -779,7 +785,9 @@ questioned.  The notion that the expression "NULL IN ()" should return NULL was
 only theoretical, and could not be tested since databases don't support that
 syntax.  However, as it turns out, you can in fact ask a relational database
 what value it would return for "NULL IN ()" by simulating the empty set as
-follows::
+follows:
+
+.. sourcecode:: sql
 
     SELECT NULL IN (SELECT 1 WHERE 1 != 1)
 
@@ -830,8 +838,7 @@ new feature allows the related features of "select in" loading and
 "polymorphic in" loading to make use of the baked query extension
 to reduce call overhead::
 
-    stmt = select([table]).where(
-        table.c.col.in_(bindparam('foo', expanding=True))
+    stmt = select([table]).where(table.c.col.in_(bindparam("foo", expanding=True)))
     conn.execute(stmt, {"foo": [1, 2, 3]})
 
 The feature should be regarded as **experimental** within the 1.2 series.
@@ -905,7 +912,9 @@ Given a statement as::
     conn.execute(stmt)
 
 The resulting SQL from the above statement on a PostgreSQL backend
-would render as::
+would render as:
+
+.. sourcecode:: sql
 
     DELETE FROM users USING addresses
     WHERE users.id = addresses.id
@@ -940,7 +949,9 @@ An expression such as::
 
     >>> column("x").startswith("total%score", autoescape=True)
 
-Renders as::
+Renders as:
+
+.. sourcecode:: sql
 
     x LIKE :x_1 || '%' ESCAPE '/'
 
@@ -1014,7 +1025,9 @@ All three of GROUPING SETS, CUBE, ROLLUP are available via the
 :attr:`.func` namespace.  In the case of CUBE and ROLLUP, these functions
 already work in previous versions, however for GROUPING SETS, a placeholder
 is added to the compiler to allow for the space.  All three functions
-are named in the documentation now::
+are named in the documentation now:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import select, table, column, func, tuple_
     >>> t = table("t", column("value"), column("x"), column("y"), column("z"), column("q"))
@@ -1025,7 +1038,7 @@ are named in the documentation now::
     ...     )
     ... )
     >>> print(stmt)
-    SELECT sum(t.value) AS sum_1
+    {printsql}SELECT sum(t.value) AS sum_1
     FROM t GROUP BY GROUPING SETS((t.x, t.y), (t.z, t.q))
 
 :ticket:`3429`
@@ -1126,7 +1139,9 @@ Supposing ``Manager`` is a subclass of ``Employee``.  A query like the following
 
     sess.query(Manager.id)
 
-Would generate SQL as::
+Would generate SQL as:
+
+.. sourcecode:: sql
 
     SELECT employee.id FROM employee WHERE employee.type IN ('manager')
 
@@ -1135,11 +1150,15 @@ and not in the columns list, the discriminator would not be added::
 
     sess.query(func.count(1)).select_from(Manager)
 
-would generate::
+would generate:
+
+.. sourcecode:: sql
 
     SELECT count(1) FROM employee
 
-With the fix, :meth:`_query.Query.select_from` now works correctly and we get::
+With the fix, :meth:`_query.Query.select_from` now works correctly and we get:
+
+.. sourcecode:: sql
 
     SELECT count(1) FROM employee WHERE employee.type IN ('manager')
 
@@ -1351,7 +1370,9 @@ overwrite it::
 
 Above, the previous behavior would be that an UPDATE would emit after the
 INSERT, thus triggering the "onupdate" and overwriting the value
-"5".   The SQL now looks like::
+"5".   The SQL now looks like:
+
+.. sourcecode:: sql
 
     INSERT INTO a (favorite_b_id, updated) VALUES (?, ?)
     (None, 5)
@@ -1478,10 +1499,12 @@ in all cases, including for :class:`_types.ARRAY` and :class:`_types.JSON`::
 
 To assist with boolean comparison operators, a new shorthand method
 :meth:`.Operators.bool_op` has been added.    This method should be preferred
-for on-the-fly boolean operators::
+for on-the-fly boolean operators:
+
+.. sourcecode:: pycon+sql
 
     >>> print(column("x", types.Integer).bool_op("-%>")(5))
-    x -%> :x_1
+    {printsql}x -%> :x_1
 
 
 .. _change_3740:
@@ -1494,23 +1517,27 @@ conditionally, based on whether or not the DBAPI in use makes use of a
 percent-sign-sensitive paramstyle or not (e.g. 'format' or 'pyformat').
 
 Previously, it was not possible to produce a :obj:`_expression.literal_column`
-construct that stated a single percent sign::
+construct that stated a single percent sign:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import literal_column
     >>> print(literal_column("some%symbol"))
-    some%%symbol
+    {printsql}some%%symbol
 
 The percent sign is now unaffected for dialects that are not set to
 use the 'format' or 'pyformat' paramstyles; dialects such most MySQL
 dialects which do state one of these paramstyles will continue to escape
-as is appropriate::
+as is appropriate:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import literal_column
     >>> print(literal_column("some%symbol"))
-    some%symbol
+    {printsql}some%symbol{stop}
     >>> from sqlalchemy.dialects import mysql
     >>> print(literal_column("some%symbol").compile(dialect=mysql.dialect()))
-    some%%symbol
+    {printsql}some%%symbol{stop}
 
 As part of this change, the doubling that has been present when using
 operators like :meth:`.ColumnOperators.contains`,
@@ -1533,7 +1560,9 @@ is fixed, where a case sensitive name would not be quoted::
         mytable.c.somecolumn.collate("fr_FR")
     )
 
-now renders::
+now renders:
+
+.. sourcecode:: sql
 
     SELECT mytable.x, mytable.y,
     FROM mytable ORDER BY mytable.somecolumn COLLATE "fr_FR"
@@ -1557,7 +1586,7 @@ Support for Batch Mode / Fast Execution Helpers
 
 The psycopg2 ``cursor.executemany()`` method has been identified as performing
 poorly, particularly with INSERT statements.   To alleviate this, psycopg2
-has added `Fast Execution Helpers <https://initd.org/psycopg/docs/extras.html#fast-execution-helpers>`_
+has added `Fast Execution Helpers <https://www.psycopg.org/docs/extras.html#fast-execution-helpers>`_
 which rework statements into fewer server round trips by sending multiple
 DML statements in batch.   SQLAlchemy 1.2 now includes support for these
 helpers to be used transparently whenever the :class:`_engine.Engine` makes use
@@ -1628,7 +1657,9 @@ This :class:`_expression.Insert` subclass adds a new method
 
     conn.execute(on_conflict_stmt)
 
-The above will render::
+The above will render:
+
+.. sourcecode:: sql
 
     INSERT INTO my_table (id, data)
     VALUES (:id, :data)

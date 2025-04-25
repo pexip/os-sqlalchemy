@@ -71,7 +71,6 @@ class CompileTest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
-
     """test the usage of text() implicit within the select() construct
     when strings are passed."""
 
@@ -179,8 +178,9 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
             select(table1.alias("t"), text("foo.f"))
             .where(text("foo.f = t.id"))
             .select_from(text("(select f from bar where lala=heyhey) foo")),
-            "SELECT t.myid, t.name, t.description, foo.f FROM mytable AS t, "
-            "(select f from bar where lala=heyhey) foo WHERE foo.f = t.id",
+            "SELECT t.myid, t.name, t.description, foo.f FROM "
+            "(select f from bar where lala=heyhey) foo, "
+            "mytable AS t WHERE foo.f = t.id",
         )
 
     def test_expression_element_role(self):
@@ -214,7 +214,6 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
         ),
     )
     def test_select_composition_nine(self, label_style, expected):
-
         s1 = select(table1.c.myid, text("whatever"))
         if label_style:
             s1 = s1.set_label_style(label_style)
@@ -256,7 +255,6 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
         ),
     )
     def test_select_composition_ten(self, label_style, expected):
-
         s1 = select(table1.c.myid, text("whatever"))
         if label_style:
             s1 = s1.set_label_style(label_style)
@@ -283,7 +281,6 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
         ),
     )
     def test_select_composition_eleven(self, label_style, expected):
-
         stmt = select(table1.c.myid, text("whatever"))
         if label_style:
             stmt = stmt.set_label_style(label_style)
@@ -300,7 +297,6 @@ class SelectCompositionTest(fixtures.TestBase, AssertsCompiledSQL):
         ),
     )
     def test_select_selected_columns_ignores_text(self, label_style, expected):
-
         stmt = select(table1.c.myid, text("whatever"), table1.c.description)
         if label_style:
             stmt = stmt.set_label_style(label_style)
@@ -373,7 +369,7 @@ class BindParamTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def _assert_type_map(self, t, compare):
-        map_ = dict((b.key, b.type) for b in t._bindparams.values())
+        map_ = {b.key: b.type for b in t._bindparams.values()}
         for k in compare:
             assert compare[k]._type_affinity is map_[k]._type_affinity
 
@@ -474,7 +470,7 @@ class BindParamTest(fixtures.TestBase, AssertsCompiledSQL):
                 r"SELECT * FROM pg_attribute WHERE "
                 r"attrelid = :tab\:\:regclass"
             ),
-            "SELECT * FROM pg_attribute WHERE " "attrelid = %(tab)s::regclass",
+            "SELECT * FROM pg_attribute WHERE attrelid = %(tab)s::regclass",
             params={"tab": None},
             dialect="postgresql",
         )
@@ -487,13 +483,12 @@ class BindParamTest(fixtures.TestBase, AssertsCompiledSQL):
                 r"SELECT * FROM pg_attribute WHERE "
                 r"attrelid = foo::regclass"
             ),
-            "SELECT * FROM pg_attribute WHERE " "attrelid = foo::regclass",
+            "SELECT * FROM pg_attribute WHERE attrelid = foo::regclass",
             params={},
             dialect="postgresql",
         )
 
     def test_text_in_select_nonfrom(self):
-
         generate_series = text(
             "generate_series(:x, :y, :z) as s(a)"
         ).bindparams(x=None, y=None, z=None)
@@ -641,11 +636,11 @@ class AsFromTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def _mapping(self, stmt):
         compiled = stmt.compile()
-        return dict(
-            (elem, key)
+        return {
+            elem: key
             for key, elements in compiled._create_result_map().items()
             for elem in elements[1]
-        )
+        }
 
     def test_select_label_alt_name(self):
         t = self._xy_table_fixture()
@@ -688,6 +683,19 @@ class AsFromTest(fixtures.TestBase, AssertsCompiledSQL):
         mapping = self._mapping(s)
         assert x not in mapping
 
+    def test_subquery_accessors(self):
+        t = self._xy_table_fixture()
+
+        s = text("SELECT x from t").columns(t.c.x)
+
+        self.assert_compile(
+            select(s.scalar_subquery()), "SELECT (SELECT x from t) AS anon_1"
+        )
+        self.assert_compile(
+            select(s.subquery()),
+            "SELECT anon_1.x FROM (SELECT x from t) AS anon_1",
+        )
+
     def test_select_label_alt_name_table_alias_column(self):
         t = self._xy_table_fixture()
         x = t.c.x
@@ -714,6 +722,36 @@ class AsFromTest(fixtures.TestBase, AssertsCompiledSQL):
             "WITH t AS (select id, name from user) "
             "SELECT mytable.myid, mytable.name, mytable.description "
             "FROM mytable, t WHERE mytable.myid = t.id",
+        )
+
+    def test_cte_recursive(self):
+        t = (
+            text("select id, name from user")
+            .columns(id=Integer, name=String)
+            .cte("t", recursive=True)
+        )
+
+        s = select(table1).where(table1.c.myid == t.c.id)
+        self.assert_compile(
+            s,
+            "WITH RECURSIVE t(id, name) AS (select id, name from user) "
+            "SELECT mytable.myid, mytable.name, mytable.description "
+            "FROM mytable, t WHERE mytable.myid = t.id",
+        )
+
+    def test_unions(self):
+        s1 = text("select id, name from user where id > 5").columns(
+            id=Integer, name=String
+        )
+        s2 = text("select id, name from user where id < 15").columns(
+            id=Integer, name=String
+        )
+        stmt = union(s1, s2)
+        eq_(stmt.selected_columns.keys(), ["id", "name"])
+        self.assert_compile(
+            stmt,
+            "select id, name from user where id > 5 UNION "
+            "select id, name from user where id < 15",
         )
 
     def test_subquery(self):
@@ -771,7 +809,7 @@ class AsFromTest(fixtures.TestBase, AssertsCompiledSQL):
         t = t.bindparams(bar=String)
         t = t.bindparams(bindparam("bat", value="bat"))
 
-        eq_(set(t.element._bindparams), set(["bat", "foo", "bar"]))
+        eq_(set(t.element._bindparams), {"bat", "foo", "bar"})
 
 
 class TextErrorsTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -786,7 +824,7 @@ class TextErrorsTest(fixtures.TestBase, AssertsCompiledSQL):
             r"explicitly declared (?:with|as) text\(%(stmt)r\)"
             % {"stmt": util.ellipses_string(offending_clause)},
             fn,
-            *arg
+            *arg,
         )
 
     def test_where(self):
@@ -858,7 +896,6 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
         (column("q").op("+")(5).label("a"), "a DESC", (desc,)),
     )
     def test_order_by_expr(self, case, expected, modifiers):
-
         order_by = case
         for mod in modifiers:
             order_by = mod(order_by)
@@ -898,7 +935,6 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
         self._test_exception(stmt, "foobar")
 
     def test_distinct_label(self):
-
         stmt = select(table1.c.myid.label("foo")).distinct("foo")
         self.assert_compile(
             stmt,
@@ -907,7 +943,6 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_distinct_label_keyword(self):
-
         stmt = select(table1.c.myid.label("foo")).distinct("foo")
         self.assert_compile(
             stmt,
@@ -980,7 +1015,7 @@ class OrderByLabelResolutionTest(fixtures.TestBase, AssertsCompiledSQL):
             '"SUM(ABC)_"',
         )
 
-    def test_order_by_literal_col_quoting_one_explict_quote(self):
+    def test_order_by_literal_col_quoting_one_explicit_quote(self):
         col = literal_column("SUM(ABC)").label(quoted_name("SUM(ABC)", True))
         tbl = table("my_table")
         query = select(col).select_from(tbl).order_by(col)

@@ -1,3 +1,7 @@
+from unittest.mock import Mock
+from unittest.mock import patch
+import uuid
+
 from sqlalchemy import cast
 from sqlalchemy import DateTime
 from sqlalchemy import event
@@ -6,6 +10,8 @@ from sqlalchemy import FetchedValue
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import Identity
+from sqlalchemy import insert
+from sqlalchemy import insert_sentinel
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import JSON
@@ -16,6 +22,7 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import text
 from sqlalchemy import util
+from sqlalchemy import Uuid
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import clear_mappers
@@ -29,20 +36,24 @@ from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import config
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing import variation_fixture
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.assertsql import Conditional
+from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.entities import BasicEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
-from sqlalchemy.testing.mock import Mock
-from sqlalchemy.testing.mock import patch
+from sqlalchemy.testing.provision import normalize_sequence
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
 
 
-class AssertsUOW(object):
+class AssertsUOW:
     def _get_test_uow(self, session):
         uow = unitofwork.UOWTransaction(session)
         deleted = set(session._deleted)
@@ -97,7 +108,8 @@ class RudimentaryFlushTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO addresses (user_id, email_address) "
-                        "VALUES (:user_id, :email_address)",
+                        "VALUES (:user_id, :email_address) "
+                        "RETURNING addresses.id",
                         lambda ctx: [
                             {"email_address": "a1", "user_id": u1.id},
                             {"email_address": "a2", "user_id": u1.id},
@@ -219,7 +231,8 @@ class RudimentaryFlushTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO addresses (user_id, email_address) "
-                        "VALUES (:user_id, :email_address)",
+                        "VALUES (:user_id, :email_address) "
+                        "RETURNING addresses.id",
                         lambda ctx: [
                             {"email_address": "a1", "user_id": u1.id},
                             {"email_address": "a2", "user_id": u1.id},
@@ -888,7 +901,7 @@ class SingleCycleTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO nodes (parent_id, data) VALUES "
-                        "(:parent_id, :data)",
+                        "(:parent_id, :data) RETURNING nodes.id",
                         lambda ctx: [
                             {"parent_id": n1.id, "data": "n2"},
                             {"parent_id": n1.id, "data": "n3"},
@@ -1002,7 +1015,7 @@ class SingleCycleTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO nodes (parent_id, data) VALUES "
-                        "(:parent_id, :data)",
+                        "(:parent_id, :data) RETURNING nodes.id",
                         lambda ctx: [
                             {"parent_id": n1.id, "data": "n2"},
                             {"parent_id": n1.id, "data": "n3"},
@@ -1164,7 +1177,7 @@ class SingleCycleTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO nodes (parent_id, data) VALUES "
-                        "(:parent_id, :data)",
+                        "(:parent_id, :data) RETURNING nodes.id",
                         lambda ctx: [
                             {"parent_id": n1.id, "data": "n11"},
                             {"parent_id": n1.id, "data": "n12"},
@@ -1195,7 +1208,7 @@ class SingleCycleTest(UOWTest):
                 [
                     CompiledSQL(
                         "INSERT INTO nodes (parent_id, data) VALUES "
-                        "(:parent_id, :data)",
+                        "(:parent_id, :data) RETURNING nodes.id",
                         lambda ctx: [
                             {"parent_id": n12.id, "data": "n121"},
                             {"parent_id": n12.id, "data": "n122"},
@@ -1361,10 +1374,10 @@ class SingleCyclePlusAttributeTest(
     def test_flush_size(self):
         foobars, nodes = self.tables.foobars, self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             pass
 
-        class FooBar(fixtures.ComparableEntity):
+        class FooBar(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1429,7 +1442,7 @@ class SingleCycleM2MTest(
     def test_many_to_many_one(self):
         nodes, node_to_nodes = self.tables.nodes, self.tables.node_to_nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1573,10 +1586,10 @@ class RowswitchAccountingTest(fixtures.MappedTest):
     def _fixture(self):
         parent, child = self.tables.parent, self.tables.child
 
-        class Parent(fixtures.BasicEntity):
+        class Parent(BasicEntity):
             pass
 
-        class Child(fixtures.BasicEntity):
+        class Child(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1597,7 +1610,7 @@ class RowswitchAccountingTest(fixtures.MappedTest):
     def test_switch_on_update(self):
         Parent, Child = self._fixture()
 
-        sess = fixture_session(autocommit=False)
+        sess = fixture_session()
 
         p1 = Parent(id=1, child=Child())
         sess.add(p1)
@@ -1667,13 +1680,13 @@ class RowswitchM2OTest(fixtures.MappedTest):
     def _fixture(self):
         a, b, c = self.tables.a, self.tables.b, self.tables.c
 
-        class A(fixtures.BasicEntity):
+        class A(BasicEntity):
             pass
 
-        class B(fixtures.BasicEntity):
+        class B(BasicEntity):
             pass
 
-        class C(fixtures.BasicEntity):
+        class C(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1776,10 +1789,10 @@ class BasicStaleChecksTest(fixtures.MappedTest):
     def _fixture(self, confirm_deleted_rows=True):
         parent, child = self.tables.parent, self.tables.child
 
-        class Parent(fixtures.BasicEntity):
+        class Parent(BasicEntity):
             pass
 
-        class Child(fixtures.BasicEntity):
+        class Child(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -2070,10 +2083,10 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
 
         t = self.tables.t
 
-        class T(fixtures.ComparableEntity):
+        class T(ComparableEntity):
             pass
 
-        self.mapper_registry.map_imperatively(T, t)
+        mp = self.mapper_registry.map_imperatively(T, t)
         sess = fixture_session()
         sess.add_all(
             [
@@ -2091,6 +2104,17 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
             ]
         )
 
+        eager_defaults = mp._prefer_eager_defaults(
+            testing.db.dialect, mp.local_table
+        )
+
+        if eager_defaults:
+            tdef_col = ", t.def_"
+            tdef_returning = " RETURNING t.def_"
+        else:
+            tdef_col = ""
+            tdef_returning = ""
+
         self.assert_sql_execution(
             testing.db,
             sess.flush,
@@ -2098,7 +2122,8 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
                 testing.db.dialect.insert_executemany_returning,
                 [
                     CompiledSQL(
-                        "INSERT INTO t (data) VALUES (:data)",
+                        f"INSERT INTO t (data) VALUES (:data) "
+                        f"RETURNING t.id{tdef_col}",
                         [{"data": "t1"}, {"data": "t2"}],
                     ),
                 ],
@@ -2112,7 +2137,8 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
                 ],
             ),
             CompiledSQL(
-                "INSERT INTO t (id, data) VALUES (:id, :data)",
+                f"INSERT INTO t (id, data) "
+                f"VALUES (:id, :data){tdef_returning}",
                 [
                     {"data": "t3", "id": 3},
                     {"data": "t4", "id": 4},
@@ -2120,11 +2146,13 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
                 ],
             ),
             CompiledSQL(
-                "INSERT INTO t (id, data) VALUES (:id, lower(:lower_1))",
+                f"INSERT INTO t (id, data) "
+                f"VALUES (:id, lower(:lower_1)){tdef_returning}",
                 {"lower_1": "t6", "id": 6},
             ),
             CompiledSQL(
-                "INSERT INTO t (id, data) VALUES (:id, :data)",
+                f"INSERT INTO t (id, data) "
+                f"VALUES (:id, :data){tdef_returning}",
                 [{"data": "t7", "id": 7}, {"data": "t8", "id": 8}],
             ),
             CompiledSQL(
@@ -2135,14 +2163,14 @@ class BatchInsertsTest(fixtures.MappedTest, testing.AssertsExecutionResults):
                 ],
             ),
             CompiledSQL(
-                "INSERT INTO t (id, data) VALUES (:id, :data)",
+                f"INSERT INTO t (id, data) "
+                f"VALUES (:id, :data){tdef_returning}",
                 {"data": "t11", "id": 11},
             ),
         )
 
 
 class LoadersUsingCommittedTest(UOWTest):
-
     """Test that events which occur within a flush()
     get the same attribute loading behavior as on the outside
     of the flush, and that the unit of work itself uses the
@@ -2231,7 +2259,6 @@ class LoadersUsingCommittedTest(UOWTest):
         Address, User = self.classes.Address, self.classes.User
 
         class AvoidReferencialError(Exception):
-
             """the test here would require ON UPDATE CASCADE on FKs
             for the flush to fully succeed; this exception is used
             to cancel the flush before we get that far.
@@ -2352,6 +2379,21 @@ class EagerDefaultsTest(fixtures.MappedTest):
             Column("bar", Integer, server_onupdate=FetchedValue()),
         )
 
+        Table(
+            "test3",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("foo", String(50), default=func.lower("HI")),
+        )
+
+        Table(
+            "test4",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("foo", Integer),
+            Column("bar", Integer, onupdate=text("5 + 3")),
+        )
+
     @classmethod
     def setup_classes(cls):
         class Thing(cls.Basic):
@@ -2360,21 +2402,39 @@ class EagerDefaultsTest(fixtures.MappedTest):
         class Thing2(cls.Basic):
             pass
 
-    @classmethod
-    def setup_mappers(cls):
-        Thing = cls.classes.Thing
+        class Thing3(cls.Basic):
+            pass
 
-        cls.mapper_registry.map_imperatively(
-            Thing, cls.tables.test, eager_defaults=True
+        class Thing4(cls.Basic):
+            pass
+
+    def setup_mappers(self):
+        eager_defaults = True
+        Thing = self.classes.Thing
+
+        self.mapper_registry.map_imperatively(
+            Thing, self.tables.test, eager_defaults=eager_defaults
         )
 
-        Thing2 = cls.classes.Thing2
+        Thing2 = self.classes.Thing2
 
-        cls.mapper_registry.map_imperatively(
-            Thing2, cls.tables.test2, eager_defaults=True
+        self.mapper_registry.map_imperatively(
+            Thing2, self.tables.test2, eager_defaults=eager_defaults
         )
 
-    def test_insert_defaults_present(self):
+        Thing3 = self.classes.Thing3
+
+        self.mapper_registry.map_imperatively(
+            Thing3, self.tables.test3, eager_defaults=eager_defaults
+        )
+
+        Thing4 = self.classes.Thing4
+
+        self.mapper_registry.map_imperatively(
+            Thing4, self.tables.test4, eager_defaults=eager_defaults
+        )
+
+    def test_server_insert_defaults_present(self):
         Thing = self.classes.Thing
         s = fixture_session()
 
@@ -2387,7 +2447,10 @@ class EagerDefaultsTest(fixtures.MappedTest):
             s.flush,
             CompiledSQL(
                 "INSERT INTO test (id, foo) VALUES (:id, :foo)",
-                [{"foo": 5, "id": 1}, {"foo": 10, "id": 2}],
+                [
+                    {"foo": 5, "id": 1},
+                    {"foo": 10, "id": 2},
+                ],
             ),
         )
 
@@ -2397,7 +2460,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
         self.assert_sql_count(testing.db, go, 0)
 
-    def test_insert_defaults_present_as_expr(self):
+    def test_server_insert_defaults_present_as_expr(self):
         Thing = self.classes.Thing
         s = fixture_session()
 
@@ -2408,18 +2471,20 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
         s.add_all([t1, t2])
 
-        if testing.db.dialect.implicit_returning:
+        if testing.db.dialect.insert_returning:
             self.assert_sql_execution(
                 testing.db,
                 s.flush,
                 CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, 2 + 5) "
+                    "INSERT INTO test (id, foo) "
+                    "VALUES (%(id)s, 2 + 5) "
                     "RETURNING test.foo",
                     [{"id": 1}],
                     dialect="postgresql",
                 ),
                 CompiledSQL(
-                    "INSERT INTO test (id, foo) VALUES (%(id)s, 5 + 5) "
+                    "INSERT INTO test (id, foo) "
+                    "VALUES (%(id)s, 5 + 5) "
                     "RETURNING test.foo",
                     [{"id": 2}],
                     dialect="postgresql",
@@ -2433,20 +2498,24 @@ class EagerDefaultsTest(fixtures.MappedTest):
                 CompiledSQL(
                     "INSERT INTO test (id, foo) VALUES (:id, 2 + 5)",
                     [{"id": 1}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "INSERT INTO test (id, foo) VALUES (:id, 5 + 5)",
                     [{"id": 2}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "SELECT test.foo AS test_foo FROM test "
                     "WHERE test.id = :pk_1",
                     [{"pk_1": 1}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "SELECT test.foo AS test_foo FROM test "
                     "WHERE test.id = :pk_1",
                     [{"pk_1": 2}],
+                    enable_returning=False,
                 ),
             )
 
@@ -2456,7 +2525,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
 
         self.assert_sql_count(testing.db, go, 0)
 
-    def test_insert_defaults_nonpresent(self):
+    def test_server_insert_defaults_nonpresent(self):
         Thing = self.classes.Thing
         s = fixture_session()
 
@@ -2468,28 +2537,31 @@ class EagerDefaultsTest(fixtures.MappedTest):
             testing.db,
             s.commit,
             Conditional(
-                testing.db.dialect.implicit_returning,
+                testing.db.dialect.insert_returning,
                 [
                     Conditional(
                         testing.db.dialect.insert_executemany_returning,
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (id) VALUES (%(id)s) "
-                                "RETURNING test.foo",
+                            RegexSQL(
+                                r"INSERT INTO test \(id\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.foo, test.id",
                                 [{"id": 1}, {"id": 2}],
                                 dialect="postgresql",
                             ),
                         ],
                         [
-                            CompiledSQL(
-                                "INSERT INTO test (id) VALUES (%(id)s) "
-                                "RETURNING test.foo",
+                            RegexSQL(
+                                r"INSERT INTO test \(id\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.foo, test.id",
                                 [{"id": 1}],
                                 dialect="postgresql",
                             ),
-                            CompiledSQL(
-                                "INSERT INTO test (id) VALUES (%(id)s) "
-                                "RETURNING test.foo",
+                            RegexSQL(
+                                r"INSERT INTO test \(id\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test.foo, test.id",
                                 [{"id": 2}],
                                 dialect="postgresql",
                             ),
@@ -2515,7 +2587,73 @@ class EagerDefaultsTest(fixtures.MappedTest):
             ),
         )
 
-    def test_update_defaults_nonpresent(self):
+    def test_clientsql_insert_defaults_nonpresent(self):
+        Thing3 = self.classes.Thing3
+        s = fixture_session()
+
+        t1, t2 = (Thing3(id=1), Thing3(id=2))
+
+        s.add_all([t1, t2])
+
+        self.assert_sql_execution(
+            testing.db,
+            s.commit,
+            Conditional(
+                testing.db.dialect.insert_returning,
+                [
+                    Conditional(
+                        testing.db.dialect.insert_executemany_returning,
+                        [
+                            RegexSQL(
+                                r"INSERT INTO test3 \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test3.foo, test3.id",
+                                [{"id": 1}, {"id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                        [
+                            RegexSQL(
+                                r"INSERT INTO test3 \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test3.foo, test3.id",
+                                [{"id": 1}],
+                                dialect="postgresql",
+                            ),
+                            RegexSQL(
+                                r"INSERT INTO test3 \(id, foo\) .*"
+                                r"VALUES \(.*\) .*"
+                                r"RETURNING test3.foo, test3.id",
+                                [{"id": 2}],
+                                dialect="postgresql",
+                            ),
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test3 (id, foo) "
+                        "VALUES (:id, lower(:lower_1))",
+                        [
+                            {"id": 1, "lower_1": "HI"},
+                            {"id": 2, "lower_1": "HI"},
+                        ],
+                    ),
+                    CompiledSQL(
+                        "SELECT test3.foo AS test3_foo "
+                        "FROM test3 WHERE test3.id = :pk_1",
+                        [{"pk_1": 1}],
+                    ),
+                    CompiledSQL(
+                        "SELECT test3.foo AS test3_foo "
+                        "FROM test3 WHERE test3.id = :pk_1",
+                        [{"pk_1": 2}],
+                    ),
+                ],
+            ),
+        )
+
+    def test_server_update_defaults_nonpresent(self):
         Thing2 = self.classes.Thing2
         s = fixture_session()
 
@@ -2540,7 +2678,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
             testing.db,
             s.flush,
             Conditional(
-                testing.db.dialect.implicit_returning,
+                testing.db.dialect.update_returning,
                 [
                     CompiledSQL(
                         "UPDATE test2 SET foo=%(foo)s "
@@ -2573,20 +2711,24 @@ class EagerDefaultsTest(fixtures.MappedTest):
                     CompiledSQL(
                         "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
                         [{"foo": 5, "test2_id": 1}],
+                        enable_returning=False,
                     ),
                     CompiledSQL(
                         "UPDATE test2 SET foo=:foo, bar=:bar "
                         "WHERE test2.id = :test2_id",
                         [{"foo": 6, "bar": 10, "test2_id": 2}],
+                        enable_returning=False,
                     ),
                     CompiledSQL(
                         "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
                         [{"foo": 7, "test2_id": 3}],
+                        enable_returning=False,
                     ),
                     CompiledSQL(
                         "UPDATE test2 SET foo=:foo, bar=:bar "
                         "WHERE test2.id = :test2_id",
                         [{"foo": 8, "bar": 12, "test2_id": 4}],
+                        enable_returning=False,
                     ),
                     CompiledSQL(
                         "SELECT test2.bar AS test2_bar FROM test2 "
@@ -2606,6 +2748,107 @@ class EagerDefaultsTest(fixtures.MappedTest):
             eq_(t1.bar, 2)
             eq_(t2.bar, 10)
             eq_(t3.bar, 4)
+            eq_(t4.bar, 12)
+
+        self.assert_sql_count(testing.db, go, 0)
+
+    def test_clientsql_update_defaults_nonpresent(self):
+        Thing4 = self.classes.Thing4
+        s = fixture_session()
+
+        t1, t2, t3, t4 = (
+            Thing4(id=1, foo=1),
+            Thing4(id=2, foo=2),
+            Thing4(id=3, foo=3),
+            Thing4(id=4, foo=4),
+        )
+
+        s.add_all([t1, t2, t3, t4])
+        s.flush()
+
+        t1.foo = 5
+        t2.foo = 6
+        t2.bar = 10
+        t3.foo = 7
+        t4.foo = 8
+        t4.bar = 12
+
+        self.assert_sql_execution(
+            testing.db,
+            s.flush,
+            Conditional(
+                testing.db.dialect.update_returning,
+                [
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=%(foo)s, bar=5 + 3 "
+                        "WHERE test4.id = %(test4_id)s RETURNING test4.bar",
+                        [{"foo": 5, "test4_id": 1}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=%(foo)s, bar=%(bar)s "
+                        "WHERE test4.id = %(test4_id)s",
+                        [{"foo": 6, "bar": 10, "test4_id": 2}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=%(foo)s, bar=5 + 3 WHERE "
+                        "test4.id = %(test4_id)s RETURNING test4.bar",
+                        [{"foo": 7, "test4_id": 3}],
+                        dialect="postgresql",
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=%(foo)s, bar=%(bar)s WHERE "
+                        "test4.id = %(test4_id)s",
+                        [{"foo": 8, "bar": 12, "test4_id": 4}],
+                        dialect="postgresql",
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=:foo, bar=5 + 3 "
+                        "WHERE test4.id = :test4_id",
+                        [{"foo": 5, "test4_id": 1}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=:foo, bar=:bar "
+                        "WHERE test4.id = :test4_id",
+                        [{"foo": 6, "bar": 10, "test4_id": 2}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=:foo, bar=5 + 3 "
+                        "WHERE test4.id = :test4_id",
+                        [{"foo": 7, "test4_id": 3}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "UPDATE test4 SET foo=:foo, bar=:bar "
+                        "WHERE test4.id = :test4_id",
+                        [{"foo": 8, "bar": 12, "test4_id": 4}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "SELECT test4.bar AS test4_bar FROM test4 "
+                        "WHERE test4.id = :pk_1",
+                        [{"pk_1": 1}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "SELECT test4.bar AS test4_bar FROM test4 "
+                        "WHERE test4.id = :pk_1",
+                        [{"pk_1": 3}],
+                        enable_returning=False,
+                    ),
+                ],
+            ),
+        )
+
+        def go():
+            eq_(t1.bar, 8)
+            eq_(t2.bar, 10)
+            eq_(t3.bar, 8)
             eq_(t4.bar, 12)
 
         self.assert_sql_count(testing.db, go, 0)
@@ -2632,7 +2875,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
         t4.foo = 8
         t4.bar = text("5 + 7")
 
-        if testing.db.dialect.implicit_returning:
+        if testing.db.dialect.update_returning:
             self.assert_sql_execution(
                 testing.db,
                 s.flush,
@@ -2671,20 +2914,24 @@ class EagerDefaultsTest(fixtures.MappedTest):
                     "UPDATE test2 SET foo=:foo, bar=1 + 1 "
                     "WHERE test2.id = :test2_id",
                     [{"foo": 5, "test2_id": 1}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "UPDATE test2 SET foo=:foo, bar=:bar "
                     "WHERE test2.id = :test2_id",
                     [{"foo": 6, "bar": 10, "test2_id": 2}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "UPDATE test2 SET foo=:foo WHERE test2.id = :test2_id",
                     [{"foo": 7, "test2_id": 3}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "UPDATE test2 SET foo=:foo, bar=5 + 7 "
                     "WHERE test2.id = :test2_id",
                     [{"foo": 8, "test2_id": 4}],
+                    enable_returning=False,
                 ),
                 CompiledSQL(
                     "SELECT test2.bar AS test2_bar FROM test2 "
@@ -2798,7 +3045,7 @@ class EagerDefaultsTest(fixtures.MappedTest):
             testing.db,
             s.flush,
             CompiledSQL(
-                "INSERT INTO test2 (id, foo, bar) " "VALUES (:id, :foo, :bar)",
+                "INSERT INTO test2 (id, foo, bar) VALUES (:id, :foo, :bar)",
                 [{"id": 1, "foo": None, "bar": 2}],
             ),
         )
@@ -2825,6 +3072,423 @@ class EagerDefaultsTest(fixtures.MappedTest):
             ),
         )
 
+    @testing.fixture
+    def selectable_fixture(self, decl_base):
+        t1, t2 = self.tables("test", "test2")
+
+        stmt = (
+            select(t1.c.id, t1.c.foo, t2.c.id.label("id2"), t2.c.bar)
+            .join_from(t1, t2, t1.c.foo == t2.c.foo)
+            .subquery()
+        )
+
+        class MyClass(decl_base):
+            __table__ = stmt
+
+            __mapper_args__ = {"eager_defaults": True}
+
+        return MyClass
+
+    def test_against_selectable_insert(self, selectable_fixture):
+        """test #8812"""
+        MyClass = selectable_fixture
+
+        s = fixture_session()
+        obj = MyClass(id=1, id2=1, bar=5)
+        s.add(obj)
+
+        with self.sql_execution_asserter() as asserter:
+            s.flush()
+
+        asserter.assert_(
+            Conditional(
+                testing.db.dialect.insert_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id) VALUES (:id) "
+                        "RETURNING test.foo",
+                        [{"id": 1}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO test2 (id, bar) VALUES (:id, :bar)",
+                        [{"id": 1, "bar": 5}],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id) VALUES (:id)",
+                        [{"id": 1}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO test2 (id, bar) VALUES (:id, :bar)",
+                        [{"id": 1, "bar": 5}],
+                    ),
+                    CompiledSQL(
+                        "SELECT anon_1.foo AS anon_1_foo FROM "
+                        "(SELECT test.id AS id, test.foo AS foo, "
+                        "test2.id AS id2, test2.bar AS bar FROM test "
+                        "JOIN test2 ON test.foo = test2.foo) AS anon_1 "
+                        "WHERE anon_1.id = :pk_1 AND anon_1.id2 = :pk_2",
+                        [{"pk_1": 1, "pk_2": 1}],
+                    ),
+                ],
+            ),
+        )
+
+
+class EagerDefaultsSettingTest(
+    testing.AssertsExecutionResults, fixtures.TestBase
+):
+    __backend__ = True
+
+    @variation_fixture("eager_defaults", ["unspecified", "auto", True, False])
+    def eager_defaults_variations(self, request):
+        yield request.param
+
+    @variation_fixture("implicit_returning", [True, False])
+    def implicit_returning_variations(self, request):
+        yield request.param
+
+    @testing.fixture
+    def define_tables(
+        self, metadata, connection, implicit_returning_variations
+    ):
+        implicit_returning = bool(implicit_returning_variations)
+
+        t = Table(
+            "test",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column(
+                "foo",
+                Integer,
+                server_default="3",
+            ),
+            Column("bar", Integer, server_onupdate=FetchedValue()),
+            implicit_returning=implicit_returning,
+        )
+        metadata.create_all(connection)
+        return t
+
+    @testing.fixture
+    def setup_mappers(
+        self, define_tables, eager_defaults_variations, registry
+    ):
+        class Thing:
+            pass
+
+        if eager_defaults_variations.unspecified:
+            registry.map_imperatively(Thing, define_tables)
+        else:
+            eager_defaults = (
+                "auto"
+                if eager_defaults_variations.auto
+                else bool(eager_defaults_variations)
+            )
+            registry.map_imperatively(
+                Thing, define_tables, eager_defaults=eager_defaults
+            )
+        return Thing
+
+    def test_eager_default_setting_inserts(
+        self,
+        setup_mappers,
+        eager_defaults_variations,
+        implicit_returning_variations,
+        connection,
+    ):
+        Thing = setup_mappers
+        s = Session(connection)
+
+        t1, t2 = (Thing(id=1, bar=6), Thing(id=2, bar=6))
+
+        s.add_all([t1, t2])
+
+        expected_eager_defaults = eager_defaults_variations.eager_defaults or (
+            (
+                eager_defaults_variations.auto
+                or eager_defaults_variations.unspecified
+            )
+            and connection.dialect.insert_executemany_returning
+            and bool(implicit_returning_variations)
+        )
+        expect_returning = (
+            expected_eager_defaults
+            and connection.dialect.insert_returning
+            and bool(implicit_returning_variations)
+        )
+
+        with self.sql_execution_asserter(connection) as asserter:
+            s.flush()
+
+        asserter.assert_(
+            Conditional(
+                expect_returning,
+                [
+                    Conditional(
+                        connection.dialect.insert_executemany_returning,
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, bar) "
+                                "VALUES (:id, :bar) "
+                                "RETURNING test.foo",
+                                [
+                                    {"id": 1, "bar": 6},
+                                    {"id": 2, "bar": 6},
+                                ],
+                            )
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (id, bar) "
+                                "VALUES (:id, :bar) "
+                                "RETURNING test.foo",
+                                {"id": 1, "bar": 6},
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (id, bar) "
+                                "VALUES (:id, :bar) "
+                                "RETURNING test.foo",
+                                {"id": 2, "bar": 6},
+                            ),
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (id, bar) VALUES (:id, :bar)",
+                        [
+                            {"id": 1, "bar": 6},
+                            {"id": 2, "bar": 6},
+                        ],
+                    ),
+                    Conditional(
+                        expected_eager_defaults and not expect_returning,
+                        [
+                            CompiledSQL(
+                                "SELECT test.foo AS test_foo "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 1}],
+                            ),
+                            CompiledSQL(
+                                "SELECT test.foo AS test_foo "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 2}],
+                            ),
+                        ],
+                        [],
+                    ),
+                ],
+            )
+        )
+
+    def test_eager_default_setting_inserts_no_pks(
+        self,
+        setup_mappers,
+        eager_defaults_variations,
+        implicit_returning_variations,
+        connection,
+    ):
+        """test for #10453.
+
+        This is essentially a variation from test_eager_default_setting,
+        as a separate test because there are too many new conditions by
+        introducing this variant.
+
+        """
+        Thing = setup_mappers
+        s = Session(connection)
+
+        t1, t2 = (Thing(bar=6), Thing(bar=6))
+
+        s.add_all([t1, t2])
+
+        expected_eager_defaults = eager_defaults_variations.eager_defaults or (
+            (
+                eager_defaults_variations.auto
+                or eager_defaults_variations.unspecified
+            )
+            and connection.dialect.insert_executemany_returning
+            and bool(implicit_returning_variations)
+        )
+        expect_returning = connection.dialect.insert_returning and bool(
+            implicit_returning_variations
+        )
+
+        with self.sql_execution_asserter(connection) as asserter:
+            s.flush()
+
+        asserter.assert_(
+            Conditional(
+                expect_returning,
+                [
+                    Conditional(
+                        connection.dialect.insert_executemany_returning,
+                        [
+                            Conditional(
+                                expected_eager_defaults,
+                                [
+                                    CompiledSQL(
+                                        "INSERT INTO test (bar) "
+                                        "VALUES (:bar) "
+                                        "RETURNING test.id, test.foo",
+                                        [
+                                            {"bar": 6},
+                                            {"bar": 6},
+                                        ],
+                                    )
+                                ],
+                                [
+                                    CompiledSQL(
+                                        "INSERT INTO test (bar) "
+                                        "VALUES (:bar) "
+                                        "RETURNING test.id",
+                                        [
+                                            {"bar": 6},
+                                            {"bar": 6},
+                                        ],
+                                    )
+                                ],
+                            )
+                        ],
+                        [
+                            CompiledSQL(
+                                "INSERT INTO test (bar) "
+                                "VALUES (:bar) "
+                                "RETURNING test.id, test.foo",
+                                {"bar": 6},
+                            ),
+                            CompiledSQL(
+                                "INSERT INTO test (bar) "
+                                "VALUES (:bar) "
+                                "RETURNING test.id, test.foo",
+                                {"bar": 6},
+                            ),
+                        ],
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO test (bar) VALUES (:bar)",
+                        [
+                            {"bar": 6},
+                        ],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO test (bar) VALUES (:bar)",
+                        [
+                            {"bar": 6},
+                        ],
+                        enable_returning=False,
+                    ),
+                    Conditional(
+                        expected_eager_defaults and not expect_returning,
+                        [
+                            CompiledSQL(
+                                "SELECT test.foo AS test_foo "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 1}],
+                            ),
+                            CompiledSQL(
+                                "SELECT test.foo AS test_foo "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 2}],
+                            ),
+                        ],
+                        [],
+                    ),
+                ],
+            )
+        )
+
+    def test_eager_default_setting_updates(
+        self,
+        setup_mappers,
+        eager_defaults_variations,
+        implicit_returning_variations,
+        connection,
+    ):
+        Thing = setup_mappers
+        s = Session(connection)
+
+        t1, t2 = (Thing(id=1, foo=5), Thing(id=2, foo=5))
+
+        s.add_all([t1, t2])
+        s.flush()
+
+        expected_eager_defaults = eager_defaults_variations.eager_defaults
+        expect_returning = (
+            expected_eager_defaults
+            and connection.dialect.update_returning
+            and bool(implicit_returning_variations)
+        )
+
+        t1.foo = 7
+        t2.foo = 12
+
+        with self.sql_execution_asserter(connection) as asserter:
+            s.flush()
+
+        asserter.assert_(
+            Conditional(
+                expect_returning,
+                [
+                    CompiledSQL(
+                        "UPDATE test SET foo=:foo WHERE test.id = :test_id "
+                        "RETURNING test.bar",
+                        [
+                            {"test_id": 1, "foo": 7},
+                        ],
+                    ),
+                    CompiledSQL(
+                        "UPDATE test SET foo=:foo WHERE test.id = :test_id "
+                        "RETURNING test.bar",
+                        [
+                            {"test_id": 2, "foo": 12},
+                        ],
+                    ),
+                ],
+                [
+                    Conditional(
+                        expected_eager_defaults and not expect_returning,
+                        [
+                            CompiledSQL(
+                                "UPDATE test SET foo=:foo "
+                                "WHERE test.id = :test_id",
+                                [
+                                    {"test_id": 1, "foo": 7},
+                                    {"test_id": 2, "foo": 12},
+                                ],
+                            ),
+                            CompiledSQL(
+                                "SELECT test.bar AS test_bar "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 1}],
+                            ),
+                            CompiledSQL(
+                                "SELECT test.bar AS test_bar "
+                                "FROM test WHERE test.id = :pk_1",
+                                [{"pk_1": 2}],
+                            ),
+                        ],
+                        [
+                            CompiledSQL(
+                                "UPDATE test SET foo=:foo "
+                                "WHERE test.id = :test_id",
+                                [
+                                    {"test_id": 1, "foo": 7},
+                                    {"test_id": 2, "foo": 12},
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            )
+        )
+
 
 class TypeWoBoolTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     """test support for custom datatypes that return a non-__bool__ value
@@ -2834,11 +3498,11 @@ class TypeWoBoolTest(fixtures.MappedTest, testing.AssertsExecutionResults):
     def define_tables(cls, metadata):
         from sqlalchemy import TypeDecorator
 
-        class NoBool(object):
+        class NoBool:
             def __nonzero__(self):
                 raise NotImplementedError("not supported")
 
-        class MyWidget(object):
+        class MyWidget:
             def __init__(self, text):
                 self.text = text
 
@@ -3175,7 +3839,7 @@ class NullEvaluatingTest(fixtures.MappedTest, testing.AssertsExecutionResults):
         eq_(s.query(cast(JSONThing.data_null, String)).scalar(), None)
 
 
-class EnsureCacheTest(fixtures.FutureEngineMixin, UOWTest):
+class EnsureCacheTest(UOWTest):
     def test_ensure_cache(self):
         users, User = self.tables.users, self.classes.User
 
@@ -3210,7 +3874,7 @@ class EnsureCacheTest(fixtures.FutureEngineMixin, UOWTest):
 
 class ORMOnlyPrimaryKeyTest(fixtures.TestBase):
     @testing.requires.identity_columns
-    @testing.requires.returning
+    @testing.requires.insert_returning
     def test_a(self, base, run_test):
         class A(base):
             __tablename__ = "a"
@@ -3223,10 +3887,9 @@ class ORMOnlyPrimaryKeyTest(fixtures.TestBase):
         run_test(A, A())
 
     @testing.requires.sequences_as_server_defaults
-    @testing.requires.returning
+    @testing.requires.insert_returning
     def test_b(self, base, run_test):
-
-        seq = Sequence("x_seq")
+        seq = normalize_sequence(config, Sequence("x_seq"))
 
         class A(base):
             __tablename__ = "a"
@@ -3283,3 +3946,249 @@ class ORMOnlyPrimaryKeyTest(fixtures.TestBase):
                 is_(a1, aa)
 
         return go
+
+
+class TryToFoolInsertManyValuesTest(fixtures.TestBase):
+    __backend__ = True
+
+    @testing.variation(
+        "pk_type",
+        [
+            ("plain_autoinc", testing.requires.autoincrement_without_sequence),
+            ("sequence", testing.requires.sequences),
+            ("identity", testing.requires.identity_columns),
+        ],
+    )
+    @testing.variation(
+        "sentinel",
+        [
+            "none",  # passes because we automatically downgrade
+            # for no sentinel col
+            "implicit_not_omitted",
+            "implicit_omitted",
+            "explicit",
+            "default_uuid",
+            "default_string_uuid",
+        ],
+    )
+    def test_original_use_case(self, decl_base, connection, pk_type, sentinel):
+        """test #9603.
+
+        this uses the ORM to ensure the ORM is not using any kind of
+        insertmany that causes the problem.  The errant behavior is very
+        specific to SQL Server, however if we identify any other similar
+        issues in other DBs we should add tests to this suite.
+
+        NOTE: Assuming the code is not doing the correct kind of INSERT
+        for SQL Server, the SQL Server failure here is still extremely
+        difficult to trip; any changes to the table structure and it no longer
+        fails, and it's likely this version of the test might not fail on SQL
+        Server in any case. The test_this_really_fails_on_mssql_wo_full_fix is
+        more optimized to producing the SQL Server failure as reliably as
+        possible, however this can change at any time as SQL Server's decisions
+        here are completely opaque.
+
+        """
+
+        class Datum(decl_base):
+            __tablename__ = "datum"
+
+            datum_id = Column(Integer, Identity(), primary_key=True)
+
+        class Result(decl_base):
+            __tablename__ = "result"
+
+            if pk_type.plain_autoinc:
+                result_id = Column(Integer, primary_key=True)
+            elif pk_type.sequence:
+                result_id = Column(
+                    Integer,
+                    Sequence("result_id_seq", start=1),
+                    primary_key=True,
+                )
+            elif pk_type.identity:
+                result_id = Column(Integer, Identity(), primary_key=True)
+            else:
+                pk_type.fail()
+
+            lft_datum_id = Column(ForeignKey(Datum.datum_id))
+
+            lft_datum = relationship(Datum)
+
+            if sentinel.implicit_not_omitted or sentinel.implicit_omitted:
+                _sentinel = insert_sentinel(
+                    omit_from_statements=bool(sentinel.implicit_omitted),
+                )
+            elif sentinel.explicit:
+                some_uuid = Column(
+                    Uuid(), insert_sentinel=True, nullable=False
+                )
+            elif sentinel.default_uuid or sentinel.default_string_uuid:
+                _sentinel = Column(
+                    Uuid(native_uuid=bool(sentinel.default_uuid)),
+                    insert_sentinel=True,
+                    default=uuid.uuid4,
+                )
+
+        class ResultDatum(decl_base):
+            __tablename__ = "result_datum"
+
+            result_id = Column(ForeignKey(Result.result_id), primary_key=True)
+            lft_datum_id = Column(ForeignKey(Datum.datum_id))
+
+            lft_datum = relationship(Datum)
+            result = relationship(Result)
+
+            if sentinel.implicit_not_omitted or sentinel.implicit_omitted:
+                _sentinel = insert_sentinel(
+                    omit_from_statements=bool(sentinel.implicit_omitted),
+                )
+            elif sentinel.explicit:
+                some_uuid = Column(
+                    Uuid(native_uuid=False),
+                    insert_sentinel=True,
+                    nullable=False,
+                )
+            elif sentinel.default_uuid or sentinel.default_string_uuid:
+                _sentinel = Column(
+                    Uuid(native_uuid=bool(sentinel.default_uuid)),
+                    insert_sentinel=True,
+                    default=uuid.uuid4,
+                )
+
+        decl_base.metadata.create_all(connection)
+        N = 13
+        with Session(connection) as sess:
+            full_range = [num for num in range(N * N)]
+
+            datum_idx = [Datum() for num in range(N)]
+            sess.add_all(datum_idx)
+            sess.flush()
+
+            if sentinel.explicit:
+                result_idx = [
+                    Result(
+                        lft_datum=datum_idx[n % N],
+                        some_uuid=uuid.uuid4(),
+                    )
+                    for n in full_range
+                ]
+            else:
+                result_idx = [
+                    Result(
+                        lft_datum=datum_idx[n % N],
+                    )
+                    for n in full_range
+                ]
+
+            sess.add_all(result_idx)
+
+            if sentinel.explicit:
+                sess.add_all(
+                    ResultDatum(
+                        lft_datum=datum_idx[n % N],
+                        result=result_idx[n],
+                        some_uuid=uuid.uuid4(),
+                    )
+                    for n in full_range
+                )
+            else:
+                sess.add_all(
+                    ResultDatum(
+                        lft_datum=datum_idx[n % N],
+                        result=result_idx[n],
+                    )
+                    for n in full_range
+                )
+
+            fixtures.insertmanyvalues_fixture(
+                sess.connection(), warn_on_downgraded=True
+            )
+            if (
+                sentinel.none
+                and testing.db.dialect.insert_returning
+                and testing.db.dialect.use_insertmanyvalues
+                and select()
+                .compile(dialect=testing.db.dialect)
+                ._get_sentinel_column_for_table(Result.__table__)
+                is None
+            ):
+                with expect_warnings(
+                    "Batches were downgraded for sorted INSERT"
+                ):
+                    sess.flush()
+            else:
+                sess.flush()
+
+            num_bad = (
+                sess.query(ResultDatum)
+                .join(Result)
+                .filter(
+                    Result.lft_datum_id != ResultDatum.lft_datum_id,
+                )
+                .count()
+            )
+
+            eq_(num_bad, 0)
+
+    @testing.only_on("mssql")
+    def test_this_really_fails_on_mssql_wo_full_fix(
+        self, decl_base, connection
+    ):
+        """this test tries as hard as possible to simulate the SQL server
+        failure.
+
+        """
+
+        class Datum(decl_base):
+            __tablename__ = "datum"
+
+            datum_id = Column(Integer, primary_key=True)
+            data = Column(String(10))
+
+        class Result(decl_base):
+            __tablename__ = "result"
+
+            result_id = Column(Integer, primary_key=True)
+
+            lft_datum_id = Column(Integer, ForeignKey(Datum.datum_id))
+
+            # use this instead to resolve; FK constraint is what affects
+            # SQL server
+            # lft_datum_id = Column(Integer)
+
+        decl_base.metadata.create_all(connection)
+
+        size = 13
+
+        result = connection.execute(
+            insert(Datum).returning(Datum.datum_id),
+            [{"data": f"d{i}"} for i in range(size)],
+        )
+
+        datum_ids = [row[0] for row in result]
+        assert datum_ids == list(range(1, size + 1))
+
+        # the rows are not inserted in the order that the table valued
+        # expressions are given.  SQL Server organizes the rows so that the
+        # "datum_id" values are grouped
+        result = connection.execute(
+            insert(Result).returning(
+                Result.result_id,
+                Result.lft_datum_id,
+                sort_by_parameter_order=True,
+            ),
+            [
+                {"lft_datum_id": datum_ids[num % size]}
+                for num in range(size * size)
+            ],
+        )
+
+        we_expect_returning_is = [
+            {"result_id": num + 1, "lft_datum_id": datum_ids[num % size]}
+            for num in range(size * size)
+        ]
+        what_we_got_is = [
+            {"result_id": row[0], "lft_datum_id": row[1]} for row in result
+        ]
+        eq_(we_expect_returning_is, what_we_got_is)

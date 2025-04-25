@@ -1,4 +1,6 @@
-#! coding:utf-8
+from __future__ import annotations
+
+from typing import Tuple
 
 from sqlalchemy import bindparam
 from sqlalchemy import Column
@@ -23,13 +25,15 @@ from sqlalchemy.sql import crud
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
+from sqlalchemy.testing import config
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.provision import normalize_sequence
 
 
-class ORMExpr(object):
+class ORMExpr:
     def __init__(self, col):
         self.col = col
 
@@ -37,7 +41,7 @@ class ORMExpr(object):
         return self.col
 
 
-class _InsertTestBase(object):
+class _InsertTestBase:
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -64,11 +68,84 @@ class _InsertTestBase(object):
 
 
 class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
-    __dialect__ = "default"
+    __dialect__ = "default_enhanced"
+
+    @testing.combinations(
+        ((), ("z",), ()),
+        (("x",), (), ()),
+        (("x",), ("y",), ("x", "y")),
+        (("x", "y"), ("y",), ("x", "y")),
+    )
+    def test_return_defaults_generative(
+        self,
+        initial_keys: Tuple[str, ...],
+        second_keys: Tuple[str, ...],
+        expected_keys: Tuple[str, ...],
+    ):
+        t = table("foo", column("x"), column("y"), column("z"))
+
+        initial_cols = tuple(t.c[initial_keys])
+        second_cols = tuple(t.c[second_keys])
+        expected = set(t.c[expected_keys])
+
+        stmt = t.insert().return_defaults(*initial_cols)
+        eq_(stmt._return_defaults_columns, initial_cols)
+        stmt = stmt.return_defaults(*second_cols)
+        assert isinstance(stmt._return_defaults_columns, tuple)
+        eq_(set(stmt._return_defaults_columns), expected)
+
+    @testing.variation("add_values", ["before", "after"])
+    @testing.variation("multi_values", [True, False])
+    @testing.variation("sort_by_parameter_order", [True, False])
+    def test_sort_by_parameter_ordering_parameter_no_multi_values(
+        self, add_values, multi_values, sort_by_parameter_order
+    ):
+        t = table("foo", column("x"), column("y"), column("z"))
+        stmt = insert(t)
+
+        if add_values.before:
+            if multi_values:
+                stmt = stmt.values([{"y": 6}, {"y": 7}])
+            else:
+                stmt = stmt.values(y=6)
+
+        stmt = stmt.returning(
+            t.c.x, sort_by_parameter_order=bool(sort_by_parameter_order)
+        )
+
+        if add_values.after:
+            if multi_values:
+                stmt = stmt.values([{"y": 6}, {"y": 7}])
+            else:
+                stmt = stmt.values(y=6)
+
+        if multi_values:
+            if sort_by_parameter_order:
+                with expect_raises_message(
+                    exc.CompileError,
+                    "RETURNING cannot be determinstically sorted "
+                    "when using an INSERT",
+                ):
+                    stmt.compile()
+            else:
+                self.assert_compile(
+                    stmt,
+                    "INSERT INTO foo (y) VALUES (:y_m0), (:y_m1) "
+                    "RETURNING foo.x",
+                )
+        else:
+            self.assert_compile(
+                stmt,
+                "INSERT INTO foo (y) VALUES (:y) RETURNING foo.x",
+            )
 
     def test_binds_that_match_columns(self):
         """test bind params named after column names
-        replace the normal SET/VALUES generation."""
+        replace the normal SET/VALUES generation.
+
+        See also test_compiler.py::CrudParamOverlapTest
+
+        """
 
         t = table("foo", column("x"), column("y"))
 
@@ -116,7 +193,13 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
     def test_insert_literal_binds_sequence_notimplemented(self):
-        table = Table("x", MetaData(), Column("y", Integer, Sequence("y_seq")))
+        table = Table(
+            "x",
+            MetaData(),
+            Column(
+                "y", Integer, normalize_sequence(config, Sequence("y_seq"))
+            ),
+        )
         dialect = default.DefaultDialect()
         dialect.supports_sequences = True
 
@@ -332,10 +415,10 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         table1 = self.tables.mytable
 
         stmt = table1.insert().returning(table1.c.myid)
-        assert_raises_message(
-            exc.CompileError,
-            "RETURNING is not supported by this dialect's statement compiler.",
-            stmt.compile,
+        self.assert_compile(
+            stmt,
+            "INSERT INTO mytable (myid, name, description) "
+            "VALUES (:myid, :name, :description) RETURNING mytable.myid",
             dialect=default.DefaultDialect(),
         )
 
@@ -380,7 +463,12 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         t1 = Table(
             "t",
             m,
-            Column("id", Integer, Sequence("id_seq"), primary_key=True),
+            Column(
+                "id",
+                Integer,
+                normalize_sequence(config, Sequence("id_seq")),
+                primary_key=True,
+            ),
             Column("data", String),
         )
 
@@ -401,7 +489,12 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         t1 = Table(
             "t",
             m,
-            Column("id", Integer, Sequence("id_seq"), primary_key=True),
+            Column(
+                "id",
+                Integer,
+                normalize_sequence(config, Sequence("id_seq")),
+                primary_key=True,
+            ),
             Column("data", String),
         )
 
@@ -426,7 +519,9 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "t",
             m,
             Column("id", Integer, primary_key=True),
-            Column("counter", Sequence("counter_seq")),
+            Column(
+                "counter", normalize_sequence(config, Sequence("counter_seq"))
+            ),
             Column("data", String),
         )
 
@@ -442,13 +537,126 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=postgresql.dialect(),
         )
 
+    @testing.variation("paramstyle", ["pg", "qmark", "numeric", "dollar"])
+    def test_heterogeneous_multi_values(self, paramstyle):
+        """for #6047, originally I thought we'd take any insert().values()
+        and be able to convert it to a "many" style execution that we can
+        cache.
+
+        however, this test shows that we cannot, at least not in the
+        general case, because SQL expressions are not guaranteed to be in
+        the same position each time, therefore each ``VALUES`` clause is not
+        of the same structure.
+
+        """
+
+        m = MetaData()
+
+        t1 = Table(
+            "t",
+            m,
+            Column("id", Integer, primary_key=True),
+            Column("x", Integer),
+            Column("y", Integer),
+            Column("z", Integer),
+        )
+
+        stmt = t1.insert().values(
+            [
+                {"x": 1, "y": func.sum(1, 2), "z": 2},
+                {"x": func.sum(1, 2), "y": 2, "z": 3},
+                {"x": func.sum(1, 2), "y": 2, "z": func.foo(10)},
+            ]
+        )
+
+        pos_par = (
+            1,
+            1,
+            2,
+            2,
+            1,
+            2,
+            2,
+            3,
+            1,
+            2,
+            2,
+            10,
+        )
+
+        # SQL expressions in the params at arbitrary locations means
+        # we have to scan them at compile time, and the shape of the bound
+        # parameters is not predictable.   so for #6047 where I originally
+        # thought all of values() could be rewritten, this makes it not
+        # really worth it.
+        if paramstyle.pg:
+            self.assert_compile(
+                stmt,
+                "INSERT INTO t (x, y, z) VALUES "
+                "(%(x_m0)s, sum(%(sum_1)s, %(sum_2)s), %(z_m0)s), "
+                "(sum(%(sum_3)s, %(sum_4)s), %(y_m1)s, %(z_m1)s), "
+                "(sum(%(sum_5)s, %(sum_6)s), %(y_m2)s, foo(%(foo_1)s))",
+                checkparams={
+                    "x_m0": 1,
+                    "sum_1": 1,
+                    "sum_2": 2,
+                    "z_m0": 2,
+                    "sum_3": 1,
+                    "sum_4": 2,
+                    "y_m1": 2,
+                    "z_m1": 3,
+                    "sum_5": 1,
+                    "sum_6": 2,
+                    "y_m2": 2,
+                    "foo_1": 10,
+                },
+                dialect=postgresql.dialect(),
+            )
+        elif paramstyle.qmark:
+            self.assert_compile(
+                stmt,
+                "INSERT INTO t (x, y, z) VALUES "
+                "(?, sum(?, ?), ?), "
+                "(sum(?, ?), ?, ?), "
+                "(sum(?, ?), ?, foo(?))",
+                checkpositional=pos_par,
+                dialect=sqlite.dialect(),
+            )
+        elif paramstyle.numeric:
+            self.assert_compile(
+                stmt,
+                "INSERT INTO t (x, y, z) VALUES "
+                "(:1, sum(:2, :3), :4), "
+                "(sum(:5, :6), :7, :8), "
+                "(sum(:9, :10), :11, foo(:12))",
+                checkpositional=pos_par,
+                dialect=sqlite.dialect(paramstyle="numeric"),
+            )
+        elif paramstyle.dollar:
+            self.assert_compile(
+                stmt,
+                "INSERT INTO t (x, y, z) VALUES "
+                "($1, sum($2, $3), $4), "
+                "(sum($5, $6), $7, $8), "
+                "(sum($9, $10), $11, foo($12))",
+                checkpositional=pos_par,
+                dialect=sqlite.dialect(paramstyle="numeric_dollar"),
+            )
+        else:
+            paramstyle.fail()
+
     def test_insert_seq_pk_multi_values_seq_not_supported(self):
         m = MetaData()
 
         t1 = Table(
             "t",
             m,
-            Column("id", Integer, Sequence("id_seq"), primary_key=True),
+            Column(
+                "id",
+                Integer,
+                normalize_sequence(config, Sequence("id_seq")),
+                primary_key=True,
+            ),
             Column("data", String),
         )
 
@@ -912,7 +1120,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("q", Integer),
         )
         with expect_warnings(
-            "Column 't.x' is marked as a member.*" "may not store NULL.$"
+            "Column 't.x' is marked as a member.*may not store NULL.$"
         ):
             self.assert_compile(
                 t.insert(), "INSERT INTO t (q) VALUES (:q)", params={"q": 5}
@@ -928,7 +1136,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         d = postgresql.dialect()
         d.implicit_returning = True
         with expect_warnings(
-            "Column 't.x' is marked as a member.*" "may not store NULL.$"
+            "Column 't.x' is marked as a member.*may not store NULL.$"
         ):
             self.assert_compile(
                 t.insert(),
@@ -948,7 +1156,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         d.implicit_returning = False
 
         with expect_warnings(
-            "Column 't.x' is marked as a member.*" "may not store NULL.$"
+            "Column 't.x' is marked as a member.*may not store NULL.$"
         ):
             self.assert_compile(
                 t.insert(),
@@ -964,7 +1172,7 @@ class InsertTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             Column("notpk", String(10), nullable=True),
         )
         with expect_warnings(
-            "Column 't.id' is marked as a member.*" "may not store NULL.$"
+            "Column 't.id' is marked as a member.*may not store NULL.$"
         ):
             self.assert_compile(
                 t.insert(),
@@ -1012,6 +1220,57 @@ class InsertImplicitReturningTest(
             "WHERE mytable.name = %(name_1)s",
             checkparams={"name_1": "foo"},
         )
+
+    @testing.combinations(
+        True, False, argnames="insert_null_still_autoincrements"
+    )
+    @testing.combinations("values", "params", "nothing", argnames="paramtype")
+    def test_explicit_null_implicit_returning_still_renders(
+        self, paramtype, insert_null_still_autoincrements
+    ):
+        """test for future support of #7998 with RETURNING"""
+        t = Table(
+            "t",
+            MetaData(),
+            Column("x", Integer, primary_key=True),
+            Column("q", Integer),
+        )
+
+        dialect = postgresql.dialect()
+        dialect.insert_null_pk_still_autoincrements = (
+            insert_null_still_autoincrements
+        )
+
+        if paramtype == "values":
+            # for values present, we now have an extra check for this
+            stmt = t.insert().values(x=None, q=5)
+            if insert_null_still_autoincrements:
+                expected = (
+                    "INSERT INTO t (x, q) VALUES (%(x)s, %(q)s) RETURNING t.x"
+                )
+            else:
+                expected = "INSERT INTO t (x, q) VALUES (%(x)s, %(q)s)"
+            params = None
+        elif paramtype == "params":
+            # for params, compiler doesnt have the value available to look
+            # at.  we assume non-NULL
+            stmt = t.insert()
+            if insert_null_still_autoincrements:
+                expected = (
+                    "INSERT INTO t (x, q) VALUES (%(x)s, %(q)s) RETURNING t.x"
+                )
+            else:
+                expected = "INSERT INTO t (x, q) VALUES (%(x)s, %(q)s)"
+            params = {"x": None, "q": 5}
+        elif paramtype == "nothing":
+            # no params, we assume full INSERT.  this kind of compilation
+            # doesn't actually happen during execution since there are always
+            # parameters or values
+            stmt = t.insert()
+            expected = "INSERT INTO t (x, q) VALUES (%(x)s, %(q)s)"
+            params = None
+
+        self.assert_compile(stmt, expected, params=params, dialect=dialect)
 
     def test_insert_multiple_values(self):
         ins = self.tables.myothertable.insert().values(
@@ -1218,7 +1477,6 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
                 table1.c.description,
             )
         elif column_style == "inspectables":
-
             myid, name, description = (
                 ORMExpr(table1.c.myid),
                 ORMExpr(table1.c.name),
@@ -1447,14 +1705,12 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         stmt = table.insert().values(values)
 
         eq_(
-            dict(
-                [
-                    (k, v.type._type_affinity)
-                    for (k, v) in stmt.compile(
-                        dialect=postgresql.dialect()
-                    ).binds.items()
-                ]
-            ),
+            {
+                k: v.type._type_affinity
+                for (k, v) in stmt.compile(
+                    dialect=postgresql.dialect()
+                ).binds.items()
+            },
             {
                 "foo": Integer,
                 "data_m2": String,
@@ -1491,16 +1747,18 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
         stmt = table.insert().return_defaults().values(id=func.foobar())
-        compiled = stmt.compile(dialect=sqlite.dialect(), column_keys=["data"])
+        dialect = sqlite.dialect()
+        dialect.insert_returning = False
+        compiled = stmt.compile(dialect=dialect, column_keys=["data"])
         eq_(compiled.postfetch, [])
-        eq_(compiled.returning, [])
+        eq_(compiled.implicit_returning, [])
 
         self.assert_compile(
             stmt,
-            "INSERT INTO sometable (id, data) VALUES " "(foobar(), ?)",
+            "INSERT INTO sometable (id, data) VALUES (foobar(), ?)",
             checkparams={"data": "foo"},
             params={"data": "foo"},
-            dialect=sqlite.dialect(),
+            dialect=dialect,
         )
 
     def test_sql_expression_pk_autoinc_returning(self):
@@ -1522,7 +1780,7 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=returning_dialect, column_keys=["data"]
         )
         eq_(compiled.postfetch, [])
-        eq_(compiled.returning, [table.c.id])
+        eq_(compiled.implicit_returning, [table.c.id])
 
         self.assert_compile(
             stmt,
@@ -1552,7 +1810,7 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=returning_dialect, column_keys=["data"]
         )
         eq_(compiled.postfetch, [])
-        eq_(compiled.returning, [table.c.id])
+        eq_(compiled.implicit_returning, [table.c.id])
 
         self.assert_compile(
             stmt,
@@ -1593,14 +1851,12 @@ class MultirowTest(_InsertTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
         stmt = table.insert().values(values)
         eq_(
-            dict(
-                [
-                    (k, v.type._type_affinity)
-                    for (k, v) in stmt.compile(
-                        dialect=postgresql.dialect()
-                    ).binds.items()
-                ]
-            ),
+            {
+                k: v.type._type_affinity
+                for (k, v) in stmt.compile(
+                    dialect=postgresql.dialect()
+                ).binds.items()
+            },
             {
                 "foo": Integer,
                 "data_m2": String,

@@ -1,10 +1,12 @@
+from contextlib import nullcontext
+
+from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import Integer
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
-from sqlalchemy import util
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import backref
 from sqlalchemy.orm import configure_mappers
@@ -20,17 +22,18 @@ from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.assertions import expect_raises_message
 from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
 
-class Company(fixtures.ComparableEntity):
+class Company(ComparableEntity):
     pass
 
 
-class Person(fixtures.ComparableEntity):
+class Person(ComparableEntity):
     pass
 
 
@@ -46,23 +49,22 @@ class Boss(Manager):
     pass
 
 
-class Machine(fixtures.ComparableEntity):
+class Machine(ComparableEntity):
     pass
 
 
-class Paperwork(fixtures.ComparableEntity):
+class Paperwork(ComparableEntity):
     pass
 
 
 def _aliased_join_warning(arg):
     return testing.expect_warnings(
-        "An alias is being generated automatically against joined entity "
-        "mapped class %s due to overlapping tables" % (arg,)
+        r"An alias is being generated automatically against joined entity "
+        r"Mapper\[%s\] due to overlapping tables" % (arg,),
     )
 
 
 class SelfReferentialTestJoinedToBase(fixtures.MappedTest):
-
     run_setup_mappers = "once"
 
     @classmethod
@@ -171,7 +173,6 @@ class SelfReferentialTestJoinedToBase(fixtures.MappedTest):
 
 
 class SelfReferentialJ2JTest(fixtures.MappedTest):
-
     run_setup_mappers = "once"
 
     @classmethod
@@ -296,7 +297,7 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
 
         if autoalias:
             # filter aliasing applied to Engineer doesn't whack Manager
-            with _aliased_join_warning("Engineer->engineers"):
+            with _aliased_join_warning(r"Engineer\(engineers\)"):
                 eq_(
                     sess.query(Manager)
                     .join(Manager.engineers)
@@ -305,7 +306,7 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
                     [m1],
                 )
 
-            with _aliased_join_warning("Engineer->engineers"):
+            with _aliased_join_warning(r"Engineer\(engineers\)"):
                 eq_(
                     sess.query(Manager)
                     .join(Manager.engineers)
@@ -314,7 +315,7 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
                     [m2],
                 )
 
-            with _aliased_join_warning("Engineer->engineers"):
+            with _aliased_join_warning(r"Engineer\(engineers\)"):
                 eq_(
                     sess.query(Manager, Engineer)
                     .join(Manager.engineers)
@@ -366,7 +367,7 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
         sess.expunge_all()
 
         if autoalias:
-            with _aliased_join_warning("Engineer->engineers"):
+            with _aliased_join_warning(r"Engineer\(engineers\)"):
                 eq_(
                     sess.query(Manager)
                     .join(Manager.engineers)
@@ -375,7 +376,7 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
                     [],
                 )
 
-            with _aliased_join_warning("Engineer->engineers"):
+            with _aliased_join_warning(r"Engineer\(engineers\)"):
                 eq_(
                     sess.query(Manager)
                     .join(Manager.engineers)
@@ -403,7 +404,6 @@ class SelfReferentialJ2JTest(fixtures.MappedTest):
 
 
 class SelfReferentialJ2JSelfTest(fixtures.MappedTest):
-
     run_setup_mappers = "once"
 
     @classmethod
@@ -474,7 +474,7 @@ class SelfReferentialJ2JSelfTest(fixtures.MappedTest):
 
     def _five_obj_fixture(self):
         sess = fixture_session()
-        e1, e2, e3, e4, e5 = [Engineer(name="e%d" % (i + 1)) for i in range(5)]
+        e1, e2, e3, e4, e5 = (Engineer(name="e%d" % (i + 1)) for i in range(5))
         e3.reports_to = e1
         e4.reports_to = e2
         sess.add_all([e1, e2, e3, e4, e5])
@@ -555,7 +555,6 @@ class SelfReferentialJ2JSelfTest(fixtures.MappedTest):
 
 
 class M2MFilterTest(fixtures.MappedTest):
-
     run_setup_mappers = "once"
     run_inserts = "once"
     run_deletes = None
@@ -794,16 +793,16 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
 
         stmt = select(Child1).join(Child1.left_child2)
 
-        with _aliased_join_warning("Child2->child2"):
+        with _aliased_join_warning(r"Child2\(child2\)"):
             eq_(
                 set(sess.execute(stmt).scalars().unique()),
-                set([c11, c12, c13]),
+                {c11, c12, c13},
             )
 
-        with _aliased_join_warning("Child2->child2"):
+        with _aliased_join_warning(r"Child2\(child2\)"):
             eq_(
                 set(sess.query(Child1, Child2).join(Child1.left_child2)),
-                set([(c11, c22), (c12, c22), (c13, c23)]),
+                {(c11, c22), (c12, c22), (c13, c23)},
             )
 
         # manual alias test:
@@ -813,12 +812,12 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
 
         eq_(
             set(sess.execute(stmt).scalars().unique()),
-            set([c11, c12, c13]),
+            {c11, c12, c13},
         )
 
         eq_(
             set(sess.query(Child1, c2).join(Child1.left_child2.of_type(c2))),
-            set([(c11, c22), (c12, c22), (c13, c23)]),
+            {(c11, c22), (c12, c22), (c13, c23)},
         )
 
         # test __eq__() on property is annotating correctly
@@ -828,10 +827,10 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
             .join(Child2.right_children)
             .where(Child1.left_child2 == c22)
         )
-        with _aliased_join_warning("Child1->child1"):
+        with _aliased_join_warning(r"Child1\(child1\)"):
             eq_(
                 set(sess.execute(stmt).scalars().unique()),
-                set([c22]),
+                {c22},
             )
 
         # manual aliased version
@@ -843,26 +842,26 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
         eq_(
             set(sess.execute(stmt).scalars().unique()),
-            set([c22]),
+            {c22},
         )
 
         # test the same again
-        with _aliased_join_warning("Child1->child1"):
+        with _aliased_join_warning(r"Child1\(child1\)"):
             self.assert_compile(
                 sess.query(Child2)
                 .join(Child2.right_children)
                 .filter(Child1.left_child2 == c22)
                 .statement,
                 "SELECT child2.id, parent.id AS id_1, parent.cls "
-                "FROM secondary AS secondary_1, parent "
+                "FROM parent "
                 "JOIN child2 ON parent.id = child2.id "
-                "JOIN secondary AS secondary_2 ON parent.id = "
-                "secondary_2.left_id "
+                "JOIN secondary AS secondary_1 ON parent.id = "
+                "secondary_1.left_id "
                 "JOIN (parent AS parent_1 JOIN child1 AS child1_1 "
                 "ON parent_1.id = child1_1.id) ON parent_1.id = "
-                "secondary_2.right_id "
-                "WHERE parent_1.id = secondary_1.right_id "
-                "AND :param_1 = secondary_1.left_id",
+                "secondary_1.right_id, secondary AS secondary_2 "
+                "WHERE parent_1.id = secondary_2.right_id "
+                "AND :param_1 = secondary_2.left_id",
             )
 
         # non aliased version
@@ -872,14 +871,14 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
             .filter(c1.left_child2 == c22)
             .statement,
             "SELECT child2.id, parent.id AS id_1, parent.cls "
-            "FROM secondary AS secondary_1, parent "
+            "FROM parent "
             "JOIN child2 ON parent.id = child2.id "
-            "JOIN secondary AS secondary_2 ON parent.id = secondary_2.left_id "
+            "JOIN secondary AS secondary_1 ON parent.id = secondary_1.left_id "
             "JOIN (parent AS parent_1 JOIN child1 AS child1_1 "
             "ON parent_1.id = child1_1.id) ON parent_1.id = "
-            "secondary_2.right_id "
-            "WHERE parent_1.id = secondary_1.right_id "
-            "AND :param_1 = secondary_1.left_id",
+            "secondary_1.right_id, secondary AS secondary_2 "
+            "WHERE parent_1.id = secondary_2.right_id "
+            "AND :param_1 = secondary_2.left_id",
         )
 
     def test_query_crit_core_workaround(self):
@@ -916,14 +915,15 @@ class SelfReferentialM2MTest(fixtures.MappedTest, AssertsCompiledSQL):
             stmt.set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
             "SELECT child2.id AS child2_id, parent.id AS parent_id, "
             "parent.cls AS parent_cls "
-            "FROM secondary AS secondary_1, "
+            "FROM "
             "parent JOIN child2 ON parent.id = child2.id JOIN secondary AS "
-            "secondary_2 ON parent.id = secondary_2.left_id JOIN "
+            "secondary_1 ON parent.id = secondary_1.left_id JOIN "
             "(parent AS parent_1 JOIN child1 AS child1_1 "
             "ON parent_1.id = child1_1.id) "
-            "ON parent_1.id = secondary_2.right_id WHERE "
-            "parent_1.id = secondary_1.right_id AND :param_1 = "
-            "secondary_1.left_id",
+            "ON parent_1.id = secondary_1.right_id, secondary AS secondary_2 "
+            "WHERE "
+            "parent_1.id = secondary_2.right_id AND :param_1 = "
+            "secondary_2.left_id",
         )
 
     def test_eager_join(self):
@@ -1815,31 +1815,6 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
             "JOIN ep2 ON base2.id = ep2.base2_id",
         )
 
-    def test_six_legacy(self):
-        Parent, Base1, Base2, Sub1, Sub2, EP1, EP2 = self._classes()
-
-        s = fixture_session()
-
-        # as of from_self() changing in
-        # I3abfb45dd6e50f84f29d39434caa0b550ce27864,
-        # this query is coming out instead which is equivalent, but not
-        # totally sure where this happens
-
-        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
-            self.assert_compile(
-                s.query(Sub2).from_self().join(Sub2.ep1).join(Sub2.ep2),
-                "SELECT anon_1.sub2_id AS anon_1_sub2_id, "
-                "anon_1.base2_base1_id AS anon_1_base2_base1_id, "
-                "anon_1.base2_data AS anon_1_base2_data, "
-                "anon_1.sub2_subdata AS anon_1_sub2_subdata "
-                "FROM (SELECT sub2.id AS sub2_id, base2.id AS base2_id, "
-                "base2.base1_id AS base2_base1_id, base2.data AS base2_data, "
-                "sub2.subdata AS sub2_subdata "
-                "FROM base2 JOIN sub2 ON base2.id = sub2.id) AS anon_1 "
-                "JOIN ep1 ON anon_1.sub2_id = ep1.base2_id "
-                "JOIN ep2 ON anon_1.sub2_id = ep2.base2_id",
-            )
-
     def test_six(self):
         Parent, Base1, Base2, Sub1, Sub2, EP1, EP2 = self._classes()
 
@@ -1847,6 +1822,7 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
         # I3abfb45dd6e50f84f29d39434caa0b550ce27864,
         # this query is coming out instead which is equivalent, but not
         # totally sure where this happens
+        # update: changed slightly in #10169
 
         stmt = select(Sub2)
 
@@ -1864,6 +1840,7 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
         self.assert_compile(
             stmt,
             "SELECT anon_1.sub2_id AS anon_1_sub2_id, "
+            "anon_1.base2_id AS anon_1_base2_id, "
             "anon_1.base2_base1_id AS anon_1_base2_base1_id, "
             "anon_1.base2_data AS anon_1_base2_data, "
             "anon_1.sub2_subdata AS anon_1_sub2_subdata "
@@ -1871,51 +1848,9 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
             "base2.base1_id AS base2_base1_id, base2.data AS base2_data, "
             "sub2.subdata AS sub2_subdata "
             "FROM base2 JOIN sub2 ON base2.id = sub2.id) AS anon_1 "
-            "JOIN ep1 ON anon_1.sub2_id = ep1.base2_id "
-            "JOIN ep2 ON anon_1.sub2_id = ep2.base2_id",
+            "JOIN ep1 ON anon_1.base2_id = ep1.base2_id "
+            "JOIN ep2 ON anon_1.base2_id = ep2.base2_id",
         )
-
-    def test_seven_legacy(self):
-        Parent, Base1, Base2, Sub1, Sub2, EP1, EP2 = self._classes()
-
-        s = fixture_session()
-
-        # as of from_self() changing in
-        # I3abfb45dd6e50f84f29d39434caa0b550ce27864,
-        # this query is coming out instead which is equivalent, but not
-        # totally sure where this happens
-        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
-
-            self.assert_compile(
-                # adding Sub2 to the entities list helps it,
-                # otherwise the joins for Sub2.ep1/ep2 don't have columns
-                # to latch onto.   Can't really make it better than this
-                s.query(Parent, Sub2)
-                .join(Parent.sub1)
-                .join(Sub1.sub2)
-                .from_self()
-                .join(Sub2.ep1)
-                .join(Sub2.ep2),
-                "SELECT anon_1.parent_id AS anon_1_parent_id, "
-                "anon_1.parent_data AS anon_1_parent_data, "
-                "anon_1.sub2_id AS anon_1_sub2_id, "
-                "anon_1.base2_base1_id AS anon_1_base2_base1_id, "
-                "anon_1.base2_data AS anon_1_base2_data, "
-                "anon_1.sub2_subdata AS anon_1_sub2_subdata "
-                "FROM (SELECT parent.id AS parent_id, "
-                "parent.data AS parent_data, "
-                "sub2.id AS sub2_id, "
-                "base2.id AS base2_id, "
-                "base2.base1_id AS base2_base1_id, "
-                "base2.data AS base2_data, "
-                "sub2.subdata AS sub2_subdata "
-                "FROM parent JOIN (base1 JOIN sub1 ON base1.id = sub1.id) "
-                "ON parent.id = sub1.parent_id JOIN "
-                "(base2 JOIN sub2 ON base2.id = sub2.id) "
-                "ON base1.id = base2.base1_id) AS anon_1 "
-                "JOIN ep1 ON anon_1.sub2_id = ep1.base2_id "
-                "JOIN ep2 ON anon_1.sub2_id = ep2.base2_id",
-            )
 
     def test_seven(self):
         Parent, Base1, Base2, Sub1, Sub2, EP1, EP2 = self._classes()
@@ -1949,10 +1884,12 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
             # adding Sub2 to the entities list helps it,
             # otherwise the joins for Sub2.ep1/ep2 don't have columns
             # to latch onto.   Can't really make it better than this
+            # update: changed slightly in #10169
             stmt,
             "SELECT anon_1.parent_id AS anon_1_parent_id, "
             "anon_1.parent_data AS anon_1_parent_data, "
             "anon_1.sub2_id AS anon_1_sub2_id, "
+            "anon_1.base2_id AS anon_1_base2_id, "
             "anon_1.base2_base1_id AS anon_1_base2_base1_id, "
             "anon_1.base2_data AS anon_1_base2_data, "
             "anon_1.sub2_subdata AS anon_1_sub2_subdata "
@@ -1966,8 +1903,8 @@ class SubClassToSubClassMultiTest(AssertsCompiledSQL, fixtures.MappedTest):
             "ON parent.id = sub1.parent_id JOIN "
             "(base2 JOIN sub2 ON base2.id = sub2.id) "
             "ON base1.id = base2.base1_id) AS anon_1 "
-            "JOIN ep1 ON anon_1.sub2_id = ep1.base2_id "
-            "JOIN ep2 ON anon_1.sub2_id = ep2.base2_id",
+            "JOIN ep1 ON anon_1.base2_id = ep1.base2_id "
+            "JOIN ep2 ON anon_1.base2_id = ep2.base2_id",
         )
 
 
@@ -2379,9 +2316,45 @@ class JoinedloadOverWPolyAliased(
         Link = self.classes.Link
 
         session = fixture_session()
-        q = session.query(cls).options(
-            joinedload(cls.links).joinedload(Link.child).joinedload(cls.links)
-        )
+
+        if (
+            cls is self.classes.Sub1
+            and Link.child.entity.class_ is self.classes.Parent
+        ):
+            # in 1.x we weren't checking for this:
+            # query(Sub1).options(
+            #   joinedload(Sub1.links).joinedload(Link.child).joinedload(Sub1.links)
+            # )
+            #
+            # where Link.child points to Parent.  the above is illegal because
+            # Link.child will return Parent instances that are not Sub1,
+            # so we cannot assume we will have Sub1.links available.  this now
+            # raises
+
+            with expect_raises_message(
+                exc.ArgumentError,
+                r'ORM mapped entity or attribute "Sub1.links" does not '
+                r'link from relationship "Link.child".  Did you mean to use '
+                r'"Link.child.of_type\(Sub1\)"\ or '
+                r'"loadopt.options'
+                r'\(selectin_polymorphic\(Parent, \[Sub1\]\), ...\)" \?',
+            ):
+                session.query(cls).options(
+                    joinedload(cls.links)
+                    .joinedload(Link.child)
+                    .joinedload(cls.links)
+                )
+            q = session.query(cls).options(
+                joinedload(cls.links)
+                .joinedload(Link.child.of_type(cls))
+                .joinedload(cls.links)
+            )
+        else:
+            q = session.query(cls).options(
+                joinedload(cls.links)
+                .joinedload(Link.child)
+                .joinedload(cls.links)
+            )
         if cls is self.classes.Sub1:
             extra = " WHERE parent.type IN (__[POSTCOMPILE_type_1])"
         else:
@@ -2739,7 +2712,9 @@ class MultipleAdaptUsesEntityOverTableTest(
     def test_two_joins_adaption(self):
         a, c, d = self.tables.a, self.tables.c, self.tables.d
 
-        with _aliased_join_warning("C->c"), _aliased_join_warning("D->d"):
+        with _aliased_join_warning(r"C\(c\)"), _aliased_join_warning(
+            r"D\(d\)"
+        ):
             q = self._two_join_fixture()._compile_state()
 
         btoc = q.from_clauses[0].left
@@ -2770,7 +2745,9 @@ class MultipleAdaptUsesEntityOverTableTest(
     def test_two_joins_sql(self):
         q = self._two_join_fixture()
 
-        with _aliased_join_warning("C->c"), _aliased_join_warning("D->d"):
+        with _aliased_join_warning(r"C\(c\)"), _aliased_join_warning(
+            r"D\(d\)"
+        ):
             self.assert_compile(
                 q,
                 "SELECT a.name AS a_name, a_1.name AS a_1_name, "
@@ -2784,7 +2761,6 @@ class MultipleAdaptUsesEntityOverTableTest(
 
 
 class SameNameOnJoined(fixtures.MappedTest):
-
     run_setup_mappers = "once"
     run_inserts = None
     run_deletes = None
@@ -2911,7 +2887,7 @@ class BetweenSubclassJoinWExtraJoinedLoad(
         sess = fixture_session()
 
         if autoalias:
-            # eager join is both from Enginer->LastSeen as well as
+            # eager join is both from Engineer->LastSeen as well as
             # Manager->LastSeen.  In the case of Manager->LastSeen,
             # Manager is internally aliased, and comes to JoinedEagerLoader
             # with no "parent" entity but an adapter.
@@ -2920,19 +2896,21 @@ class BetweenSubclassJoinWExtraJoinedLoad(
             m1 = aliased(Manager, flat=True)
             q = sess.query(Engineer, m1).join(Engineer.manager.of_type(m1))
 
-        with _aliased_join_warning(
-            "Manager->managers"
-        ) if autoalias else util.nullcontext():
+        with (
+            _aliased_join_warning(r"Manager\(managers\)")
+            if autoalias
+            else nullcontext()
+        ):
             self.assert_compile(
                 q,
-                "SELECT people.type AS people_type, engineers.id AS "
+                "SELECT engineers.id AS "
                 "engineers_id, "
-                "people.id AS people_id, "
+                "people.id AS people_id, people.type AS people_type, "
                 "engineers.primary_language AS engineers_primary_language, "
                 "engineers.manager_id AS engineers_manager_id, "
-                "people_1.type AS people_1_type, "
                 "managers_1.id AS managers_1_id, "
-                "people_1.id AS people_1_id, seen_1.id AS seen_1_id, "
+                "people_1.id AS people_1_id, people_1.type AS people_1_type, "
+                "seen_1.id AS seen_1_id, "
                 "seen_1.timestamp AS seen_1_timestamp, "
                 "seen_2.id AS seen_2_id, "
                 "seen_2.timestamp AS seen_2_timestamp "

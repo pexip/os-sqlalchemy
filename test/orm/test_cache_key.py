@@ -2,7 +2,10 @@ import random
 
 import sqlalchemy as sa
 from sqlalchemy import Column
+from sqlalchemy import column
+from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import Identity
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import literal_column
@@ -16,6 +19,7 @@ from sqlalchemy import true
 from sqlalchemy import update
 from sqlalchemy import util
 from sqlalchemy.ext.declarative import ConcreteBase
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import Bundle
 from sqlalchemy.orm import defaultload
@@ -26,6 +30,7 @@ from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import Load
 from sqlalchemy.orm import load_only
 from sqlalchemy.orm import Query
+from sqlalchemy.orm import query_expression
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
@@ -42,13 +47,13 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import int_within_variance
 from sqlalchemy.testing import ne_
+from sqlalchemy.testing.entities import ComparableMixin
 from sqlalchemy.testing.fixtures import DeclarativeMappedTest
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.util import count_cache_key_tuples
 from sqlalchemy.testing.util import total_size
 from test.orm import _fixtures
 from .inheritance import _poly_fixtures
-from .test_events import _RemoveListeners
 from .test_query import QueryTest
 
 
@@ -141,6 +146,12 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
                 with_expression(User.name, null()),
                 with_expression(User.name, func.foobar()),
                 with_expression(User.name, User.name == "test"),
+            ),
+            compare_values=True,
+        )
+
+        self._run_cache_key_fixture(
+            lambda: (
                 Load(User).with_expression(User.name, true()),
                 Load(User).with_expression(User.name, null()),
                 Load(User).with_expression(User.name, func.foobar()),
@@ -152,9 +163,7 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
     def test_loader_criteria(self):
         User, Address = self.classes("User", "Address")
 
-        from sqlalchemy import Column, Integer, String
-
-        class Foo(object):
+        class Foo:
             id = Column(Integer)
             name = Column(String)
 
@@ -170,9 +179,7 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         )
 
     def test_loader_criteria_bound_param_thing(self):
-        from sqlalchemy import Column, Integer
-
-        class Foo(object):
+        class Foo:
             id = Column(Integer)
 
         def go(param):
@@ -214,22 +221,18 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
             lambda: (
                 joinedload(User.addresses),
                 joinedload(User.addresses.of_type(aliased(Address))),
-                joinedload("addresses"),
                 joinedload(User.orders),
                 joinedload(User.orders.and_(Order.id != 5)),
                 joinedload(User.orders.and_(Order.id == 5)),
                 joinedload(User.orders.and_(Order.description != "somename")),
-                joinedload(User.orders).selectinload("items"),
                 joinedload(User.orders).selectinload(Order.items),
                 defer(User.id),
-                defer("id"),
                 defer("*"),
                 defer(Address.id),
                 subqueryload(User.orders),
                 selectinload(User.orders),
                 joinedload(User.addresses).defer(Address.id),
                 joinedload(aliased(User).addresses).defer(Address.id),
-                joinedload(User.addresses).defer("id"),
                 joinedload(User.orders).joinedload(Order.items),
                 joinedload(User.orders).subqueryload(Order.items),
                 subqueryload(User.orders).subqueryload(Order.items),
@@ -248,6 +251,7 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         User, Address, Keyword, Order, Item = self.classes(
             "User", "Address", "Keyword", "Order", "Item"
         )
+        Dingaling = self.classes.Dingaling
 
         self._run_cache_key_fixture(
             lambda: (
@@ -255,7 +259,9 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
                     joinedload(Address.dingaling)
                 ),
                 joinedload(User.addresses).options(
-                    joinedload(Address.dingaling).options(load_only("name"))
+                    joinedload(Address.dingaling).options(
+                        load_only(Dingaling.id)
+                    )
                 ),
                 joinedload(User.orders).options(
                     joinedload(Order.items).options(joinedload(Item.keywords))
@@ -304,7 +310,6 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         )
 
     def test_selects_w_orm_joins(self):
-
         User, Address, Keyword, Order, Item = self.classes(
             "User", "Address", "Keyword", "Order", "Item"
         )
@@ -336,7 +341,6 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         )
 
     def test_orm_query_w_orm_joins(self):
-
         User, Address, Keyword, Order, Item = self.classes(
             "User", "Address", "Keyword", "Order", "Item"
         )
@@ -411,13 +415,13 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         """test for issue discovered in #7394"""
 
         @registry.mapped
-        class User2(object):
+        class User2:
             __table__ = self.tables.users
 
             name_syn = synonym("name")
 
         @registry.mapped
-        class Address2(object):
+        class Address2:
             __table__ = self.tables.addresses
 
             name_syn = synonym("email_address")
@@ -526,7 +530,6 @@ class CacheKeyTest(fixtures.CacheKeyFixture, _fixtures.FixtureTest):
         )
 
     def test_orm_query_basic(self):
-
         User, Address, Keyword, Order, Item = self.classes(
             "User", "Address", "Keyword", "Order", "Item"
         )
@@ -640,15 +643,9 @@ class PolyCacheKeyTest(fixtures.CacheKeyFixture, _poly_fixtures._Polymorphic):
         self._run_cache_key_fixture(
             lambda: (
                 inspect(Person),
-                inspect(
-                    aliased(Person, me_stmt),
-                ),
-                inspect(
-                    aliased(Person, meb_stmt),
-                ),
-                inspect(
-                    with_polymorphic(Person, [Manager, Engineer]),
-                ),
+                inspect(aliased(Person, me_stmt)),
+                inspect(aliased(Person, meb_stmt)),
+                inspect(with_polymorphic(Person, [Manager, Engineer])),
                 # aliased=True is the same as flat=True for default selectable
                 inspect(
                     with_polymorphic(
@@ -692,9 +689,7 @@ class PolyCacheKeyTest(fixtures.CacheKeyFixture, _poly_fixtures._Polymorphic):
                         aliased=True,
                     ),
                 ),
-                inspect(
-                    with_polymorphic(Person, [Manager, Engineer, Boss]),
-                ),
+                inspect(with_polymorphic(Person, [Manager, Engineer, Boss])),
                 inspect(
                     with_polymorphic(
                         Person,
@@ -709,6 +704,7 @@ class PolyCacheKeyTest(fixtures.CacheKeyFixture, _poly_fixtures._Polymorphic):
                         polymorphic_on=literal_column("bar"),
                     ),
                 ),
+                inspect(with_polymorphic(Person, "*", name="foo")),
             ),
             compare_values=True,
         )
@@ -785,6 +781,55 @@ class PolyCacheKeyTest(fixtures.CacheKeyFixture, _poly_fixtures._Polymorphic):
             compare_values=True,
         )
 
+    @testing.variation(
+        "exprtype", ["plain_column", "self_standing_case", "case_w_columns"]
+    )
+    def test_hybrid_w_case_ac(self, decl_base, exprtype):
+        """test #9728"""
+
+        class Employees(decl_base):
+            __tablename__ = "employees"
+            id = Column(String(128), primary_key=True)
+            first_name = Column(String(length=64))
+
+            @hybrid_property
+            def name(self):
+                return self.first_name
+
+            @name.expression
+            def name(
+                cls,
+            ):
+                if exprtype.plain_column:
+                    return cls.first_name
+                elif exprtype.self_standing_case:
+                    return case(
+                        (column("x") == 1, column("q")),
+                        else_=column("q"),
+                    )
+                elif exprtype.case_w_columns:
+                    return case(
+                        (column("x") == 1, column("q")),
+                        else_=cls.first_name,
+                    )
+                else:
+                    exprtype.fail()
+
+        def go1():
+            employees_2 = aliased(Employees, name="employees_2")
+            stmt = select(employees_2.name)
+            return stmt
+
+        def go2():
+            employees_2 = aliased(Employees, name="employees_2")
+            stmt = select(employees_2)
+            return stmt
+
+        self._run_cache_key_fixture(
+            lambda: stmt_20(go1(), go2()),
+            compare_values=True,
+        )
+
 
 class RoundTripTest(QueryTest, AssertsCompiledSQL):
     __dialect__ = "default"
@@ -821,7 +866,6 @@ class RoundTripTest(QueryTest, AssertsCompiledSQL):
         return User, Address
 
     def test_subqueryload(self, plain_fixture):
-
         # subqueryload works pretty poorly w/ caching because it has
         # to create a new query.  previously, baked query went through a
         # bunch of hoops to improve upon this and they were found to be
@@ -894,7 +938,6 @@ class RoundTripTest(QueryTest, AssertsCompiledSQL):
         user_table = inspect(User).persist_selectable
 
         def go():
-
             my_thing = case((User.id > 9, 1), else_=2)
 
             # include entities in the statement so that we test that
@@ -1042,7 +1085,9 @@ class CompositeTest(fixtures.MappedTest):
         eq_(stmt._generate_cache_key(), stmt2._generate_cache_key())
 
 
-class EmbeddedSubqTest(_RemoveListeners, DeclarativeMappedTest):
+class EmbeddedSubqTest(
+    fixtures.RemoveORMEventsGlobally, DeclarativeMappedTest
+):
     """test #8790.
 
     it's expected that cache key structures will change, this test is here
@@ -1090,7 +1135,9 @@ class EmbeddedSubqTest(_RemoveListeners, DeclarativeMappedTest):
         Base.registry.configure()
 
     @testing.combinations(
-        "tuples", ("memory", testing.requires.is64bit), argnames="assert_on"
+        "tuples",
+        ("memory", testing.requires.is64bit + testing.requires.cpython),
+        argnames="assert_on",
     )
     def test_cache_key_gen(self, assert_on):
         Employee = self.classes.Employee
@@ -1121,3 +1168,70 @@ class EmbeddedSubqTest(_RemoveListeners, DeclarativeMappedTest):
                 int_within_variance(29796, total_size(ck), 0.05)
             else:
                 testing.skip_test("python platform not available")
+
+
+class WithExpresionLoaderOptTest(DeclarativeMappedTest):
+    """test #10570"""
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(ComparableMixin, Base):
+            __tablename__ = "a"
+
+            id = Column(Integer, Identity(), primary_key=True)
+            data = Column(String(30))
+            bs = relationship("B")
+
+        class B(ComparableMixin, Base):
+            __tablename__ = "b"
+            id = Column(Integer, Identity(), primary_key=True)
+            a_id = Column(ForeignKey("a.id"))
+            boolean = query_expression()
+            data = Column(String(30))
+
+    @classmethod
+    def insert_data(cls, connection):
+        A, B = cls.classes("A", "B")
+
+        with Session(connection) as s:
+            s.add(A(bs=[B(data="a"), B(data="b"), B(data="c")]))
+            s.commit()
+
+    @testing.combinations(
+        joinedload, lazyload, defaultload, selectinload, subqueryload
+    )
+    @testing.only_on(
+        ["sqlite", "postgresql"],
+        "in-place boolean not generally available (Oracle, SQL Server)",
+    )
+    def test_from_opt(self, loadopt):
+        A, B = self.classes("A", "B")
+
+        def go(value):
+            with Session(testing.db) as sess:
+                objects = sess.execute(
+                    select(A).options(
+                        loadopt(A.bs).options(
+                            with_expression(B.boolean, B.data == value)
+                        )
+                    )
+                ).scalars()
+                if loadopt is joinedload:
+                    objects = objects.unique()
+                eq_(
+                    objects.all(),
+                    [
+                        A(
+                            bs=[
+                                B(data="a", boolean=value == "a"),
+                                B(data="b", boolean=value == "b"),
+                                B(data="c", boolean=value == "c"),
+                            ]
+                        )
+                    ],
+                )
+
+        go("b")
+        go("c")

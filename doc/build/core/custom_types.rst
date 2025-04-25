@@ -156,7 +156,7 @@ denormalize::
 
         def process_bind_param(self, value, dialect):
             if value is not None:
-                if not value.tzinfo:
+                if not value.tzinfo or value.tzinfo.utcoffset(value) is None:
                     raise TypeError("tzinfo is required")
                 value = value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
             return value
@@ -171,12 +171,20 @@ denormalize::
 Backend-agnostic GUID Type
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Receives and returns Python uuid() objects.  Uses the PG UUID type
-when using PostgreSQL, CHAR(32) on other backends, storing them
-in stringified hex format.   Can be modified to store
-binary in CHAR(16) if desired::
+.. note:: Since version 2.0 the built-in :class:`_types.Uuid` type that
+    behaves similarly should be preferred. This example is presented
+    just as an example of a type decorator that receives and returns
+    python objects.
 
+Receives and returns Python uuid() objects.  
+Uses the PG UUID type when using PostgreSQL, UNIQUEIDENTIFIER when using MSSQL,
+CHAR(32) on other backends, storing them in stringified format.
+The ``GUIDHyphens`` version stores the value with hyphens instead of just the hex
+string, using a CHAR(36) type::
+
+    from operator import attrgetter
     from sqlalchemy.types import TypeDecorator, CHAR
+    from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
     from sqlalchemy.dialects.postgresql import UUID
     import uuid
 
@@ -184,31 +192,32 @@ binary in CHAR(16) if desired::
     class GUID(TypeDecorator):
         """Platform-independent GUID type.
 
-        Uses PostgreSQL's UUID type, otherwise uses
-        CHAR(32), storing as stringified hex values.
+        Uses PostgreSQL's UUID type or MSSQL's UNIQUEIDENTIFIER,
+        otherwise uses CHAR(32), storing as stringified hex values.
 
         """
 
         impl = CHAR
         cache_ok = True
 
+        _default_type = CHAR(32)
+        _uuid_as_str = attrgetter("hex")
+
         def load_dialect_impl(self, dialect):
             if dialect.name == "postgresql":
                 return dialect.type_descriptor(UUID())
+            elif dialect.name == "mssql":
+                return dialect.type_descriptor(UNIQUEIDENTIFIER())
             else:
-                return dialect.type_descriptor(CHAR(32))
+                return dialect.type_descriptor(self._default_type)
 
         def process_bind_param(self, value, dialect):
-            if value is None:
+            if value is None or dialect.name in ("postgresql", "mssql"):
                 return value
-            elif dialect.name == "postgresql":
-                return str(value)
             else:
                 if not isinstance(value, uuid.UUID):
-                    return "%.32x" % uuid.UUID(value).int
-                else:
-                    # hexstring
-                    return "%.32x" % value.int
+                    value = uuid.UUID(value)
+                return self._uuid_as_str(value)
 
         def process_result_value(self, value, dialect):
             if value is None:
@@ -217,6 +226,49 @@ binary in CHAR(16) if desired::
                 if not isinstance(value, uuid.UUID):
                     value = uuid.UUID(value)
                 return value
+
+
+    class GUIDHyphens(GUID):
+        """Platform-independent GUID type.
+
+        Uses PostgreSQL's UUID type or MSSQL's UNIQUEIDENTIFIER,
+        otherwise uses CHAR(36), storing as stringified uuid values.
+
+        """
+
+        _default_type = CHAR(36)
+        _uuid_as_str = str
+
+Linking Python ``uuid.UUID`` to the Custom Type for ORM mappings
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When declaring ORM mappings using :ref:`Annotated Declarative Table <orm_declarative_mapped_column>`
+mappings, the custom ``GUID`` type defined above may be associated with
+the Python ``uuid.UUID`` datatype by adding it to the
+:ref:`type annotation map <orm_declarative_mapped_column_type_map>`,
+which is typically defined on the :class:`_orm.DeclarativeBase` class::
+
+    import uuid
+    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+    class Base(DeclarativeBase):
+        type_annotation_map = {
+            uuid.UUID: GUID,
+        }
+
+With the above configuration, ORM mapped classes which extend from
+``Base`` may refer to Python ``uuid.UUID`` in annotations which will make use
+of ``GUID`` automatically::
+
+    class MyModel(Base):
+        __tablename__ = "my_table"
+
+        id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+
+.. seealso::
+
+    :ref:`orm_declarative_mapped_column_type_map`
 
 Marshal JSON Strings
 ^^^^^^^^^^^^^^^^^^^^
@@ -227,10 +279,11 @@ to/from JSON.   Can be modified to use Python's builtin json encoder::
     from sqlalchemy.types import TypeDecorator, VARCHAR
     import json
 
+
     class JSONEncodedDict(TypeDecorator):
         """Represents an immutable structure as a json-encoded string.
 
-        Usage::
+        Usage:
 
             JSONEncodedDict(255)
 
@@ -310,7 +363,6 @@ method::
 
 
     class JSONEncodedDict(TypeDecorator):
-
         impl = VARCHAR
 
         cache_ok = True
@@ -351,9 +403,7 @@ possible to define SQL-level transformations as well.  The rationale here is whe
 only the relational database contains a particular series of functions that are necessary
 to coerce incoming and outgoing data between an application and persistence format.
 Examples include using database-defined encryption/decryption functions, as well
-as stored procedures that handle geographic data.  The PostGIS extension to PostgreSQL
-includes an extensive array of SQL functions that are necessary for coercing
-data into particular formats.
+as stored procedures that handle geographic data.
 
 Any :class:`.TypeEngine`, :class:`.UserDefinedType` or :class:`.TypeDecorator` subclass
 can include implementations of
@@ -399,7 +449,9 @@ and use it in a :func:`_expression.select` construct::
 The resulting SQL embeds both functions as appropriate.   ``ST_AsText``
 is applied to the columns clause so that the return value is run through
 the function before passing into a result set, and ``ST_GeomFromText``
-is run on the bound parameter so that the passed-in value is converted::
+is run on the bound parameter so that the passed-in value is converted:
+
+.. sourcecode:: sql
 
     SELECT geometry.geom_id, ST_AsText(geometry.geom_data) AS geom_data_1
     FROM geometry
@@ -413,7 +465,9 @@ label is moved to the outside of the wrapped expression::
 
     print(select(geometry.c.geom_data.label("my_data")))
 
-Output::
+Output:
+
+.. sourcecode:: sql
 
     SELECT ST_AsText(geometry.geom_data) AS my_data
     FROM geometry
@@ -467,33 +521,35 @@ transparently::
         Column("message", PGPString("this is my passphrase")),
     )
 
-    engine = create_engine("postgresql://scott:tiger@localhost/test", echo=True)
+    engine = create_engine("postgresql+psycopg2://scott:tiger@localhost/test", echo=True)
     with engine.begin() as conn:
         metadata_obj.create_all(conn)
 
-        conn.execute(message.insert(), username="some user", message="this is my message")
+        conn.execute(
+            message.insert(),
+            {"username": "some user", "message": "this is my message"},
+        )
 
         print(
             conn.scalar(select(message.c.message).where(message.c.username == "some user"))
         )
 
 The ``pgp_sym_encrypt`` and ``pgp_sym_decrypt`` functions are applied
-to the INSERT and SELECT statements::
+to the INSERT and SELECT statements:
+
+.. sourcecode:: sql
 
   INSERT INTO message (username, message)
     VALUES (%(username)s, pgp_sym_encrypt(%(message)s, %(pgp_sym_encrypt_1)s))
-    {'username': 'some user', 'message': 'this is my message',
-      'pgp_sym_encrypt_1': 'this is my passphrase'}
+    -- {'username': 'some user', 'message': 'this is my message',
+    --  'pgp_sym_encrypt_1': 'this is my passphrase'}
 
   SELECT pgp_sym_decrypt(message.message, %(pgp_sym_decrypt_1)s) AS message_1
     FROM message
     WHERE message.username = %(username_1)s
-    {'pgp_sym_decrypt_1': 'this is my passphrase', 'username_1': 'some user'}
+    -- {'pgp_sym_decrypt_1': 'this is my passphrase', 'username_1': 'some user'}
 
 
-.. seealso::
-
-   :ref:`examples_postgis`
 
 .. _types_operators:
 
@@ -514,12 +570,14 @@ When the need arises for a SQL operator that isn't directly supported by the
 already supplied methods above, the most expedient way to produce this operator is
 to use the :meth:`_sql.Operators.op` method on any SQL expression object; this method
 is given a string representing the SQL operator to render, and the return value
-is a Python callable that accepts any arbitrary right-hand side expression::
+is a Python callable that accepts any arbitrary right-hand side expression:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import column
     >>> expr = column("x").op(">>")(column("y"))
     >>> print(expr)
-    x >> y
+    {printsql}x >> y
 
 When making use of custom SQL types, there is also a means of implementing
 custom operators as above that are automatically present upon any column
@@ -553,11 +611,13 @@ establishes the :attr:`.TypeEngine.comparator_factory` attribute as
 referring to a new class, subclassing the :class:`.TypeEngine.Comparator` class
 associated with the :class:`.Integer` type.
 
-Usage::
+Usage:
+
+.. sourcecode:: pycon+sql
 
     >>> sometable = Table("sometable", metadata, Column("data", MyInt))
     >>> print(sometable.c.data + 5)
-    sometable.data goofy :data_1
+    {printsql}sometable.data goofy :data_1
 
 The implementation for :meth:`.ColumnOperators.__add__` is consulted
 by an owning SQL expression, by instantiating the :class:`.TypeEngine.Comparator` with
@@ -587,10 +647,12 @@ to integers::
             def log(self, other):
                 return func.log(self.expr, other)
 
-Using the above type::
+Using the above type:
+
+.. sourcecode:: pycon+sql
 
     >>> print(sometable.c.data.log(5))
-    log(:log_1, :log_2)
+    {printsql}log(:log_1, :log_2)
 
 When using :meth:`.Operators.op` for comparison operations that return a
 boolean result, the :paramref:`.Operators.op.is_comparison` flag should be
@@ -618,11 +680,13 @@ along with a :class:`.custom_op` to produce the factorial expression::
                     self.expr, modifier=operators.custom_op("!"), type_=MyInteger
                 )
 
-Using the above type::
+Using the above type:
+
+.. sourcecode:: pycon+sql
 
     >>> from sqlalchemy.sql import column
     >>> print(column("x", MyInteger).factorial())
-    x !
+    {printsql}x !
 
 .. seealso::
 
@@ -669,16 +733,25 @@ The implication of this is that if a :class:`_schema.Table` object makes use of 
 objects that don't correspond directly to the database-native type name, if we
 create a new :class:`_schema.Table` object against a new :class:`_schema.MetaData` collection
 for this database table elsewhere using reflection, it will not have this
-datatype. For example::
+datatype. For example:
 
-    >>> from sqlalchemy import Table, Column, MetaData, create_engine, PickleType, Integer
+.. sourcecode:: pycon+sql
+
+    >>> from sqlalchemy import (
+    ...     Table,
+    ...     Column,
+    ...     MetaData,
+    ...     create_engine,
+    ...     PickleType,
+    ...     Integer,
+    ... )
     >>> metadata = MetaData()
     >>> my_table = Table(
     ...     "my_table", metadata, Column("id", Integer), Column("data", PickleType)
     ... )
     >>> engine = create_engine("sqlite://", echo="debug")
     >>> my_table.create(engine)
-    INFO sqlalchemy.engine.base.Engine
+    {execsql}INFO sqlalchemy.engine.base.Engine
     CREATE TABLE my_table (
         id INTEGER,
         data BLOB
@@ -698,11 +771,13 @@ object that was created by us directly, it is :class:`.PickleType`::
 
 However, if we create another instance of :class:`_schema.Table` using reflection,
 the use of :class:`.PickleType` is not represented in the SQLite database we've
-created; we instead get back :class:`.BLOB`::
+created; we instead get back :class:`.BLOB`:
+
+.. sourcecode:: pycon+sql
 
     >>> metadata_two = MetaData()
     >>> my_reflected_table = Table("my_table", metadata_two, autoload_with=engine)
-    INFO sqlalchemy.engine.base.Engine PRAGMA main.table_info("my_table")
+    {execsql}INFO sqlalchemy.engine.base.Engine PRAGMA main.table_info("my_table")
     INFO sqlalchemy.engine.base.Engine ()
     DEBUG sqlalchemy.engine.base.Engine Col ('cid', 'name', 'type', 'notnull', 'dflt_value', 'pk')
     DEBUG sqlalchemy.engine.base.Engine Row (0, 'id', 'INTEGER', 0, None, 0)
@@ -728,7 +803,10 @@ columns for which we want to use a custom or decorated datatype::
 
     >>> metadata_three = MetaData()
     >>> my_reflected_table = Table(
-    ...     "my_table", metadata_three, Column("data", PickleType), autoload_with=engine
+    ...     "my_table",
+    ...     metadata_three,
+    ...     Column("data", PickleType),
+    ...     autoload_with=engine,
     ... )
 
 The ``my_reflected_table`` object above is reflected, and will load the

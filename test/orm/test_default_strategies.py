@@ -1,12 +1,19 @@
 import sqlalchemy as sa
+from sqlalchemy import Column
+from sqlalchemy import ForeignKey
+from sqlalchemy import Integer
+from sqlalchemy import select
 from sqlalchemy import testing
 from sqlalchemy import util
+from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import defaultload
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Session
 from sqlalchemy.orm import subqueryload
-from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.assertions import expect_raises_message
 from sqlalchemy.testing.fixtures import fixture_session
 from test.orm import _fixtures
 
@@ -255,14 +262,27 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
         self._assert_addresses_loaded(users)
 
     def test_star_must_be_alone(self):
-        sess = self._downgrade_fixture()
+        self._downgrade_fixture()
         User = self.classes.User
-        opt = subqueryload("*", User.addresses)
-        assert_raises_message(
+
+        with expect_raises_message(
             sa.exc.ArgumentError,
             "Wildcard token cannot be followed by another entity",
-            sess.query(User).options(opt)._compile_context,
-        )
+        ):
+            subqueryload("*", User.addresses)
+
+    def test_star_cant_be_followed(self):
+        self._downgrade_fixture()
+        User = self.classes.User
+        Order = self.classes.Order
+
+        with expect_raises_message(
+            sa.exc.ArgumentError,
+            "Wildcard token cannot be followed by another entity",
+        ):
+            subqueryload(User.addresses).joinedload("*").selectinload(
+                Order.items
+            )
 
     def test_global_star_ignored_no_entities_unbound(self):
         sess = self._downgrade_fixture()
@@ -337,6 +357,8 @@ class DefaultStrategyOptionsTest(_fixtures.FixtureTest):
         # Verify lazyload('*') prevented orders.items load
         # users[0].orders[0] has 3 items, each with keywords: 2 sql
         # ('items' and 'items.keywords' subquery)
+        # but!  the subqueryload for further sub-items *does* load.
+        # so at the moment the wildcard load is shut off for this load
         def go():
             for i in users[0].orders[0].items:
                 i.keywords
@@ -637,7 +659,6 @@ class NoLoadTest(_fixtures.FixtureTest):
     run_deletes = None
 
     def test_o2m_noload(self):
-
         Address, addresses, users, User = (
             self.classes.Address,
             self.tables.addresses,
@@ -724,3 +745,122 @@ class NoLoadTest(_fixtures.FixtureTest):
             eq_(a1.user, None)
 
         self.sql_count_(0, go)
+
+
+class Issue11292Test(fixtures.DeclarativeMappedTest):
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class Parent(Base):
+            __tablename__ = "parent"
+
+            id = Column(Integer, primary_key=True)
+
+            extension = relationship(
+                "Extension", back_populates="parent", uselist=False
+            )
+
+        class Child(Base):
+            __tablename__ = "child"
+
+            id = Column(Integer, primary_key=True)
+
+            extensions = relationship("Extension", back_populates="child")
+
+        class Extension(Base):
+            __tablename__ = "extension"
+
+            id = Column(Integer, primary_key=True)
+            parent_id = Column(Integer, ForeignKey(Parent.id))
+            child_id = Column(Integer, ForeignKey(Child.id))
+
+            parent = relationship("Parent", back_populates="extension")
+            child = relationship("Child", back_populates="extensions")
+
+    @classmethod
+    def insert_data(cls, connection):
+        Parent, Child, Extension = cls.classes("Parent", "Child", "Extension")
+        with Session(connection) as session:
+            for id_ in (1, 2, 3):
+                session.add(Parent(id=id_))
+                session.add(Child(id=id_))
+                session.add(Extension(id=id_, parent_id=id_, child_id=id_))
+            session.commit()
+
+    @testing.variation("load_as_option", [True, False])
+    def test_defaultload_dont_propagate(self, load_as_option):
+        Parent, Child, Extension = self.classes("Parent", "Child", "Extension")
+
+        session = fixture_session()
+
+        # here, we want the defaultload() to go away on subsequent loads,
+        # becuase Parent.extension is propagate_to_loaders=False
+        query = (
+            select(Parent)
+            .join(Extension)
+            .join(Child)
+            .options(
+                contains_eager(Parent.extension),
+                (
+                    defaultload(Parent.extension).options(
+                        contains_eager(Extension.child)
+                    )
+                    if load_as_option
+                    else defaultload(Parent.extension).contains_eager(
+                        Extension.child
+                    )
+                ),
+            )
+        )
+
+        parents = session.scalars(query).all()
+
+        eq_(
+            [(p.id, p.extension.id, p.extension.child.id) for p in parents],
+            [(1, 1, 1), (2, 2, 2), (3, 3, 3)],
+        )
+
+        session.expire_all()
+
+        eq_(
+            [(p.id, p.extension.id, p.extension.child.id) for p in parents],
+            [(1, 1, 1), (2, 2, 2), (3, 3, 3)],
+        )
+
+    @testing.variation("load_as_option", [True, False])
+    def test_defaultload_yes_propagate(self, load_as_option):
+        Parent, Child, Extension = self.classes("Parent", "Child", "Extension")
+
+        session = fixture_session()
+
+        # here, we want the defaultload() to go away on subsequent loads,
+        # becuase Parent.extension is propagate_to_loaders=False
+        query = select(Parent).options(
+            (
+                defaultload(Parent.extension).options(
+                    joinedload(Extension.child)
+                )
+                if load_as_option
+                else defaultload(Parent.extension).joinedload(Extension.child)
+            ),
+        )
+
+        parents = session.scalars(query).all()
+
+        eq_(
+            [(p.id, p.extension.id, p.extension.child.id) for p in parents],
+            [(1, 1, 1), (2, 2, 2), (3, 3, 3)],
+        )
+
+        session.expire_all()
+
+        # this would be 9 without the joinedload
+        with self.assert_statement_count(testing.db, 6):
+            eq_(
+                [
+                    (p.id, p.extension.id, p.extension.child.id)
+                    for p in parents
+                ],
+                [(1, 1, 1), (2, 2, 2), (3, 3, 3)],
+            )

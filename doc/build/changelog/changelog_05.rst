@@ -2526,7 +2526,7 @@
         :tickets: 
 
       Wrote a docstring for Oracle dialect. Apparently that Ohloh
-      "few source code comments" label is starting to sting :).
+      "few source code comments" label is starting to string :).
 
     .. change::
         :tags: oracle
@@ -2873,7 +2873,7 @@
       logic disabled in the sqlite dialect, to adjust for pysqlite
       2.5.0's new requirement that only Python unicode objects are
       accepted;
-      https://itsystementwicklung.de/pipermail/list-pysqlite/2008-March/000018.html
+      http://web.archive.org/web/20090614054912/https://itsystementwicklung.de/pipermail/list-pysqlite/2008-March/000018.html
 
     .. change::
         :tags: mysql

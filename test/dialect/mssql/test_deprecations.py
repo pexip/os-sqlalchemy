@@ -1,4 +1,5 @@
-# -*- encoding: utf-8
+from unittest.mock import Mock
+
 from sqlalchemy import Column
 from sqlalchemy import engine_from_config
 from sqlalchemy import Integer
@@ -17,7 +18,6 @@ from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.testing.mock import Mock
 
 
 def _legacy_schema_aliasing_warning():
@@ -64,14 +64,14 @@ class LegacySchemaAliasingTest(fixtures.TestBase, AssertsCompiledSQL):
     @testing.combinations(
         (
             {
-                "sqlalchemy.url": "mssql://foodsn",
+                "sqlalchemy.url": "mssql+pyodbc://foodsn",
                 "sqlalchemy.legacy_schema_aliasing": "true",
             },
             True,
         ),
         (
             {
-                "sqlalchemy.url": "mssql://foodsn",
+                "sqlalchemy.url": "mssql+pyodbc://foodsn",
                 "sqlalchemy.legacy_schema_aliasing": "false",
             },
             False,
@@ -207,7 +207,6 @@ class LegacySchemaAliasingBackendTest(
             )
 
         with eng.begin() as conn:
-
             tbl.create(conn)
             conn.execute(tbl.insert(), {"id": 1})
             eq_(conn.scalar(tbl.select()), 1)

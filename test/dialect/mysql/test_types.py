@@ -1,4 +1,3 @@
-# coding: utf-8
 from collections import OrderedDict
 import datetime
 import decimal
@@ -21,8 +20,8 @@ from sqlalchemy import TIMESTAMP
 from sqlalchemy import TypeDecorator
 from sqlalchemy import types as sqltypes
 from sqlalchemy import UnicodeText
-from sqlalchemy import util
 from sqlalchemy.dialects.mysql import base as mysql
+from sqlalchemy.dialects.mysql import mariadb
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
@@ -31,7 +30,6 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import eq_regex
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
-from sqlalchemy.util import u
 
 
 class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -388,7 +386,7 @@ class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 mysql.MSTimeStamp(),
                 DefaultClause(
                     sql.text(
-                        "'1999-09-09 09:09:09' " "ON UPDATE CURRENT_TIMESTAMP"
+                        "'1999-09-09 09:09:09' ON UPDATE CURRENT_TIMESTAMP"
                     )
                 ),
             ],
@@ -401,7 +399,7 @@ class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
                 mysql.MSTimeStamp,
                 DefaultClause(
                     sql.text(
-                        "'1999-09-09 09:09:09' " "ON UPDATE CURRENT_TIMESTAMP"
+                        "'1999-09-09 09:09:09' ON UPDATE CURRENT_TIMESTAMP"
                     )
                 ),
             ],
@@ -413,9 +411,7 @@ class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             [
                 mysql.MSTimeStamp(),
                 DefaultClause(
-                    sql.text(
-                        "CURRENT_TIMESTAMP " "ON UPDATE CURRENT_TIMESTAMP"
-                    )
+                    sql.text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
                 ),
             ],
             {},
@@ -426,9 +422,7 @@ class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             [
                 mysql.MSTimeStamp,
                 DefaultClause(
-                    sql.text(
-                        "CURRENT_TIMESTAMP " "ON UPDATE CURRENT_TIMESTAMP"
-                    )
+                    sql.text("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP")
                 ),
             ],
             {"nullable": False},
@@ -465,15 +459,42 @@ class TypeCompileTest(fixtures.TestBase, AssertsCompiledSQL):
             datetime.time(8, 37, 35, 450),
         )
 
+    @testing.combinations(
+        ("sa", sqltypes.Float(), "FLOAT"),
+        ("sa", sqltypes.Double(), "DOUBLE"),
+        ("sa", sqltypes.FLOAT(), "FLOAT"),
+        ("sa", sqltypes.REAL(), "REAL"),
+        ("sa", sqltypes.DOUBLE(), "DOUBLE"),
+        ("sa", sqltypes.DOUBLE_PRECISION(), "DOUBLE PRECISION"),
+        ("mysql", mysql.FLOAT(), "FLOAT"),
+        ("mysql", mysql.DOUBLE(), "DOUBLE"),
+        ("mysql", mysql.REAL(), "REAL"),
+        id_="ira",
+    )
+    def test_float_type_compile(self, type_, sql_text):
+        self.assert_compile(type_, sql_text)
+
+
+class INETMariadbTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = mariadb.MariaDBDialect()
+
+    @testing.combinations(
+        (mariadb.INET4(), "INET4"),
+        (mariadb.INET6(), "INET6"),
+    )
+    def test_mariadb_inet6(self, type_, res):
+        self.assert_compile(type_, res)
+
 
 class TypeRoundTripTest(fixtures.TestBase, AssertsExecutionResults):
-
     __dialect__ = mysql.dialect()
     __only_on__ = "mysql", "mariadb"
     __backend__ = True
 
     # fixed in mysql-connector as of 2.0.1,
     # see https://bugs.mysql.com/bug.php?id=73266
+
+    @testing.requires.literal_float_coercion
     def test_precision_float_roundtrip(self, metadata, connection):
         t = Table(
             "t",
@@ -520,8 +541,8 @@ class TypeRoundTripTest(fixtures.TestBase, AssertsExecutionResults):
         # in order to test the condition here, need to use
         # MySQLdb 1.2.3 and also need to pass either use_unicode=1
         # or charset=utf8 to the URL.
-        connection.execute(t.insert(), dict(id=1, data=u("some text")))
-        assert isinstance(connection.scalar(select(t.c.data)), util.text_type)
+        connection.execute(t.insert(), dict(id=1, data="some text"))
+        assert isinstance(connection.scalar(select(t.c.data)), str)
 
     @testing.metadata_fixture(ddl="class")
     def bit_table(self, metadata):
@@ -539,7 +560,7 @@ class TypeRoundTripTest(fixtures.TestBase, AssertsExecutionResults):
         )
         return bit_table
 
-    i, j, k, l = 255, 2 ** 32 - 1, 2 ** 63 - 1, 2 ** 64 - 1
+    i, j, k, l = 255, 2**32 - 1, 2**63 - 1, 2**64 - 1
 
     @testing.combinations(
         (([0] * 8), None),
@@ -553,7 +574,6 @@ class TypeRoundTripTest(fixtures.TestBase, AssertsExecutionResults):
         argnames="store, expected",
     )
     def test_bit_50_roundtrip(self, connection, bit_table, store, expected):
-
         reflected = Table("mysql_bits", MetaData(), autoload_with=connection)
 
         expected = expected or store
@@ -748,7 +768,6 @@ class JSONTest(fixtures.TestBase):
 
     @testing.requires.reflects_json_type
     def test_reflection(self, metadata, connection):
-
         Table("mysql_json", metadata, Column("foo", mysql.JSON))
         metadata.create_all(connection)
 
@@ -773,12 +792,11 @@ class JSONTest(fixtures.TestBase):
 class EnumSetTest(
     fixtures.TestBase, AssertsExecutionResults, AssertsCompiledSQL
 ):
-
     __only_on__ = "mysql", "mariadb"
     __dialect__ = mysql.dialect()
     __backend__ = True
 
-    class SomeEnum(object):
+    class SomeEnum:
         # Implements PEP 435 in the minimal fashion needed by SQLAlchemy
         __members__ = OrderedDict()
 
@@ -992,14 +1010,14 @@ class EnumSetTest(
             t.insert(),
             [
                 {"id": 1, "data": set()},
-                {"id": 2, "data": set([""])},
-                {"id": 3, "data": set(["a", ""])},
-                {"id": 4, "data": set(["b"])},
+                {"id": 2, "data": {""}},
+                {"id": 3, "data": {"a", ""}},
+                {"id": 4, "data": {"b"}},
             ],
         )
         eq_(
             connection.execute(t.select().order_by(t.c.id)).fetchall(),
-            [(1, set()), (2, set()), (3, set(["a"])), (4, set(["b"]))],
+            [(1, set()), (2, set()), (3, {"a"}), (4, {"b"})],
         )
 
     def test_bitwise_required_for_empty(self):
@@ -1025,18 +1043,18 @@ class EnumSetTest(
             t.insert(),
             [
                 {"id": 1, "data": set()},
-                {"id": 2, "data": set([""])},
-                {"id": 3, "data": set(["a", ""])},
-                {"id": 4, "data": set(["b"])},
+                {"id": 2, "data": {""}},
+                {"id": 3, "data": {"a", ""}},
+                {"id": 4, "data": {"b"}},
             ],
         )
         eq_(
             connection.execute(t.select().order_by(t.c.id)).fetchall(),
             [
                 (1, set()),
-                (2, set([""])),
-                (3, set(["a", ""])),
-                (4, set(["b"])),
+                (2, {""}),
+                (3, {"a", ""}),
+                (4, {"b"}),
             ],
         )
 
@@ -1054,18 +1072,18 @@ class EnumSetTest(
 
         expected = [
             (
-                set(["a"]),
-                set(["a"]),
-                set(["a"]),
-                set(["'a'"]),
-                set(["a", "b"]),
+                {"a"},
+                {"a"},
+                {"a"},
+                {"'a'"},
+                {"a", "b"},
             ),
             (
-                set(["b"]),
-                set(["b"]),
-                set(["b"]),
-                set(["b"]),
-                set(["a", "b"]),
+                {"b"},
+                {"b"},
+                {"b"},
+                {"b"},
+                {"a", "b"},
             ),
         ]
         res = connection.execute(set_table.select()).fetchall()
@@ -1077,17 +1095,15 @@ class EnumSetTest(
             "t",
             metadata,
             Column("id", Integer, primary_key=True),
-            Column("data", mysql.SET(u("réveillé"), u("drôle"), u("S’il"))),
+            Column("data", mysql.SET("réveillé", "drôle", "S’il")),
         )
 
         set_table.create(connection)
-        connection.execute(
-            set_table.insert(), {"data": set([u("réveillé"), u("drôle")])}
-        )
+        connection.execute(set_table.insert(), {"data": {"réveillé", "drôle"}})
 
         row = connection.execute(set_table.select()).first()
 
-        eq_(row, (1, set([u("réveillé"), u("drôle")])))
+        eq_(row, (1, {"réveillé", "drôle"}))
 
     def test_int_roundtrip(self, metadata, connection):
         set_table = self._set_fixture_one(metadata)
@@ -1099,11 +1115,11 @@ class EnumSetTest(
         eq_(
             res,
             (
-                set(["a"]),
-                set(["b"]),
-                set(["a", "b"]),
-                set(["'a'", "b"]),
-                set([]),
+                {"a"},
+                {"b"},
+                {"a", "b"},
+                {"'a'", "b"},
+                set(),
             ),
         )
 
@@ -1131,24 +1147,24 @@ class EnumSetTest(
                 connection.execute(table.delete())
 
             roundtrip([None, None, None], [None] * 3)
-            roundtrip(["", "", ""], [set([])] * 3)
-            roundtrip([set(["dq"]), set(["a"]), set(["5"])])
-            roundtrip(["dq", "a", "5"], [set(["dq"]), set(["a"]), set(["5"])])
-            roundtrip([1, 1, 1], [set(["dq"]), set(["a"]), set(["5"])])
-            roundtrip([set(["dq", "sq"]), None, set(["9", "5", "7"])])
+            roundtrip(["", "", ""], [set()] * 3)
+            roundtrip([{"dq"}, {"a"}, {"5"}])
+            roundtrip(["dq", "a", "5"], [{"dq"}, {"a"}, {"5"}])
+            roundtrip([1, 1, 1], [{"dq"}, {"a"}, {"5"}])
+            roundtrip([{"dq", "sq"}, None, {"9", "5", "7"}])
         connection.execute(
             set_table.insert(),
             [
-                {"s3": set(["5"])},
-                {"s3": set(["5", "7"])},
-                {"s3": set(["5", "7", "9"])},
-                {"s3": set(["7", "9"])},
+                {"s3": {"5"}},
+                {"s3": {"5", "7"}},
+                {"s3": {"5", "7", "9"}},
+                {"s3": {"7", "9"}},
             ],
         )
 
         rows = connection.execute(
             select(set_table.c.s3).where(
-                set_table.c.s3.in_([set(["5"]), ["5", "7"]])
+                set_table.c.s3.in_([{"5"}, ["5", "7"]])
             )
         ).fetchall()
 
@@ -1159,25 +1175,25 @@ class EnumSetTest(
             "table",
             metadata,
             Column("id", Integer, primary_key=True),
-            Column("value", Enum(u("réveillé"), u("drôle"), u("S’il"))),
-            Column("value2", mysql.ENUM(u("réveillé"), u("drôle"), u("S’il"))),
+            Column("value", Enum("réveillé", "drôle", "S’il")),
+            Column("value2", mysql.ENUM("réveillé", "drôle", "S’il")),
         )
         metadata.create_all(connection)
 
         connection.execute(
             t1.insert(),
             [
-                dict(value=u("drôle"), value2=u("drôle")),
-                dict(value=u("réveillé"), value2=u("réveillé")),
-                dict(value=u("S’il"), value2=u("S’il")),
+                dict(value="drôle", value2="drôle"),
+                dict(value="réveillé", value2="réveillé"),
+                dict(value="S’il", value2="S’il"),
             ],
         )
         eq_(
             connection.execute(t1.select().order_by(t1.c.id)).fetchall(),
             [
-                (1, u("drôle"), u("drôle")),
-                (2, u("réveillé"), u("réveillé")),
-                (3, u("S’il"), u("S’il")),
+                (1, "drôle", "drôle"),
+                (2, "réveillé", "réveillé"),
+                (3, "S’il", "S’il"),
             ],
         )
 
@@ -1189,11 +1205,11 @@ class EnumSetTest(
         #       latin-1 stuff forcing its way in ?
 
         eq_(
-            t2.c.value.type.enums[0:2], [u("réveillé"), u("drôle")]
+            t2.c.value.type.enums[0:2], ["réveillé", "drôle"]
         )  # u'S’il') # eh ?
 
         eq_(
-            t2.c.value2.type.enums[0:2], [u("réveillé"), u("drôle")]
+            t2.c.value2.type.enums[0:2], ["réveillé", "drôle"]
         )  # u'S’il') # eh ?
 
     def test_enum_compile(self):
@@ -1201,7 +1217,7 @@ class EnumSetTest(
         t1 = Table("sometable", MetaData(), Column("somecolumn", e1))
         self.assert_compile(
             schema.CreateTable(t1),
-            "CREATE TABLE sometable (somecolumn " "ENUM('x','y','z'))",
+            "CREATE TABLE sometable (somecolumn ENUM('x','y','z'))",
         )
         t1 = Table(
             "sometable",
@@ -1219,7 +1235,6 @@ class EnumSetTest(
         )
 
     def test_enum_parse(self, metadata, connection):
-
         enum_table = Table(
             "mysql_enum",
             metadata,

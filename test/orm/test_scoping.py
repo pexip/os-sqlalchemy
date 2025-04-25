@@ -1,8 +1,11 @@
+from unittest.mock import Mock
+
 import sqlalchemy as sa
 from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import util
 from sqlalchemy.orm import query
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import scoped_session
@@ -14,7 +17,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
-from sqlalchemy.testing.mock import Mock
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
@@ -47,10 +50,10 @@ class ScopedSessionTest(fixtures.MappedTest):
         class CustomQuery(query.Query):
             pass
 
-        class SomeObject(fixtures.ComparableEntity):
+        class SomeObject(ComparableEntity):
             query = Session.query_property()
 
-        class SomeOtherObject(fixtures.ComparableEntity):
+        class SomeOtherObject(ComparableEntity):
             query = Session.query_property()
             custom_query = Session.query_property(query_cls=CustomQuery)
 
@@ -157,7 +160,8 @@ class ScopedSessionTest(fixtures.MappedTest):
                     populate_existing=False,
                     with_for_update=None,
                     identity_token=None,
-                    execution_options=None,
+                    execution_options=util.EMPTY_DICT,
+                    bind_arguments=None,
                 ),
             ],
         )
@@ -170,8 +174,8 @@ class ScopedSessionTest(fixtures.MappedTest):
         eq_(mock_object_session.mock_calls, [mock.call("foo")])
 
     @testing.combinations(
-        ("style1", testing.requires.python3),
-        ("style2", testing.requires.python3),
+        "style1",
+        "style2",
         "style3",
         "style4",
     )
@@ -193,16 +197,12 @@ class ScopedSessionTest(fixtures.MappedTest):
             elif style == "style3":
                 # py2k style
                 def get_bind(self, mapper=None, *args, **kwargs):
-                    return super(MySession, self).get_bind(
-                        mapper, *args, **kwargs
-                    )
+                    return super().get_bind(mapper, *args, **kwargs)
 
             elif style == "style4":
                 # py2k style
                 def get_bind(self, mapper=None, **kwargs):
-                    return super(MySession, self).get_bind(
-                        mapper=mapper, **kwargs
-                    )
+                    return super().get_bind(mapper=mapper, **kwargs)
 
         s1 = MySession(testing.db)
         is_(s1.get_bind(), testing.db)

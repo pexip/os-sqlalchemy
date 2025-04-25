@@ -1,7 +1,6 @@
 from decimal import Decimal
 import os
 import random
-import warnings
 
 from sqlalchemy import __version__
 from sqlalchemy import Column
@@ -10,21 +9,9 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import Numeric
 from sqlalchemy import String
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
-
-
-warnings.filterwarnings("ignore", r".*Decimal objects natively")  # noqa
-
-# speed up cdecimal if available
-try:
-    import cdecimal
-    import sys
-
-    sys.modules["decimal"] = cdecimal
-except ImportError:
-    pass
 
 
 Base = declarative_base()
@@ -113,7 +100,6 @@ def runit_persist(status, factor=1, query_runs=5):
 
 
 def runit_query_runs(status, factor=1, query_runs=5):
-
     # do some heavier reading
     for i in range(query_runs):
         status("Heavy query run #%d" % (i + 1))
@@ -156,23 +142,19 @@ def run_with_profile(runsnake=False, dump=False):
     )
     stats = pstats.Stats(filename)
 
-    counts_by_methname = dict(
-        (key[2], stats.stats[key][0]) for key in stats.stats
-    )
+    counts_by_methname = {key[2]: stats.stats[key][0] for key in stats.stats}
 
     print("SQLA Version: %s" % __version__)
     print("Total calls %d" % stats.total_calls)
     print("Total cpu seconds: %.2f" % stats.total_tt)
     print(
         "Total execute calls: %d"
-        % counts_by_methname[
-            "<method 'execute' of 'sqlite3.Cursor' " "objects>"
-        ]
+        % counts_by_methname["<method 'execute' of 'sqlite3.Cursor' objects>"]
     )
     print(
         "Total executemany calls: %d"
         % counts_by_methname.get(
-            "<method 'executemany' of 'sqlite3.Cursor' " "objects>", 0
+            "<method 'executemany' of 'sqlite3.Cursor' objects>", 0
         )
     )
 

@@ -10,7 +10,7 @@
 
 .. _tutorial_core_update_delete:
 
-Updating and Deleting Rows with Core
+Using UPDATE and DELETE Statements
 -------------------------------------
 
 So far we've covered :class:`_sql.Insert`, so that we can get some data into
@@ -61,7 +61,7 @@ A basic UPDATE looks like::
     ...     .values(fullname="Patrick the Star")
     ... )
     >>> print(stmt)
-    {opensql}UPDATE user_account SET fullname=:fullname WHERE user_account.name = :name_1
+    {printsql}UPDATE user_account SET fullname=:fullname WHERE user_account.name = :name_1
 
 The :meth:`_sql.Update.values` method controls the contents of the SET elements
 of the UPDATE statement.  This is the same method shared by the :class:`_sql.Insert`
@@ -73,7 +73,7 @@ where we can make use of :class:`_schema.Column` expressions::
 
     >>> stmt = update(user_table).values(fullname="Username: " + user_table.c.name)
     >>> print(stmt)
-    {opensql}UPDATE user_account SET fullname=(:name_1 || user_account.name)
+    {printsql}UPDATE user_account SET fullname=(:name_1 || user_account.name)
 
 To support UPDATE in an "executemany" context, where many parameter sets will
 be invoked against the same statement, the :func:`_sql.bindparam`
@@ -97,9 +97,9 @@ that literal values would normally go:
     ...             {"oldname": "jim", "newname": "jake"},
     ...         ],
     ...     )
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     UPDATE user_account SET name=? WHERE user_account.name = ?
-    [...] (('ed', 'jack'), ('mary', 'wendy'), ('jake', 'jim'))
+    [...] [('ed', 'jack'), ('mary', 'wendy'), ('jake', 'jim')]
     <sqlalchemy.engine.cursor.CursorResult object at 0x...>
     COMMIT{stop}
 
@@ -124,7 +124,7 @@ anywhere a column expression might be placed::
   ... )
   >>> update_stmt = update(user_table).values(fullname=scalar_subq)
   >>> print(update_stmt)
-  {opensql}UPDATE user_account SET fullname=(SELECT address.email_address
+  {printsql}UPDATE user_account SET fullname=(SELECT address.email_address
   FROM address
   WHERE address.user_id = user_account.id ORDER BY address.id
   LIMIT :param_1)
@@ -147,7 +147,7 @@ WHERE clause of the statement::
   ...     .values(fullname="Pat")
   ... )
   >>> print(update_stmt)
-  {opensql}UPDATE user_account SET fullname=:fullname FROM address
+  {printsql}UPDATE user_account SET fullname=:fullname FROM address
   WHERE user_account.id = address.user_id AND address.email_address = :email_address_1
 
 
@@ -160,15 +160,17 @@ order to refer to additional tables::
   ...     .where(user_table.c.id == address_table.c.user_id)
   ...     .where(address_table.c.email_address == "patrick@aol.com")
   ...     .values(
-  ...         {user_table.c.fullname: "Pat", address_table.c.email_address: "pat@aol.com"}
+  ...         {
+  ...             user_table.c.fullname: "Pat",
+  ...             address_table.c.email_address: "pat@aol.com",
+  ...         }
   ...     )
   ... )
   >>> from sqlalchemy.dialects import mysql
   >>> print(update_stmt.compile(dialect=mysql.dialect()))
-  {opensql}UPDATE user_account, address
+  {printsql}UPDATE user_account, address
   SET address.email_address=%s, user_account.fullname=%s
   WHERE user_account.id = address.user_id AND address.email_address = %s
-
 
 .. _tutorial_parameter_ordered_updates:
 
@@ -184,7 +186,7 @@ tuples so that this order may be controlled [2]_::
   ...     (some_table.c.y, 20), (some_table.c.x, some_table.c.y + 10)
   ... )
   >>> print(update_stmt)
-  {opensql}UPDATE some_table SET y=:y, x=(some_table.y + :y_1)
+  {printsql}UPDATE some_table SET y=:y, x=(some_table.y + :y_1)
 
 
 .. [2] While Python dictionaries are
@@ -213,7 +215,7 @@ allowing for a RETURNING variant on some database backends.
     >>> from sqlalchemy import delete
     >>> stmt = delete(user_table).where(user_table.c.name == "patrick")
     >>> print(stmt)
-    {opensql}DELETE FROM user_account WHERE user_account.name = :name_1
+    {printsql}DELETE FROM user_account WHERE user_account.name = :name_1
 
 
 .. _tutorial_multi_table_deletes:
@@ -232,7 +234,7 @@ syntaxes, such as ``DELETE FROM..USING`` on MySQL::
   ... )
   >>> from sqlalchemy.dialects import mysql
   >>> print(delete_stmt.compile(dialect=mysql.dialect()))
-  {opensql}DELETE FROM user_account USING user_account, address
+  {printsql}DELETE FROM user_account USING user_account, address
   WHERE user_account.id = address.user_id AND address.email_address = %s
 
 .. _tutorial_update_delete_rowcount:
@@ -255,11 +257,11 @@ is available from the :attr:`_engine.CursorResult.rowcount` attribute:
     ...         .where(user_table.c.name == "patrick")
     ...     )
     ...     print(result.rowcount)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     UPDATE user_account SET fullname=? WHERE user_account.name = ?
     [...] ('Patrick McStar', 'patrick'){stop}
     1
-    {opensql}COMMIT{stop}
+    {execsql}COMMIT{stop}
 
 .. tip::
 
@@ -277,17 +279,24 @@ Facts about :attr:`_engine.CursorResult.rowcount`:
   the statement.   It does not matter if the row were actually modified or not.
 
 * :attr:`_engine.CursorResult.rowcount` is not necessarily available for an UPDATE
-  or DELETE statement that uses RETURNING.
+  or DELETE statement that uses RETURNING, or for one that uses an
+  :ref:`executemany <tutorial_multiple_parameters>` execution.   The availability
+  depends on the DBAPI module in use.
 
-* For an :ref:`executemany <tutorial_multiple_parameters>` execution,
-  :attr:`_engine.CursorResult.rowcount` may not be available either, which depends
-  highly on the DBAPI module in use as well as configured options.  The
-  attribute :attr:`_engine.CursorResult.supports_sane_multi_rowcount` indicates
-  if this value will be available for the current backend in use.
+* In any case where the DBAPI does not determine the rowcount for some type
+  of statement, the returned value will be ``-1``.
+
+* SQLAlchemy pre-memoizes the DBAPIs ``cursor.rowcount`` value before the cursor
+  is closed, as some DBAPIs don't support accessing this attribute after the
+  fact.  In order to pre-memoize ``cursor.rowcount`` for a statement that is
+  not UPDATE or DELETE, such as INSERT or SELECT, the
+  :paramref:`_engine.Connection.execution_options.preserve_rowcount` execution
+  option may be used.
 
 * Some drivers, particularly third party dialects for non-relational databases,
   may not support :attr:`_engine.CursorResult.rowcount` at all.   The
-  :attr:`_engine.CursorResult.supports_sane_rowcount` will indicate this.
+  :attr:`_engine.CursorResult.supports_sane_rowcount` cursor attribute will
+  indicate this.
 
 * "rowcount" is used by the ORM :term:`unit of work` process to validate that
   an UPDATE or DELETE statement matched the expected number of rows, and is
@@ -313,7 +322,7 @@ be iterated::
     ...     .returning(user_table.c.id, user_table.c.name)
     ... )
     >>> print(update_stmt)
-    {opensql}UPDATE user_account SET fullname=:fullname
+    {printsql}UPDATE user_account SET fullname=:fullname
     WHERE user_account.name = :name_1
     RETURNING user_account.id, user_account.name{stop}
 
@@ -323,7 +332,7 @@ be iterated::
     ...     .returning(user_table.c.id, user_table.c.name)
     ... )
     >>> print(delete_stmt)
-    {opensql}DELETE FROM user_account
+    {printsql}DELETE FROM user_account
     WHERE user_account.name = :name_1
     RETURNING user_account.id, user_account.name{stop}
 
@@ -340,7 +349,6 @@ Further Reading for UPDATE, DELETE
 
     ORM-enabled UPDATE and DELETE:
 
-    * :ref:`tutorial_orm_enabled_update`
+    :ref:`orm_expression_update_delete` - in the :ref:`queryguide_toplevel`
 
-    * :ref:`tutorial_orm_enabled_delete`
 

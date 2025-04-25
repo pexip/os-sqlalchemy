@@ -1,11 +1,11 @@
-# -*- encoding: utf-8
-
 from decimal import Decimal
 import re
+from unittest.mock import Mock
 
 from sqlalchemy import Column
 from sqlalchemy import event
 from sqlalchemy import exc
+from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import Numeric
 from sqlalchemy import select
@@ -28,32 +28,32 @@ from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
-from sqlalchemy.testing.mock import Mock
 
 
 class ParseConnectTest(fixtures.TestBase):
     def test_pyodbc_connect_dsn_trusted(self):
         dialect = pyodbc.dialect()
-        u = url.make_url("mssql://mydsn")
+        u = url.make_url("mssql+pyodbc://mydsn")
         connection = dialect.create_connect_args(u)
-        eq_([["dsn=mydsn;Trusted_Connection=Yes"], {}], connection)
+        eq_((("dsn=mydsn;Trusted_Connection=Yes",), {}), connection)
 
     def test_pyodbc_connect_old_style_dsn_trusted(self):
         dialect = pyodbc.dialect()
-        u = url.make_url("mssql:///?dsn=mydsn")
+        u = url.make_url("mssql+pyodbc:///?dsn=mydsn")
         connection = dialect.create_connect_args(u)
-        eq_([["dsn=mydsn;Trusted_Connection=Yes"], {}], connection)
+        eq_((("dsn=mydsn;Trusted_Connection=Yes",), {}), connection)
 
     def test_pyodbc_connect_dsn_non_trusted(self):
         dialect = pyodbc.dialect()
-        u = url.make_url("mssql://username:password@mydsn")
+        u = url.make_url("mssql+pyodbc://username:password@mydsn")
         connection = dialect.create_connect_args(u)
-        eq_([["dsn=mydsn;UID=username;PWD=password"], {}], connection)
+        eq_((("dsn=mydsn;UID=username;PWD=password",), {}), connection)
 
     def test_pyodbc_connect_dsn_extra(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://username:password@mydsn/?LANGUAGE=us_" "english&foo=bar"
+            "mssql+pyodbc://username:password@mydsn/?LANGUAGE=us_"
+            "english&foo=bar"
         )
         connection = dialect.create_connect_args(u)
         dsn_string = connection[0][0]
@@ -63,17 +63,17 @@ class ParseConnectTest(fixtures.TestBase):
     def test_pyodbc_hostname(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://username:password@hostspec/database?driver=SQL+Server"
+            "mssql+pyodbc://username:password@hostspec/database?driver=SQL+Server"  # noqa
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [
-                [
+            (
+                (
                     "DRIVER={SQL Server};Server=hostspec;Database=database;UI"
-                    "D=username;PWD=password"
-                ],
+                    "D=username;PWD=password",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
@@ -86,7 +86,7 @@ class ParseConnectTest(fixtures.TestBase):
 
     def test_pyodbc_host_no_driver(self):
         dialect = pyodbc.dialect()
-        u = url.make_url("mssql://username:password@hostspec/database")
+        u = url.make_url("mssql+pyodbc://username:password@hostspec/database")
 
         def go():
             return dialect.create_connect_args(u)
@@ -100,56 +100,56 @@ class ParseConnectTest(fixtures.TestBase):
         )
 
         eq_(
-            [
-                [
+            (
+                (
                     "Server=hostspec;Database=database;UI"
-                    "D=username;PWD=password"
-                ],
+                    "D=username;PWD=password",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
     def test_pyodbc_connect_comma_port(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://username:password@hostspec:12345/data"
+            "mssql+pyodbc://username:password@hostspec:12345/data"
             "base?driver=SQL Server"
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [
-                [
+            (
+                (
                     "DRIVER={SQL Server};Server=hostspec,12345;Database=datab"
-                    "ase;UID=username;PWD=password"
-                ],
+                    "ase;UID=username;PWD=password",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
     def test_pyodbc_connect_config_port(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://username:password@hostspec/database?p"
+            "mssql+pyodbc://username:password@hostspec/database?p"
             "ort=12345&driver=SQL+Server"
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [
-                [
+            (
+                (
                     "DRIVER={SQL Server};Server=hostspec;Database=database;UI"
-                    "D=username;PWD=password;port=12345"
-                ],
+                    "D=username;PWD=password;port=12345",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
     def test_pyodbc_extra_connect(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://username:password@hostspec/database?L"
+            "mssql+pyodbc://username:password@hostspec/database?L"
             "ANGUAGE=us_english&foo=bar&driver=SQL+Server"
         )
         connection = dialect.create_connect_args(u)
@@ -188,51 +188,51 @@ class ParseConnectTest(fixtures.TestBase):
     def test_pyodbc_odbc_connect(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql:///?odbc_connect=DRIVER%3D%7BSQL+Server"
+            "mssql+pyodbc:///?odbc_connect=DRIVER%3D%7BSQL+Server"
             "%7D%3BServer%3Dhostspec%3BDatabase%3Ddatabase"
             "%3BUID%3Dusername%3BPWD%3Dpassword"
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [
-                [
+            (
+                (
                     "DRIVER={SQL Server};Server=hostspec;Database=database;UI"
-                    "D=username;PWD=password"
-                ],
+                    "D=username;PWD=password",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
     def test_pyodbc_odbc_connect_with_dsn(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql:///?odbc_connect=dsn%3Dmydsn%3BDatabase"
+            "mssql+pyodbc:///?odbc_connect=dsn%3Dmydsn%3BDatabase"
             "%3Ddatabase%3BUID%3Dusername%3BPWD%3Dpassword"
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [["dsn=mydsn;Database=database;UID=username;PWD=password"], {}],
+            (("dsn=mydsn;Database=database;UID=username;PWD=password",), {}),
             connection,
         )
 
     def test_pyodbc_odbc_connect_ignores_other_values(self):
         dialect = pyodbc.dialect()
         u = url.make_url(
-            "mssql://userdiff:passdiff@localhost/dbdiff?od"
+            "mssql+pyodbc://userdiff:passdiff@localhost/dbdiff?od"
             "bc_connect=DRIVER%3D%7BSQL+Server%7D%3BServer"
             "%3Dhostspec%3BDatabase%3Ddatabase%3BUID%3Duse"
             "rname%3BPWD%3Dpassword"
         )
         connection = dialect.create_connect_args(u)
         eq_(
-            [
-                [
+            (
+                (
                     "DRIVER={SQL Server};Server=hostspec;Database=database;UI"
-                    "D=username;PWD=password"
-                ],
+                    "D=username;PWD=password",
+                ),
                 {},
-            ],
+            ),
             connection,
         )
 
@@ -246,11 +246,9 @@ class ParseConnectTest(fixtures.TestBase):
                 "somedb%3BPORT%3D50001",
             ),
             (
-                [
-                    "DRIVER={foob};Server=somehost%3BPORT%3D50001;"
-                    "Database=somedb%3BPORT%3D50001;UID={someuser;PORT=50001};"
-                    "PWD={some{strange}}pw;PORT=50001}"
-                ]
+                "DRIVER={foob};Server=somehost%3BPORT%3D50001;"
+                "Database=somedb%3BPORT%3D50001;UID={someuser;PORT=50001};"
+                "PWD={some{strange}}pw;PORT=50001}",
             ),
         ),
         (
@@ -262,11 +260,9 @@ class ParseConnectTest(fixtures.TestBase):
                 "mydb",
             ),
             (
-                [
-                    "DRIVER={foob};Server=localhost;"
-                    "Database=mydb;UID=larry;"
-                    "PWD={{moe}"
-                ]
+                "DRIVER={foob};Server=localhost;"
+                "Database=mydb;UID=larry;"
+                "PWD={{moe}",
             ),
         ),
         argnames="tokens, connection_string",
@@ -277,10 +273,10 @@ class ParseConnectTest(fixtures.TestBase):
         dialect = pyodbc.dialect()
         connection = dialect.create_connect_args(u)
         eq_(
-            [
+            (
                 connection_string,
                 {},
-            ],
+            ),
             connection,
         )
 
@@ -290,7 +286,7 @@ class ParseConnectTest(fixtures.TestBase):
         u = url.make_url("mssql+pymssql://scott:tiger@somehost/test")
         connection = dialect.create_connect_args(u)
         eq_(
-            [
+            (
                 [],
                 {
                     "host": "somehost",
@@ -298,14 +294,14 @@ class ParseConnectTest(fixtures.TestBase):
                     "user": "scott",
                     "database": "test",
                 },
-            ],
+            ),
             connection,
         )
 
         u = url.make_url("mssql+pymssql://scott:tiger@somehost:5000/test")
         connection = dialect.create_connect_args(u)
         eq_(
-            [
+            (
                 [],
                 {
                     "host": "somehost:5000",
@@ -313,7 +309,7 @@ class ParseConnectTest(fixtures.TestBase):
                     "user": "scott",
                     "database": "test",
                 },
-            ],
+            ),
             connection,
         )
 
@@ -330,6 +326,7 @@ class ParseConnectTest(fixtures.TestBase):
             "message 20006",  # Write to the server failed
             "message 20017",  # Unexpected EOF from the server
             "message 20047",  # DBPROCESS is dead or not enabled
+            "The server failed to resume the transaction",
         ]:
             eq_(dialect.is_disconnect(error, None, None), True)
 
@@ -405,7 +402,9 @@ class FastExecutemanyTest(fixtures.TestBase):
         )
         t.create(testing.db)
 
-        eng = engines.testing_engine(options={"fast_executemany": True})
+        eng = engines.testing_engine(
+            options={"fast_executemany": True, "use_insertmanyvalues": False}
+        )
 
         @event.listens_for(eng, "after_cursor_execute")
         def after_cursor_execute(
@@ -422,70 +421,58 @@ class FastExecutemanyTest(fixtures.TestBase):
 
             conn.execute(t.insert(), {"id": 200, "data": "data_200"})
 
-    @testing.fixture
-    def fe_engine(self, testing_engine):
-        def go(use_fastexecutemany, apply_setinputsizes_flag):
-            engine = testing_engine(
-                options={
-                    "fast_executemany": use_fastexecutemany,
-                    "use_setinputsizes": apply_setinputsizes_flag,
-                }
-            )
-            return engine
-
-        return go
-
-    @testing.combinations(
-        (
-            "setinputsizeshook",
-            True,
-        ),
-        (
-            "nosetinputsizeshook",
-            False,
-        ),
-        argnames="include_setinputsizes",
-        id_="ia",
-    )
-    @testing.combinations(
-        (
-            "setinputsizesflag",
-            True,
-        ),
-        (
-            "nosetinputsizesflag",
-            False,
-        ),
-        argnames="apply_setinputsizes_flag",
-        id_="ia",
-    )
-    @testing.combinations(
-        (
-            "fastexecutemany",
-            True,
-        ),
-        (
-            "nofastexecutemany",
-            False,
-        ),
-        argnames="use_fastexecutemany",
-        id_="ia",
-    )
-    def test_insert_floats(
+    @testing.variation("add_event", [True, False])
+    @testing.variation("setinputsizes", [True, False])
+    @testing.variation("fastexecutemany", [True, False])
+    @testing.variation("insertmanyvalues", [False])  # disabled due to #9603
+    @testing.variation("broken_types", [True, False])
+    def test_insert_typing(
         self,
         metadata,
-        fe_engine,
-        include_setinputsizes,
-        use_fastexecutemany,
-        apply_setinputsizes_flag,
+        testing_engine,
+        add_event,
+        fastexecutemany,
+        setinputsizes,
+        insertmanyvalues,
+        broken_types,
     ):
+        """tests for executemany + datatypes that are sensitive to
+        "setinputsizes"
+
+        Issues tested here include:
+
+        #6058 - turn off setinputsizes by default, since it breaks with
+                fast_executemany (version 1.4)
+
+        #8177 - turn setinputsizes back **on** by default, just skip it only
+                for cursor.executemany() calls when fast_executemany is set;
+                otherwise use it.  (version 2.0)
+
+        #8917 - oops, we added "insertmanyvalues" but forgot to adjust the
+                check in #8177 above to accommodate for this, so
+                setinputsizes was getting turned off for "insertmanyvalues"
+                if fast_executemany was still set
+
+        """
+
+        # changes for issue #8177 have eliminated all current expected
+        # failures, but we'll leave this here in case we need it again
+        # (... four months pass ...)
+        # surprise! we need it again.  woop!  for #8917
         expect_failure = (
-            apply_setinputsizes_flag
-            and not include_setinputsizes
-            and use_fastexecutemany
+            broken_types
+            and not setinputsizes
+            and insertmanyvalues
+            and not fastexecutemany
         )
 
-        engine = fe_engine(use_fastexecutemany, apply_setinputsizes_flag)
+        engine = testing_engine(
+            options={
+                "fast_executemany": fastexecutemany,
+                "use_setinputsizes": setinputsizes,
+                "use_insertmanyvalues": insertmanyvalues,
+            }
+        )
 
         observations = Table(
             "Observations",
@@ -493,6 +480,7 @@ class FastExecutemanyTest(fixtures.TestBase):
             Column("id", Integer, nullable=False, primary_key=True),
             Column("obs1", Numeric(19, 15), nullable=True),
             Column("obs2", Numeric(19, 15), nullable=True),
+            Column("obs3", String(10)),
             schema="test_schema",
         )
         with engine.begin() as conn:
@@ -503,20 +491,33 @@ class FastExecutemanyTest(fixtures.TestBase):
                 "id": 1,
                 "obs1": Decimal("60.1722066045792"),
                 "obs2": Decimal("24.929289808227466"),
+                "obs3": "obs3",
             },
             {
                 "id": 2,
                 "obs1": Decimal("60.16325715615476"),
                 "obs2": Decimal("24.93886459535008"),
+                "obs3": 5 if broken_types else "obs3",
             },
             {
                 "id": 3,
                 "obs1": Decimal("60.16445165123469"),
                 "obs2": Decimal("24.949856300109516"),
+                "obs3": 7 if broken_types else "obs3",
             },
         ]
 
-        if include_setinputsizes:
+        assert_records = [
+            {
+                "id": rec["id"],
+                "obs1": rec["obs1"],
+                "obs2": rec["obs2"],
+                "obs3": str(rec["obs3"]),
+            }
+            for rec in records
+        ]
+
+        if add_event:
             canary = mock.Mock()
 
             @event.listens_for(engine, "do_setinputsizes")
@@ -534,7 +535,6 @@ class FastExecutemanyTest(fixtures.TestBase):
                         )
 
         with engine.begin() as conn:
-
             if expect_failure:
                 with expect_raises(DBAPIError):
                     conn.execute(observations.insert(), records)
@@ -547,16 +547,23 @@ class FastExecutemanyTest(fixtures.TestBase):
                     )
                     .mappings()
                     .all(),
-                    records,
+                    assert_records,
                 )
 
-        if include_setinputsizes:
-            if apply_setinputsizes_flag:
+        if add_event:
+            if setinputsizes:
                 eq_(
                     canary.mock_calls,
                     [
                         # float for int?  this seems wrong
-                        mock.call([float, float, float]),
+                        mock.call(
+                            [
+                                float,
+                                float,
+                                float,
+                                engine.dialect.dbapi.SQL_VARCHAR,
+                            ]
+                        ),
                         mock.call([]),
                     ],
                 )
@@ -609,10 +616,82 @@ class VersionDetectionTest(fixtures.TestBase):
                         )
                     )
                 ),
-                connection=Mock(getinfo=Mock(return_value=vers)),
+                connection=Mock(
+                    dbapi_connection=Mock(getinfo=Mock(return_value=vers)),
+                ),
             )
 
             eq_(dialect._get_server_version_info(conn), expected)
+
+
+class MiscTest(fixtures.TestBase):
+    __only_on__ = "mssql"
+    __backend__ = True
+
+    @testing.variation("enable_comments", [True, False])
+    def test_comments_enabled_disabled(
+        self, testing_engine, metadata, enable_comments
+    ):
+        Table(
+            "tbl_with_comments",
+            metadata,
+            Column(
+                "id",
+                Integer,
+                primary_key=True,
+                comment="pk comment",
+            ),
+            Column("no_comment", Integer),
+            Column(
+                "has_comment",
+                String(20),
+                comment="has the comment",
+            ),
+            comment="table comment",
+        )
+
+        eng = testing_engine(
+            options={"supports_comments": bool(enable_comments)}
+        )
+        metadata.create_all(eng)
+
+        insp = inspect(testing.db)
+        if enable_comments:
+            eq_(
+                insp.get_table_comment("tbl_with_comments"),
+                {"text": "table comment"},
+            )
+
+            cols = {
+                col["name"]: col["comment"]
+                for col in insp.get_columns("tbl_with_comments")
+            }
+            eq_(
+                cols,
+                {
+                    "id": "pk comment",
+                    "no_comment": None,
+                    "has_comment": "has the comment",
+                },
+            )
+        else:
+            eq_(
+                insp.get_table_comment("tbl_with_comments"),
+                {"text": None},
+            )
+
+            cols = {
+                col["name"]: col["comment"]
+                for col in insp.get_columns("tbl_with_comments")
+            }
+            eq_(
+                cols,
+                {
+                    "id": None,
+                    "no_comment": None,
+                    "has_comment": None,
+                },
+            )
 
 
 class RealIsolationLevelTest(fixtures.TestBase):
@@ -667,7 +746,7 @@ class IsolationLevelDetectTest(fixtures.TestBase):
         def fail_on_exec(
             stmt,
         ):
-            result[:] = []
+            result.clear()
             if "SELECT name FROM sys.system_views" in stmt:
                 if simulate_no_system_views:
                     raise dialect.dbapi.Error(

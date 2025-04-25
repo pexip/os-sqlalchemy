@@ -6,9 +6,11 @@ from sqlalchemy import String
 from sqlalchemy import Table
 from sqlalchemy.orm import class_mapper
 from sqlalchemy.orm import relationship
+from sqlalchemy.testing import config
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing.fixtures import fixture_session
+from sqlalchemy.testing.provision import normalize_sequence
 
 
 class InheritTest(fixtures.MappedTest):
@@ -27,7 +29,9 @@ class InheritTest(fixtures.MappedTest):
             Column(
                 "principal_id",
                 Integer,
-                Sequence("principal_id_seq", optional=False),
+                normalize_sequence(
+                    config, Sequence("principal_id_seq", optional=False)
+                ),
                 primary_key=True,
             ),
             Column("name", String(50), nullable=False),
@@ -76,7 +80,7 @@ class InheritTest(fixtures.MappedTest):
         )
 
     def test_basic(self):
-        class Principal(object):
+        class Principal:
             def __init__(self, **kwargs):
                 for key, value in kwargs.items():
                     setattr(self, key, value)
@@ -131,7 +135,9 @@ class InheritTest2(fixtures.MappedTest):
             Column(
                 "id",
                 Integer,
-                Sequence("foo_id_seq", optional=True),
+                normalize_sequence(
+                    config, Sequence("foo_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column("data", String(20)),
@@ -151,7 +157,7 @@ class InheritTest2(fixtures.MappedTest):
         )
 
     def test_get(self):
-        class Foo(object):
+        class Foo:
             def __init__(self, data=None):
                 self.data = data
 
@@ -173,7 +179,7 @@ class InheritTest2(fixtures.MappedTest):
         assert sess.get(Bar, b.id).id == b.id
 
     def test_basic(self):
-        class Foo(object):
+        class Foo:
             def __init__(self, data=None):
                 self.data = data
 
@@ -231,7 +237,7 @@ class InheritTest3(fixtures.MappedTest):
     def define_tables(cls, metadata):
         global foo, bar, blub, bar_foo, blub_bar, blub_foo
 
-        # the 'data' columns are to appease SQLite which cant handle a blank
+        # the 'data' columns are to appease SQLite which can't handle a blank
         # INSERT
         foo = Table(
             "foo",
@@ -239,7 +245,7 @@ class InheritTest3(fixtures.MappedTest):
             Column(
                 "id",
                 Integer,
-                Sequence("foo_seq", optional=True),
+                normalize_sequence(config, Sequence("foo_seq", optional=True)),
                 primary_key=True,
             ),
             Column("data", String(20)),
@@ -281,7 +287,7 @@ class InheritTest3(fixtures.MappedTest):
         )
 
     def test_basic(self):
-        class Foo(object):
+        class Foo:
             def __init__(self, data=None):
                 self.data = data
 
@@ -317,7 +323,7 @@ class InheritTest3(fixtures.MappedTest):
         eq_(found, compare)
 
     def test_advanced(self):
-        class Foo(object):
+        class Foo:
             def __init__(self, data=None):
                 self.data = data
 

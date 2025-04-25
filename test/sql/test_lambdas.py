@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+import threading
+import time
+from typing import List
+from typing import Optional
+
 from sqlalchemy import exc
 from sqlalchemy import testing
 from sqlalchemy.future import select as future_select
@@ -19,7 +26,7 @@ from sqlalchemy.sql import select
 from sqlalchemy.sql import table
 from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql.base import ExecutableOption
-from sqlalchemy.sql.traversals import HasCacheKey
+from sqlalchemy.sql.cache_key import HasCacheKey
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
@@ -49,7 +56,7 @@ class LambdaElementTest(
 
         with expect_raises_message(
             exc.ArgumentError,
-            "Method <bound method Select.*.subquery .* may not be "
+            "Method <bound method SelectBase.subquery .* may not be "
             "passed as a SQL expression",
         ):
             select(func.count()).select_from(subq)
@@ -214,13 +221,12 @@ class LambdaElementTest(
 
         self.assert_compile(
             go("u1"),
-            "SELECT users.id FROM users " "WHERE users.name = 'u1'",
+            "SELECT users.id FROM users WHERE users.name = 'u1'",
             literal_binds=True,
         )
 
     def test_stale_checker_embedded(self):
         def go(x):
-
             stmt = select(lambda: x)
             return stmt
 
@@ -238,7 +244,6 @@ class LambdaElementTest(
 
     def test_stale_checker_statement(self):
         def go(x):
-
             stmt = lambdas.lambda_stmt(lambda: select(x))
             return stmt
 
@@ -256,7 +261,6 @@ class LambdaElementTest(
 
     def test_stale_checker_linked(self):
         def go(x, y):
-
             stmt = lambdas.lambda_stmt(lambda: select(x)) + (
                 lambda s: s.where(y > 5)
             )
@@ -409,9 +413,11 @@ class LambdaElementTest(
             stmt = lambda_stmt(lambda: select(tab))
 
             stmt = stmt.add_criteria(
-                lambda s: s.where(tab.c.col > parameter)
-                if add_criteria
-                else s.where(tab.c.col == parameter),
+                lambda s: (
+                    s.where(tab.c.col > parameter)
+                    if add_criteria
+                    else s.where(tab.c.col == parameter)
+                ),
             )
 
             stmt += lambda s: s.order_by(tab.c.id)
@@ -427,16 +433,17 @@ class LambdaElementTest(
         )
 
     def test_boolean_conditionals(self):
-
         tab = table("foo", column("id"), column("col"))
 
         def run_my_statement(parameter, add_criteria=False):
             stmt = lambda_stmt(lambda: select(tab))
 
             stmt = stmt.add_criteria(
-                lambda s: s.where(tab.c.col > parameter)
-                if add_criteria
-                else s.where(tab.c.col == parameter),
+                lambda s: (
+                    s.where(tab.c.col > parameter)
+                    if add_criteria
+                    else s.where(tab.c.col == parameter)
+                ),
                 track_on=[add_criteria],
             )
 
@@ -712,7 +719,7 @@ class LambdaElementTest(
         # refer to unknown types of objects inside the lambda.  these have
         # to be resolved outside of the lambda because we otherwise can't
         # be sure they can be safely used as cache keys.
-        class Thing(object):
+        class Thing:
             def __init__(self, col_expr):
                 self.col_expr = col_expr
 
@@ -736,7 +743,7 @@ class LambdaElementTest(
         # refer to unknown types of objects inside the lambda.  these have
         # to be resolved outside of the lambda because we otherwise can't
         # be sure they can be safely used as cache keys.
-        class Thing(object):
+        class Thing:
             def __init__(self, col_expr):
                 self.col_expr = col_expr
 
@@ -788,7 +795,7 @@ class LambdaElementTest(
         # test the above 'test_reject_plain_object' with the expected
         # workaround
 
-        class Thing(object):
+        class Thing:
             def __init__(self, col_expr):
                 self.col_expr = col_expr
 
@@ -830,7 +837,6 @@ class LambdaElementTest(
         ne_(s1key[0], s2key[0])
 
     def test_stmt_lambda_w_set_of_opts(self):
-
         stmt = lambdas.lambda_stmt(lambda: select(column("x")))
 
         class MyUncacheable(ExecutableOption):
@@ -1161,7 +1167,6 @@ class LambdaElementTest(
         )
 
     def test_in_parameters_one(self):
-
         expr1 = select(1).where(column("q").in_(["a", "b", "c"]))
         self.assert_compile(expr1, "SELECT 1 WHERE q IN (__[POSTCOMPILE_q_1])")
 
@@ -1386,7 +1391,6 @@ class LambdaElementTest(
         x = 5
 
         def my_lambda():
-
             y = 10
             z = y + 18
 
@@ -1417,7 +1421,6 @@ class LambdaElementTest(
         z = 10
 
         def my_lambda():
-
             y = x + z
 
             expr1 = users.c.name > x
@@ -1450,7 +1453,6 @@ class LambdaElementTest(
         z = 10
 
         def my_lambda():
-
             y = 10 + z
 
             expr1 = users.c.name > x
@@ -1796,7 +1798,7 @@ class LambdaElementTest(
     def test_cache_key_instance_variable_issue_incorrect(self):
         t1 = table("t1", column("q"), column("p"))
 
-        class Foo(object):
+        class Foo:
             def __init__(self, value):
                 self.value = value
 
@@ -1815,7 +1817,7 @@ class LambdaElementTest(
     def test_cache_key_instance_variable_issue_correct_one(self):
         t1 = table("t1", column("q"), column("p"))
 
-        class Foo(object):
+        class Foo:
             def __init__(self, value):
                 self.value = value
 
@@ -1835,7 +1837,7 @@ class LambdaElementTest(
     def test_cache_key_instance_variable_issue_correct_two(self):
         t1 = table("t1", column("q"), column("p"))
 
-        class Foo(object):
+        class Foo:
             def __init__(self, value):
                 self.value = value
 
@@ -1886,6 +1888,47 @@ class LambdaElementTest(
                 conn.execute(select(users).where(users.c.id == 7)).first(),
                 (7, "foo"),
             )
+
+    def test_bindparam_not_cached(self, user_address_fixture, testing_engine):
+        """test #12084"""
+
+        users, addresses = user_address_fixture
+
+        engine = testing_engine(
+            share_pool=True, options={"query_cache_size": 0}
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                users.insert(),
+                [{"id": 7, "name": "bar"}, {"id": 8, "name": "foo"}],
+            )
+
+        def make_query(stmt, *criteria):
+            for crit in criteria:
+                stmt += lambda s: s.where(crit)
+
+            return stmt
+
+        for i in range(2):
+            with engine.connect() as conn:
+                stmt = lambda_stmt(lambda: select(users))
+                # create a filter criterion that will never match anything
+                stmt1 = make_query(
+                    stmt,
+                    users.c.name == "bar",
+                    users.c.name == "foo",
+                )
+
+                assert len(conn.scalars(stmt1).all()) == 0
+
+                stmt2 = make_query(
+                    stmt,
+                    users.c.name == "bar",
+                    users.c.name == "bar",
+                    users.c.name == "foo",
+                )
+
+                assert len(conn.scalars(stmt2).all()) == 0
 
 
 class DeferredLambdaElementTest(
@@ -1947,9 +1990,9 @@ class DeferredLambdaElementTest(
         # lambda produces either "t1 IN vv" or "t2 IN qq" based on the
         # argument.  will not produce a consistent cache key
         elem = lambdas.DeferredLambdaElement(
-            lambda tab: tab.c.q.in_(vv)
-            if tab.name == "t1"
-            else tab.c.q.in_(qq),
+            lambda tab: (
+                tab.c.q.in_(vv) if tab.name == "t1" else tab.c.q.in_(qq)
+            ),
             roles.WhereHavingRole,
             lambda_args=(t1,),
             opts=lambdas.LambdaOptions(track_closure_variables=False),
@@ -2083,3 +2126,98 @@ class DeferredLambdaElementTest(
 
         eq_(e12key[0], e1key[0])
         eq_(e32key[0], e3key[0])
+
+
+class ConcurrencyTest(fixtures.TestBase):
+    """test for #8098 and #9461"""
+
+    __requires__ = ("independent_readonly_connections",)
+
+    __only_on__ = ("+psycopg2", "+mysqldb", "+pysqlite", "+pymysql")
+
+    THREADS = 10
+
+    @testing.fixture
+    def mapping_fixture(self, decl_base):
+        class A(decl_base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            col1 = Column(String(100))
+            col2 = Column(String(100))
+            col3 = Column(String(100))
+            col4 = Column(String(100))
+
+        decl_base.metadata.create_all(testing.db)
+
+        from sqlalchemy.orm import Session
+
+        with testing.db.connect() as conn:
+            with Session(conn) as session:
+                session.add_all(
+                    [
+                        A(col1=str(i), col2=str(i), col3=str(i), col4=str(i))
+                        for i in range(self.THREADS + 1)
+                    ]
+                )
+                session.commit()
+
+        return A
+
+    @testing.requires.timing_intensive
+    def test_lambda_concurrency(self, testing_engine, mapping_fixture):
+        A = mapping_fixture
+        engine = testing_engine(options={"pool_size": self.THREADS + 5})
+        NUM_OF_LAMBDAS = 150
+
+        code = """
+from sqlalchemy import lambda_stmt, select
+
+
+def generate_lambda_stmt(wanted):
+    stmt = lambda_stmt(lambda: select(A.col1, A.col2, A.col3, A.col4))
+"""
+
+        for _ in range(NUM_OF_LAMBDAS):
+            code += (
+                "    stmt += lambda s: s.where((A.col1 == wanted) & "
+                "(A.col2 == wanted) & (A.col3 == wanted) & "
+                "(A.col4 == wanted))\n"
+            )
+
+        code += """
+    return stmt
+"""
+
+        d = {"A": A, "__name__": "lambda_fake"}
+        exec(code, d)
+        generate_lambda_stmt = d["generate_lambda_stmt"]
+
+        runs: List[Optional[int]] = [None for _ in range(self.THREADS)]
+        conns = [engine.connect() for _ in range(self.THREADS)]
+
+        def run(num):
+            wanted = str(num)
+            connection = conns[num]
+            time.sleep(0.1)
+            stmt = generate_lambda_stmt(wanted)
+            time.sleep(0.1)
+            row = connection.execute(stmt).first()
+            if not row:
+                runs[num] = False
+            else:
+                runs[num] = True
+
+        threads = [
+            threading.Thread(target=run, args=(num,))
+            for num in range(self.THREADS)
+        ]
+
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        for conn in conns:
+            conn.close()
+
+        fails = len([r for r in runs if r is False])
+        assert not fails, f"{fails} runs failed"

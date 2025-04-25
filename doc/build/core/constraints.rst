@@ -158,7 +158,7 @@ constraints are created separately:
 
     >>> with engine.connect() as conn:
     ...     metadata_obj.create_all(conn, checkfirst=False)
-    {opensql}CREATE TABLE element (
+    {execsql}CREATE TABLE element (
         element_id SERIAL NOT NULL,
         parent_node_id INTEGER,
         PRIMARY KEY (element_id)
@@ -186,14 +186,16 @@ those constraints that are named:
 
     >>> with engine.connect() as conn:
     ...     metadata_obj.drop_all(conn, checkfirst=False)
-    {opensql}ALTER TABLE element DROP CONSTRAINT fk_element_parent_node_id
+    {execsql}ALTER TABLE element DROP CONSTRAINT fk_element_parent_node_id
     DROP TABLE node
     DROP TABLE element
     {stop}
 
 
 In the case where the cycle cannot be resolved, such as if we hadn't applied
-a name to either constraint here, we will receive the following error::
+a name to either constraint here, we will receive the following error:
+
+.. sourcecode:: text
 
     sqlalchemy.exc.CircularDependencyError: Can't sort tables for DROP;
     an unresolvable foreign key dependency exists between tables:
@@ -230,7 +232,7 @@ and not the other one:
 
     >>> with engine.connect() as conn:
     ...     metadata_obj.create_all(conn, checkfirst=False)
-    {opensql}CREATE TABLE element (
+    {execsql}CREATE TABLE element (
         element_id SERIAL NOT NULL,
         parent_node_id INTEGER,
         PRIMARY KEY (element_id)
@@ -250,22 +252,12 @@ and not the other one:
 :paramref:`_schema.ForeignKeyConstraint.use_alter` and
 :paramref:`_schema.ForeignKey.use_alter`, when used in conjunction with a drop
 operation, will require that the constraint is named, else an error
-like the following is generated::
+like the following is generated:
+
+.. sourcecode:: text
 
     sqlalchemy.exc.CompileError: Can't emit DROP CONSTRAINT for constraint
     ForeignKeyConstraint(...); it has no name
-
-.. versionchanged:: 1.0.0 - The DDL system invoked by
-   :meth:`_schema.MetaData.create_all`
-   and :meth:`_schema.MetaData.drop_all` will now automatically resolve mutually
-   dependent foreign keys between tables declared by
-   :class:`_schema.ForeignKeyConstraint` and :class:`_schema.ForeignKey` objects, without
-   the need to explicitly set the :paramref:`_schema.ForeignKeyConstraint.use_alter`
-   flag.
-
-.. versionchanged:: 1.0.0 - The :paramref:`_schema.ForeignKeyConstraint.use_alter`
-   flag can be used with an un-named constraint; only the DROP operation
-   will emit a specific error when actually called upon.
 
 .. seealso::
 
@@ -284,7 +276,7 @@ parent row is deleted all corresponding child rows are set to null or deleted.
 In data definition language these are specified using phrases like "ON UPDATE
 CASCADE", "ON DELETE CASCADE", and "ON DELETE SET NULL", corresponding to
 foreign key constraints. The phrase after "ON UPDATE" or "ON DELETE" may also
-other allow other phrases that are specific to the database in use. The
+allow other phrases that are specific to the database in use. The
 :class:`~sqlalchemy.schema.ForeignKey` and
 :class:`~sqlalchemy.schema.ForeignKeyConstraint` objects support the
 generation of this clause via the ``onupdate`` and ``ondelete`` keyword
@@ -316,8 +308,12 @@ arguments. The value is any string which will be output after the appropriate
         ),
     )
 
-Note that these clauses require ``InnoDB`` tables when used with MySQL.
-They may also not be supported on other databases.
+Note that some backends have special requirements for cascades to function:
+
+* MySQL / MariaDB - the ``InnoDB`` storage engine should be used (this is
+  typically the default in modern databases)
+* SQLite - constraints are not enabled by default.
+  See :ref:`sqlite_foreign_keys`
 
 .. seealso::
 
@@ -327,6 +323,12 @@ They may also not be supported on other databases.
     :ref:`passive_deletes`
 
     :ref:`passive_deletes_many_to_many`
+
+    :ref:`postgresql_constraint_options` - indicates additional options
+    available for foreign key cascades such as column lists
+
+    :ref:`sqlite_foreign_keys` - background on enabling foreign key support
+    with SQLite
 
 .. _schema_unique_constraint:
 
@@ -365,7 +367,7 @@ constraints generally should only refer to the column to which they are
 placed, while table level constraints can refer to any columns in the table.
 
 Note that some databases do not actively support check constraints such as
-MySQL.
+older versions of MySQL (prior to 8.0.16).
 
 .. sourcecode:: python+sql
 
@@ -383,8 +385,8 @@ MySQL.
         CheckConstraint("col2 > col3 + 5", name="check1"),
     )
 
-    {sql}mytable.create(engine)
-    CREATE TABLE mytable (
+    mytable.create(engine)
+    {execsql}CREATE TABLE mytable (
         col1 INTEGER  CHECK (col1>5),
         col2 INTEGER,
         col3 INTEGER,
@@ -577,7 +579,9 @@ generate very long names given the column names in use::
     )
 
 On the PostgreSQL dialect, names longer than 63 characters will be truncated
-as in the following example::
+as in the following example:
+
+.. sourcecode:: sql
 
     CREATE TABLE long_names (
         information_channel_code INTEGER,
@@ -679,7 +683,9 @@ A typical convention is ``"ck_%(table_name)s_%(constraint_name)s"``::
         CheckConstraint("value > 5", name="value_gt_5"),
     )
 
-The above table will produce the name ``ck_foo_value_gt_5``::
+The above table will produce the name ``ck_foo_value_gt_5``:
+
+.. sourcecode:: sql
 
     CREATE TABLE foo (
         value INTEGER,
@@ -707,7 +713,9 @@ or by using a :func:`_expression.column` inline::
         "foo", metadata_obj, Column("value", Integer), CheckConstraint(column("value") > 5)
     )
 
-Both will produce the name ``ck_foo_value``::
+Both will produce the name ``ck_foo_value``:
+
+.. sourcecode:: sql
 
     CREATE TABLE foo (
         value INTEGER,
@@ -719,9 +727,6 @@ the given expression for column objects.  If the expression has more than
 one column present, the scan does use a deterministic search, however the
 structure of the expression will determine which column is noted as
 "column zero".
-
-.. versionadded:: 1.0.0 The :class:`.CheckConstraint` object now supports
-   the ``column_0_name`` naming convention token.
 
 .. _naming_schematypes:
 
@@ -745,7 +750,9 @@ and then applying a name to the type::
 
     Table("foo", metadata_obj, Column("flag", Boolean(name="flag_bool")))
 
-The above table will produce the constraint name ``ck_foo_flag_bool``::
+The above table will produce the constraint name ``ck_foo_flag_bool``:
+
+.. sourcecode:: sql
 
     CREATE TABLE foo (
         flag BOOL,
@@ -769,20 +776,29 @@ only one column::
 
     Table("foo", metadata_obj, Column("flag", Boolean()))
 
-The above schema will produce::
+The above schema will produce:
+
+.. sourcecode:: sql
 
     CREATE TABLE foo (
         flag BOOL,
         CONSTRAINT ck_foo_flag CHECK (flag IN (0, 1))
     )
 
-.. versionchanged:: 1.0 Constraint naming conventions that don't include
-   ``%(constraint_name)s`` again work with :class:`.SchemaType` constraints.
+Using Naming Conventions with ORM Declarative Mixins
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When using the naming convention feature with :ref:`ORM Declarative Mixins
+<orm_mixins_toplevel>`, individual constraint objects must exist for each
+actual table-mapped subclass.  See the section
+:ref:`orm_mixins_named_constraints` for background and examples.
 
 Constraints API
 ---------------
+
 .. autoclass:: Constraint
     :members:
+    :inherited-members:
 
 .. autoclass:: ColumnCollectionMixin
     :members:
@@ -800,6 +816,10 @@ Constraints API
     :inherited-members:
 
 .. autoclass:: ForeignKeyConstraint
+    :members:
+    :inherited-members:
+
+.. autoclass:: HasConditionalDDL
     :members:
     :inherited-members:
 
@@ -854,8 +874,8 @@ INDEX" is issued right after the create statements for the table:
     # place a unique index on col5, col6
     Index("myindex", mytable.c.col5, mytable.c.col6, unique=True)
 
-    {sql}mytable.create(engine)
-    CREATE TABLE mytable (
+    mytable.create(engine)
+    {execsql}CREATE TABLE mytable (
         col1 INTEGER,
         col2 INTEGER,
         col3 INTEGER,
@@ -893,8 +913,8 @@ The :class:`~sqlalchemy.schema.Index` object also supports its own ``create()`` 
 .. sourcecode:: python+sql
 
     i = Index("someindex", mytable.c.col5)
-    {sql}i.create(engine)
-    CREATE INDEX someindex ON mytable (col5){stop}
+    i.create(engine)
+    {execsql}CREATE INDEX someindex ON mytable (col5){stop}
 
 .. _schema_indexes_functional:
 

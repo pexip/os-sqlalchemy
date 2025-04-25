@@ -13,6 +13,10 @@ As the descriptions in this section are intentionally **very short**, please
 proceed to the full :ref:`unified_tutorial` for a much more in-depth
 description of each of the concepts being illustrated here.
 
+.. versionchanged:: 2.0  The ORM Quickstart is updated for the latest
+    :pep:`484`-aware features using new constructs including
+    :func:`_orm.mapped_column`.   See the section
+    :ref:`whatsnew_20_orm_declarative_typing` for migration information.
 
 Declare Models
 ---------------
@@ -20,49 +24,50 @@ Declare Models
 Here, we define module-level constructs that will form the structures
 which we will be querying from the database.  This structure, known as a
 :ref:`Declarative Mapping <orm_declarative_mapping>`, defines at once both a
-Python object model, as well as
-:term:`database metadata` that describes
+Python object model, as well as :term:`database metadata` that describes
 real SQL tables that exist, or will exist, in a particular database::
 
-    >>> from sqlalchemy import Column
+    >>> from typing import List
+    >>> from typing import Optional
     >>> from sqlalchemy import ForeignKey
-    >>> from sqlalchemy import Integer
     >>> from sqlalchemy import String
-    >>> from sqlalchemy.orm import declarative_base
+    >>> from sqlalchemy.orm import DeclarativeBase
+    >>> from sqlalchemy.orm import Mapped
+    >>> from sqlalchemy.orm import mapped_column
     >>> from sqlalchemy.orm import relationship
 
-    >>> Base = declarative_base()
+    >>> class Base(DeclarativeBase):
+    ...     pass
 
     >>> class User(Base):
     ...     __tablename__ = "user_account"
     ...
-    ...     id = Column(Integer, primary_key=True)
-    ...     name = Column(String(30))
-    ...     fullname = Column(String)
+    ...     id: Mapped[int] = mapped_column(primary_key=True)
+    ...     name: Mapped[str] = mapped_column(String(30))
+    ...     fullname: Mapped[Optional[str]]
     ...
-    ...     addresses = relationship(
-    ...         "Address", back_populates="user", cascade="all, delete-orphan"
+    ...     addresses: Mapped[List["Address"]] = relationship(
+    ...         back_populates="user", cascade="all, delete-orphan"
     ...     )
     ...
-    ...     def __repr__(self):
+    ...     def __repr__(self) -> str:
     ...         return f"User(id={self.id!r}, name={self.name!r}, fullname={self.fullname!r})"
 
     >>> class Address(Base):
     ...     __tablename__ = "address"
     ...
-    ...     id = Column(Integer, primary_key=True)
-    ...     email_address = Column(String, nullable=False)
-    ...     user_id = Column(Integer, ForeignKey("user_account.id"), nullable=False)
+    ...     id: Mapped[int] = mapped_column(primary_key=True)
+    ...     email_address: Mapped[str]
+    ...     user_id: Mapped[int] = mapped_column(ForeignKey("user_account.id"))
     ...
-    ...     user = relationship("User", back_populates="addresses")
+    ...     user: Mapped["User"] = relationship(back_populates="addresses")
     ...
-    ...     def __repr__(self):
+    ...     def __repr__(self) -> str:
     ...         return f"Address(id={self.id!r}, email_address={self.email_address!r})"
 
-
 The mapping starts with a base class, which above is called ``Base``, and is
-created by calling upon the :func:`_orm.declarative_base` function, which
-produces a new base class.
+created by making a simple subclass against the :class:`_orm.DeclarativeBase`
+class.
 
 Individual mapped classes are then created by making subclasses of ``Base``.
 A mapped class typically refers to a single particular database table,
@@ -70,28 +75,42 @@ the name of which is indicated by using the ``__tablename__`` class-level
 attribute.
 
 Next, columns that are part of the table are declared, by adding attributes
-linked to the :class:`_schema.Column` construct.  :class:`_schema.Column`
-describes all aspects of a database column, including typing
-information with type objects such as :class:`.Integer` and :class:`.String`
-as well as server defaults and
+that include a special typing annotation called :class:`_orm.Mapped`. The name
+of each attribute corresponds to the column that is to be part of the database
+table. The datatype of each column is taken first from the Python datatype
+that's associated with each :class:`_orm.Mapped` annotation; ``int`` for
+``INTEGER``, ``str`` for ``VARCHAR``, etc. Nullability derives from whether or
+not the ``Optional[]`` type modifier is used. More specific typing information
+may be indicated using SQLAlchemy type objects in the right side
+:func:`_orm.mapped_column` directive, such as the :class:`.String` datatype
+used above in the ``User.name`` column. The association between Python types
+and SQL types can be customized using the
+:ref:`type annotation map <orm_declarative_mapped_column_type_map>`.
+
+The :func:`_orm.mapped_column` directive is used for all column-based
+attributes that require more specific customization. Besides typing
+information, this directive accepts a wide variety of arguments that indicate
+specific details about a database column, including server defaults and
 constraint information, such as membership within the primary key and foreign
-keys.
+keys. The :func:`_orm.mapped_column` directive accepts a superset of arguments
+that are accepted by the SQLAlchemy :class:`_schema.Column` class, which is
+used by SQLAlchemy Core to represent database columns.
 
 All ORM mapped classes require at least one column be declared as part of the
 primary key, typically by using the :paramref:`_schema.Column.primary_key`
-parameter on those :class:`_schema.Column` objects that should be part
+parameter on those :func:`_orm.mapped_column` objects that should be part
 of the key.  In the above example, the ``User.id`` and ``Address.id``
 columns are marked as primary key.
 
 Taken together, the combination of a string table name as well as a list
-of column declarations is referred towards in SQLAlchemy as :term:`table metadata`.
+of column declarations is known in SQLAlchemy as :term:`table metadata`.
 Setting up table metadata using both Core and ORM approaches is introduced
 in the :ref:`unified_tutorial` at :ref:`tutorial_working_with_metadata`.
-The above mapping is an example of what's referred towards as
-:ref:`Declarative Table <orm_declarative_table>`
+The above mapping is an example of what's known as
+:ref:`Annotated Declarative Table <orm_declarative_mapped_column>`
 configuration.
 
-Other Declarative directives are available, most commonly
+Other variants of :class:`_orm.Mapped` are available, most commonly
 the :func:`_orm.relationship` construct indicated above.  In contrast
 to the column-based attributes, :func:`_orm.relationship` denotes a linkage
 between two ORM classes.  In the above example, ``User.addresses`` links
@@ -100,7 +119,10 @@ The :func:`_orm.relationship` construct is introduced in the
 :ref:`unified_tutorial` at :ref:`tutorial_orm_related_objects`.
 
 Finally, the above example classes include a ``__repr__()`` method, which is
-not required but is useful for debugging.
+not required but is useful for debugging. Mapped classes can be created with
+methods such as ``__repr__()`` generated automatically, using dataclasses. More
+on dataclass mapping at :ref:`orm_declarative_native_dataclasses`.
+
 
 Create an Engine
 ------------------
@@ -113,13 +135,12 @@ purposes, we normally use a :ref:`SQLite <sqlite_toplevel>` memory-only database
 for convenience::
 
     >>> from sqlalchemy import create_engine
-    >>> engine = create_engine("sqlite://", echo=True, future=True)
+    >>> engine = create_engine("sqlite://", echo=True)
 
 .. tip::
 
     The ``echo=True`` parameter indicates that SQL emitted by connections will
-    be logged to standard out.  ``future=True`` is to ensure we are using
-    the latest SQLAlchemy :term:`2.0-style` APIs.
+    be logged to standard out.
 
 A full intro to the :class:`_engine.Engine` starts at :ref:`tutorial_engine`.
 
@@ -133,14 +154,14 @@ in our target SQLite database, using a method called :meth:`_schema.MetaData.cre
 .. sourcecode:: pycon+sql
 
     >>> Base.metadata.create_all(engine)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     PRAGMA main.table_...info("user_account")
     ...
     PRAGMA main.table_...info("address")
     ...
     CREATE TABLE user_account (
         id INTEGER NOT NULL,
-        name VARCHAR(30),
+        name VARCHAR(30) NOT NULL,
         fullname VARCHAR,
         PRIMARY KEY (id)
     )
@@ -180,7 +201,6 @@ is used:
     >>> from sqlalchemy.orm import Session
 
     >>> with Session(engine) as session:
-    ...
     ...     spongebob = User(
     ...         name="spongebob",
     ...         fullname="Spongebob Squarepants",
@@ -199,18 +219,18 @@ is used:
     ...     session.add_all([spongebob, sandy, patrick])
     ...
     ...     session.commit()
-    {opensql}BEGIN (implicit)
-    INSERT INTO user_account (name, fullname) VALUES (?, ?)
+    {execsql}BEGIN (implicit)
+    INSERT INTO user_account (name, fullname) VALUES (?, ?) RETURNING id
     [...] ('spongebob', 'Spongebob Squarepants')
-    INSERT INTO user_account (name, fullname) VALUES (?, ?)
+    INSERT INTO user_account (name, fullname) VALUES (?, ?) RETURNING id
     [...] ('sandy', 'Sandy Cheeks')
-    INSERT INTO user_account (name, fullname) VALUES (?, ?)
+    INSERT INTO user_account (name, fullname) VALUES (?, ?) RETURNING id
     [...] ('patrick', 'Patrick Star')
-    INSERT INTO address (email_address, user_id) VALUES (?, ?)
+    INSERT INTO address (email_address, user_id) VALUES (?, ?) RETURNING id
     [...] ('spongebob@sqlalchemy.org', 1)
-    INSERT INTO address (email_address, user_id) VALUES (?, ?)
+    INSERT INTO address (email_address, user_id) VALUES (?, ?) RETURNING id
     [...] ('sandy@sqlalchemy.org', 2)
-    INSERT INTO address (email_address, user_id) VALUES (?, ?)
+    INSERT INTO address (email_address, user_id) VALUES (?, ?) RETURNING id
     [...] ('sandy@squirrelpower.org', 2)
     COMMIT
 
@@ -251,7 +271,7 @@ the ORM objects we've selected:
 
     >>> for user in session.scalars(stmt):
     ...     print(user)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name IN (?, ?)
@@ -284,7 +304,7 @@ construct creates joins using the :meth:`_sql.Select.join` method:
     ...     .where(Address.email_address == "sandy@sqlalchemy.org")
     ... )
     >>> sandy_address = session.scalars(stmt).one()
-    {opensql}SELECT address.id, address.email_address, address.user_id
+    {execsql}SELECT address.id, address.email_address, address.user_id
     FROM address JOIN user_account ON user_account.id = address.user_id
     WHERE user_account.name = ? AND address.email_address = ?
     [...] ('sandy', 'sandy@sqlalchemy.org')
@@ -314,14 +334,14 @@ address associated with "sandy", and also add a new email address to
 
     >>> stmt = select(User).where(User.name == "patrick")
     >>> patrick = session.scalars(stmt).one()
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {execsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = ?
     [...] ('patrick',)
     {stop}
 
     >>> patrick.addresses.append(Address(email_address="patrickstar@sqlalchemy.org"))
-    {opensql}SELECT address.id AS address_id, address.email_address AS address_email_address, address.user_id AS address_user_id
+    {execsql}SELECT address.id AS address_id, address.email_address AS address_email_address, address.user_id AS address_user_id
     FROM address
     WHERE ? = address.user_id
     [...] (3,){stop}
@@ -329,7 +349,7 @@ address associated with "sandy", and also add a new email address to
     >>> sandy_address.email_address = "sandy_cheeks@sqlalchemy.org"
 
     >>> session.commit()
-    {opensql}UPDATE address SET email_address=? WHERE address.id = ?
+    {execsql}UPDATE address SET email_address=? WHERE address.id = ?
     [...] ('sandy_cheeks@sqlalchemy.org', 2)
     INSERT INTO address (email_address, user_id) VALUES (?, ?)
     [...] ('patrickstar@sqlalchemy.org', 3)
@@ -359,14 +379,14 @@ object by primary key using :meth:`_orm.Session.get`, then work with the object:
 .. sourcecode:: pycon+sql
 
     >>> sandy = session.get(User, 2)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id AS user_account_id, user_account.name AS user_account_name, user_account.fullname AS user_account_fullname
     FROM user_account
     WHERE user_account.id = ?
     [...] (2,){stop}
 
     >>> sandy.addresses.remove(sandy_address)
-    {opensql}SELECT address.id AS address_id, address.email_address AS address_email_address, address.user_id AS address_user_id
+    {execsql}SELECT address.id AS address_id, address.email_address AS address_email_address, address.user_id AS address_user_id
     FROM address
     WHERE ? = address.user_id
     [...] (2,)
@@ -383,7 +403,7 @@ committing the transaction, using the
 .. sourcecode:: pycon+sql
 
     >>> session.flush()
-    {opensql}DELETE FROM address WHERE address.id = ?
+    {execsql}DELETE FROM address WHERE address.id = ?
     [...] (2,)
 
 Next, we will delete the "patrick" user entirely.  For a top-level delete of
@@ -396,7 +416,7 @@ options that we configured, in this case, onto the related ``Address`` objects:
 .. sourcecode:: pycon+sql
 
     >>> session.delete(patrick)
-    {opensql}SELECT user_account.id AS user_account_id, user_account.name AS user_account_name, user_account.fullname AS user_account_fullname
+    {execsql}SELECT user_account.id AS user_account_id, user_account.name AS user_account_name, user_account.fullname AS user_account_fullname
     FROM user_account
     WHERE user_account.id = ?
     [...] (3,)
@@ -418,7 +438,7 @@ To illustrate the rows being deleted, here's the commit:
 .. sourcecode:: pycon+sql
 
     >>> session.commit()
-    {opensql}DELETE FROM address WHERE address.id = ?
+    {execsql}DELETE FROM address WHERE address.id = ?
     [...] (4,)
     DELETE FROM user_account WHERE user_account.id = ?
     [...] (3,)

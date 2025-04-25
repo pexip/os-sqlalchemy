@@ -1,4 +1,3 @@
-# -*- encoding: utf-8
 import datetime
 import decimal
 import random
@@ -20,10 +19,8 @@ from sqlalchemy import Table
 from sqlalchemy import testing
 from sqlalchemy import types
 from sqlalchemy import types as sqltypes
-from sqlalchemy import util
 from sqlalchemy.dialects import mssql
 from sqlalchemy.dialects.mssql import base
-from sqlalchemy.dialects.mssql.information_schema import CoerceUnicode
 from sqlalchemy.dialects.mssql.information_schema import tables
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateIndex
@@ -31,12 +28,14 @@ from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import ComparesTables
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import in_
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing import provision
+from sqlalchemy.testing.assertions import is_false
 
 
 class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
@@ -106,7 +105,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         argnames="type_obj,ddl",
     )
     def test_assorted_types(self, metadata, connection, type_obj, ddl):
-
         table = Table("type_test", metadata, Column("col1", type_obj))
         table.create(connection)
 
@@ -163,6 +161,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                             "nullable": False,
                             "default": None,
                             "autoincrement": False,
+                            "comment": None,
                         },
                         {
                             "name": "data",
@@ -172,6 +171,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                             "nullable": True,
                             "default": None,
                             "autoincrement": False,
+                            "comment": None,
                         },
                     ],
                 )
@@ -265,12 +265,12 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                 [
                     {
                         "id": 1,
-                        "txt": u"foo",
+                        "txt": "foo",
                         "dt2": datetime.datetime(2020, 1, 1, 1, 1, 1),
                     },
                     {
                         "id": 2,
-                        "txt": u"bar",
+                        "txt": "bar",
                         "dt2": datetime.datetime(2020, 2, 2, 2, 2, 2),
                     },
                 ],
@@ -318,7 +318,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         """test #6910"""
 
         with testing.db.connect() as c1, testing.db.connect() as c2:
-
             try:
                 with c1.begin():
                     c1.exec_driver_sql(
@@ -351,6 +350,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                 assert c2.dialect.has_table(
                     c2, "#myveryveryuniquetemptablename"
                 )
+                c2.rollback()
             finally:
                 with c1.begin():
                     c1.exec_driver_sql(
@@ -371,30 +371,28 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         cnxn = connection_no_trans.execution_options(
             isolation_level="AUTOCOMMIT"
         )
-        cnxn.exec_driver_sql("DROP DATABASE IF EXISTS %s" % temp_db_name)
+        cnxn.exec_driver_sql(f"DROP DATABASE IF EXISTS {temp_db_name}")
         cnxn.exec_driver_sql(
-            "CREATE DATABASE %s COLLATE Danish_Norwegian_CI_AS" % temp_db_name
+            f"CREATE DATABASE {temp_db_name} COLLATE Danish_Norwegian_CI_AS"
         )
         eng = testing_engine(
             url=testing.db.url.set(database=temp_db_name),
-            options=dict(poolclass=NullPool, future=True),
+            options=dict(poolclass=NullPool),
         )
 
         yield eng
 
-        cnxn.exec_driver_sql("DROP DATABASE IF EXISTS %s" % temp_db_name)
+        cnxn.exec_driver_sql(f"DROP DATABASE IF EXISTS {temp_db_name}")
 
     def test_global_temp_different_collation(
         self, temp_db_alt_collation_fixture
     ):
         """test #8035"""
 
-        tname = "##foo%s" % (random.randint(1, 1000000),)
+        tname = f"##foo{random.randint(1, 1000000)}"
 
         with temp_db_alt_collation_fixture.connect() as conn:
-            conn.exec_driver_sql(
-                "CREATE TABLE %s (id int primary key)" % (tname,)
-            )
+            conn.exec_driver_sql(f"CREATE TABLE {tname} (id int primary key)")
             conn.commit()
 
             eq_(
@@ -406,10 +404,40 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
                         "nullable": False,
                         "default": None,
                         "autoincrement": False,
+                        "comment": None,
                     }
                 ],
             )
             Table(tname, MetaData(), autoload_with=conn)
+
+    @testing.combinations(
+        ("test_schema"),
+        ("[test_schema]"),
+        argnames="schema_value",
+    )
+    @testing.variation(
+        "reflection_operation", ["has_table", "reflect_table", "get_columns"]
+    )
+    def test_has_table_with_single_token_schema(
+        self, metadata, connection, schema_value, reflection_operation
+    ):
+        """test for #9133"""
+        tt = Table(
+            "test", metadata, Column("id", Integer), schema=schema_value
+        )
+        tt.create(connection)
+
+        if reflection_operation.has_table:
+            is_true(inspect(connection).has_table("test", schema=schema_value))
+        elif reflection_operation.reflect_table:
+            m2 = MetaData()
+            Table("test", m2, autoload_with=connection, schema=schema_value)
+        elif reflection_operation.get_columns:
+            is_true(
+                inspect(connection).get_columns("test", schema=schema_value)
+            )
+        else:
+            reflection_operation.fail()
 
     def test_db_qualified_items(self, metadata, connection):
         Table("foo", metadata, Column("id", Integer, primary_key=True))
@@ -506,7 +534,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         )
 
     def test_indexes_cols(self, metadata, connection):
-
         t1 = Table("t", metadata, Column("x", Integer), Column("y", Integer))
         Index("foo", t1.c.x, t1.c.y)
         metadata.create_all(connection)
@@ -514,10 +541,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         m2 = MetaData()
         t2 = Table("t", m2, autoload_with=connection)
 
-        eq_(set(list(t2.indexes)[0].columns), set([t2.c["x"], t2.c.y]))
+        eq_(set(list(t2.indexes)[0].columns), {t2.c["x"], t2.c.y})
 
     def test_indexes_cols_with_commas(self, metadata, connection):
-
         t1 = Table(
             "t",
             metadata,
@@ -530,10 +556,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         m2 = MetaData()
         t2 = Table("t", m2, autoload_with=connection)
 
-        eq_(set(list(t2.indexes)[0].columns), set([t2.c["x, col"], t2.c.y]))
+        eq_(set(list(t2.indexes)[0].columns), {t2.c["x, col"], t2.c.y})
 
     def test_indexes_cols_with_spaces(self, metadata, connection):
-
         t1 = Table(
             "t",
             metadata,
@@ -546,10 +571,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
         m2 = MetaData()
         t2 = Table("t", m2, autoload_with=connection)
 
-        eq_(set(list(t2.indexes)[0].columns), set([t2.c["x col"], t2.c.y]))
+        eq_(set(list(t2.indexes)[0].columns), {t2.c["x col"], t2.c.y})
 
     def test_indexes_with_filtered(self, metadata, connection):
-
         t1 = Table(
             "t",
             metadata,
@@ -571,10 +595,304 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
 
         t2 = Table("t", MetaData(), autoload_with=connection)
         idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+        self.assert_compile(
+            CreateIndex(idx),
+            "CREATE NONCLUSTERED INDEX idx_x ON t (x) WHERE ([x]='test')",
+        )
+
+    def test_index_reflection_clustered(self, metadata, connection):
+        """
+        when the result of get_indexes() is used to build an index it should
+        include the CLUSTERED keyword when appropriate
+        """
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_clustered=True)
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        clustered_index = ""
+        for ix in ind:
+            if ix["dialect_options"]["mssql_clustered"]:
+                clustered_index = ix["name"]
+
+        eq_(clustered_index, "idx_x")
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
 
         self.assert_compile(
-            CreateIndex(idx), "CREATE INDEX idx_x ON t (x) WHERE ([x]='test')"
+            CreateIndex(idx), "CREATE CLUSTERED INDEX idx_x ON t (x)"
         )
+
+    def test_index_reflection_filtered_and_clustered(
+        self, metadata, connection
+    ):
+        """
+        table with one filtered index and one clustered index so each index
+        will have different dialect_options keys
+        """
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_clustered=True)
+        Index("idx_y", t1.c.y, mssql_where=t1.c.y >= 5)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        clustered_index = ""
+        for ix in ind:
+            if ix["dialect_options"]["mssql_clustered"]:
+                clustered_index = ix["name"]
+                is_false("mssql_columnstore" in ix["dialect_options"])
+
+        eq_(clustered_index, "idx_x")
+
+        filtered_indexes = []
+        for ix in ind:
+            if "dialect_options" in ix:
+                if "mssql_where" in ix["dialect_options"]:
+                    filtered_indexes.append(
+                        ix["dialect_options"]["mssql_where"]
+                    )
+
+        eq_(sorted(filtered_indexes), ["([y]>=(5))"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        clustered_idx = list(
+            sorted(t2.indexes, key=lambda clustered_idx: clustered_idx.name)
+        )[0]
+        filtered_idx = list(
+            sorted(t2.indexes, key=lambda filtered_idx: filtered_idx.name)
+        )[1]
+
+        self.assert_compile(
+            CreateIndex(clustered_idx), "CREATE CLUSTERED INDEX idx_x ON t (x)"
+        )
+
+        self.assert_compile(
+            CreateIndex(filtered_idx),
+            "CREATE NONCLUSTERED INDEX idx_y ON t (y) WHERE ([y]>=(5))",
+        )
+
+    def test_index_reflection_nonclustered(self, metadata, connection):
+        """
+        one index created by specifying mssql_clustered=False
+        one created without specifying mssql_clustered property so it will
+        use default of NONCLUSTERED.
+        When reflected back mssql_clustered=False should be included in both
+        """
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_clustered=False)
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        for ix in ind:
+            assert ix["dialect_options"]["mssql_clustered"] == False
+            is_false("mssql_columnstore" in ix["dialect_options"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx), "CREATE NONCLUSTERED INDEX idx_x ON t (x)"
+        )
+
+    @testing.only_if("mssql>=12")
+    def test_index_reflection_colstore_clustered(self, metadata, connection):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+            Index("idx_x", mssql_clustered=True, mssql_columnstore=True),
+        )
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        for ix in ind:
+            if ix["name"] == "idx_x":
+                is_true(ix["dialect_options"]["mssql_clustered"])
+                is_true(ix["dialect_options"]["mssql_columnstore"])
+                eq_(ix["dialect_options"]["mssql_include"], [])
+                eq_(ix["column_names"], [])
+            else:
+                is_false(ix["dialect_options"]["mssql_clustered"])
+                is_false("mssql_columnstore" in ix["dialect_options"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx), "CREATE CLUSTERED COLUMNSTORE INDEX idx_x ON t"
+        )
+
+    @testing.only_if("mssql>=11")
+    def test_index_reflection_colstore_nonclustered(
+        self, metadata, connection
+    ):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_clustered=False, mssql_columnstore=True)
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        for ix in ind:
+            is_false(ix["dialect_options"]["mssql_clustered"])
+            if ix["name"] == "idx_x":
+                is_true(ix["dialect_options"]["mssql_columnstore"])
+                eq_(ix["dialect_options"]["mssql_include"], [])
+                eq_(ix["column_names"], ["x"])
+            else:
+                is_false("mssql_columnstore" in ix["dialect_options"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx),
+            "CREATE NONCLUSTERED COLUMNSTORE INDEX idx_x ON t (x)",
+        )
+
+    @testing.only_if("mssql>=11")
+    def test_index_reflection_colstore_nonclustered_none(
+        self, metadata, connection
+    ):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index("idx_x", t1.c.x, mssql_columnstore=True)
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        for ix in ind:
+            is_false(ix["dialect_options"]["mssql_clustered"])
+            if ix["name"] == "idx_x":
+                is_true(ix["dialect_options"]["mssql_columnstore"])
+                eq_(ix["dialect_options"]["mssql_include"], [])
+                eq_(ix["column_names"], ["x"])
+            else:
+                is_false("mssql_columnstore" in ix["dialect_options"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx),
+            "CREATE NONCLUSTERED COLUMNSTORE INDEX idx_x ON t (x)",
+        )
+
+    @testing.only_if("mssql>=11")
+    def test_index_reflection_colstore_nonclustered_multicol(
+        self, metadata, connection
+    ):
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        Index(
+            "idx_xid",
+            t1.c.x,
+            t1.c.id,
+            mssql_clustered=False,
+            mssql_columnstore=True,
+        )
+        Index("idx_y", t1.c.y)
+        metadata.create_all(connection)
+        ind = testing.db.dialect.get_indexes(connection, "t", None)
+
+        for ix in ind:
+            is_false(ix["dialect_options"]["mssql_clustered"])
+            if ix["name"] == "idx_xid":
+                is_true(ix["dialect_options"]["mssql_columnstore"])
+                eq_(ix["dialect_options"]["mssql_include"], [])
+                eq_(ix["column_names"], ["x", "id"])
+            else:
+                is_false("mssql_columnstore" in ix["dialect_options"])
+
+        t2 = Table("t", MetaData(), autoload_with=connection)
+        idx = list(sorted(t2.indexes, key=lambda idx: idx.name))[0]
+
+        self.assert_compile(
+            CreateIndex(idx),
+            "CREATE NONCLUSTERED COLUMNSTORE INDEX idx_xid ON t (x, id)",
+        )
+
+    def test_primary_key_reflection_clustered(self, metadata, connection):
+        """
+        A primary key will be clustered by default if no other clustered index
+        exists.
+        When reflected back, mssql_clustered=True should be present.
+        """
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        PrimaryKeyConstraint(t1.c.id, name="pk_t")
+
+        metadata.create_all(connection)
+        pk_reflect = testing.db.dialect.get_pk_constraint(
+            connection, "t", None
+        )
+
+        assert pk_reflect["dialect_options"]["mssql_clustered"] == True
+
+    def test_primary_key_reflection_nonclustered(self, metadata, connection):
+        """
+        Nonclustered primary key should include mssql_clustered=False
+        when reflected back
+        """
+        t1 = Table(
+            "t",
+            metadata,
+            Column("id", Integer),
+            Column("x", types.String(20)),
+            Column("y", types.Integer),
+        )
+        PrimaryKeyConstraint(t1.c.id, name="pk_t", mssql_clustered=False)
+
+        metadata.create_all(connection)
+        pk_reflect = testing.db.dialect.get_pk_constraint(
+            connection, "t", None
+        )
+
+        assert pk_reflect["dialect_options"]["mssql_clustered"] == False
 
     def test_max_ident_in_varchar_not_present(self, metadata, connection):
         """test [ticket:3504].
@@ -600,14 +918,75 @@ class ReflectionTest(fixtures.TestBase, ComparesTables, AssertsCompiledSQL):
             is_(col["type"].length, None)
             in_("max", str(col["type"].compile(dialect=connection.dialect)))
 
+    @testing.fixture
+    def comment_table(self, metadata):
+        Table(
+            "tbl_with_comments",
+            metadata,
+            Column(
+                "id",
+                types.Integer,
+                primary_key=True,
+                comment="pk comment 🔑",
+            ),
+            Column("no_comment", types.Integer),
+            Column(
+                "has_comment",
+                types.String(20),
+                comment="has the comment § méil 📧",
+            ),
+            comment="table comment çòé 🐍",
+        )
+        metadata.create_all(testing.db)
+
+    def test_comments(self, connection, comment_table):
+        insp = inspect(connection)
+        eq_(
+            insp.get_table_comment("tbl_with_comments"),
+            {"text": "table comment çòé 🐍"},
+        )
+
+        cols = {
+            col["name"]: col["comment"]
+            for col in insp.get_columns("tbl_with_comments")
+        }
+        eq_(
+            cols,
+            {
+                "id": "pk comment 🔑",
+                "no_comment": None,
+                "has_comment": "has the comment § méil 📧",
+            },
+        )
+
+    def test_comments_not_supported(self, testing_engine, comment_table):
+        eng = testing_engine(options={"supports_comments": False})
+        insp = inspect(eng)
+
+        with expect_raises_message(
+            NotImplementedError,
+            "Can't get table comments on current SQL Server version in use",
+        ):
+            insp.get_table_comment("tbl_with_comments")
+
+        # currently, column comments still reflect normally since we
+        # aren't using an fn/sp for that
+
+        cols = {
+            col["name"]: col["comment"]
+            for col in insp.get_columns("tbl_with_comments")
+        }
+        eq_(
+            cols,
+            {
+                "id": "pk comment 🔑",
+                "no_comment": None,
+                "has_comment": "has the comment § méil 📧",
+            },
+        )
+
 
 class InfoCoerceUnicodeTest(fixtures.TestBase, AssertsCompiledSQL):
-    def test_info_unicode_coercion(self):
-
-        dialect = mssql.dialect()
-        value = CoerceUnicode().bind_processor(dialect)("a string")
-        assert isinstance(value, util.text_type)
-
     def test_info_unicode_cast_no_2000(self):
         dialect = mssql.dialect()
         dialect.server_version_info = base.MS_2000_VERSION
@@ -647,12 +1026,15 @@ class ReflectHugeViewTest(fixtures.TablesTest):
             *[
                 Column("long_named_column_number_%d" % i, Integer)
                 for i in range(col_num)
-            ]
+            ],
         )
-        cls.view_str = (
-            view_str
-        ) = "CREATE VIEW huge_named_view AS SELECT %s FROM base_table" % (
-            ",".join("long_named_column_number_%d" % i for i in range(col_num))
+        cls.view_str = view_str = (
+            "CREATE VIEW huge_named_view AS SELECT %s FROM base_table"
+            % (
+                ",".join(
+                    "long_named_column_number_%d" % i for i in range(col_num)
+                )
+            )
         )
         assert len(view_str) > 4000
 
@@ -801,7 +1183,6 @@ class IdentityReflectionTest(fixtures.TablesTest):
 
     @classmethod
     def define_tables(cls, metadata):
-
         for i, col in enumerate(
             [
                 Column(
@@ -818,7 +1199,11 @@ class IdentityReflectionTest(fixtures.TablesTest):
                     ),
                 ),
                 Column("id2", Integer, Identity()),
-                Column("id3", sqltypes.BigInteger, Identity()),
+                Column(
+                    "id3",
+                    sqltypes.BigInteger,
+                    Identity(start=-9223372036854775808),
+                ),
                 Column("id4", sqltypes.SmallInteger, Identity()),
                 Column("id5", sqltypes.Numeric, Identity()),
             ]
@@ -840,9 +1225,12 @@ class IdentityReflectionTest(fixtures.TablesTest):
                 eq_(type(col["identity"]["start"]), int)
                 eq_(type(col["identity"]["increment"]), int)
             elif col["name"] == "id3":
-                eq_(col["identity"], {"start": 1, "increment": 1})
-                eq_(type(col["identity"]["start"]), util.compat.long_type)
-                eq_(type(col["identity"]["increment"]), util.compat.long_type)
+                eq_(
+                    col["identity"],
+                    {"start": -9223372036854775808, "increment": 1},
+                )
+                eq_(type(col["identity"]["start"]), int)
+                eq_(type(col["identity"]["increment"]), int)
             elif col["name"] == "id4":
                 eq_(col["identity"], {"start": 1, "increment": 1})
                 eq_(type(col["identity"]["start"]), int)

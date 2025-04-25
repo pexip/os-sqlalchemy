@@ -11,11 +11,6 @@ included, using asyncio-compatible dialects.
 .. warning:: Please read :ref:`asyncio_install` for important platform
    installation notes for many platforms, including **Apple M1 Architecture**.
 
-.. tip:: The asyncio extension as of SQLAlchemy 1.4.3 can now be considered to
-   be **beta level** software. API details are subject to change however at this
-   point it is unlikely for there to be significant backwards-incompatible
-   changes.
-
 .. seealso::
 
     :ref:`change_3414` - initial feature announcement
@@ -30,7 +25,9 @@ Asyncio Platform Installation Notes (Including Apple M1)
 
 The asyncio extension requires Python 3 only. It also depends
 upon the `greenlet <https://pypi.org/project/greenlet/>`_ library. This
-dependency is installed by default on common machine platforms including::
+dependency is installed by default on common machine platforms including:
+
+.. sourcecode:: text
 
     x86_64 aarch64 ppc64le amd64 win32
 
@@ -44,7 +41,9 @@ To install SQLAlchemy while ensuring the ``greenlet`` dependency is present
 regardless of what platform is in use, the
 ``[asyncio]`` `setuptools extra <https://packaging.python.org/en/latest/tutorials/installing-packages/#installing-setuptools-extras>`_
 may be installed
-as follows, which will include also instruct ``pip`` to install ``greenlet``::
+as follows, which will include also instruct ``pip`` to install ``greenlet``:
+
+.. sourcecode:: text
 
   pip install sqlalchemy[asyncio]
 
@@ -65,40 +64,64 @@ methods which both deliver asynchronous context managers.   The
 :class:`_asyncio.AsyncConnection` can then invoke statements using either the
 :meth:`_asyncio.AsyncConnection.execute` method to deliver a buffered
 :class:`_engine.Result`, or the :meth:`_asyncio.AsyncConnection.stream` method
-to deliver a streaming server-side :class:`_asyncio.AsyncResult`::
+to deliver a streaming server-side :class:`_asyncio.AsyncResult`:
 
-    import asyncio
+.. sourcecode:: pycon+sql
 
-    from sqlalchemy.ext.asyncio import create_async_engine
+    >>> import asyncio
 
+    >>> from sqlalchemy import Column
+    >>> from sqlalchemy import MetaData
+    >>> from sqlalchemy import select
+    >>> from sqlalchemy import String
+    >>> from sqlalchemy import Table
+    >>> from sqlalchemy.ext.asyncio import create_async_engine
 
-    async def async_main():
-        engine = create_async_engine(
-            "postgresql+asyncpg://scott:tiger@localhost/test",
-            echo=True,
-        )
-
-        async with engine.begin() as conn:
-            await conn.run_sync(meta.drop_all)
-            await conn.run_sync(meta.create_all)
-
-            await conn.execute(
-                t1.insert(), [{"name": "some name 1"}, {"name": "some name 2"}]
-            )
-
-        async with engine.connect() as conn:
-            # select a Result, which will be delivered with buffered
-            # results
-            result = await conn.execute(select(t1).where(t1.c.name == "some name 1"))
-
-            print(result.fetchall())
-
-        # for AsyncEngine created in function scope, close and
-        # clean-up pooled connections
-        await engine.dispose()
+    >>> meta = MetaData()
+    >>> t1 = Table("t1", meta, Column("name", String(50), primary_key=True))
 
 
-    asyncio.run(async_main())
+    >>> async def async_main() -> None:
+    ...     engine = create_async_engine("sqlite+aiosqlite://", echo=True)
+    ...
+    ...     async with engine.begin() as conn:
+    ...         await conn.run_sync(meta.drop_all)
+    ...         await conn.run_sync(meta.create_all)
+    ...
+    ...         await conn.execute(
+    ...             t1.insert(), [{"name": "some name 1"}, {"name": "some name 2"}]
+    ...         )
+    ...
+    ...     async with engine.connect() as conn:
+    ...         # select a Result, which will be delivered with buffered
+    ...         # results
+    ...         result = await conn.execute(select(t1).where(t1.c.name == "some name 1"))
+    ...
+    ...         print(result.fetchall())
+    ...
+    ...     # for AsyncEngine created in function scope, close and
+    ...     # clean-up pooled connections
+    ...     await engine.dispose()
+
+
+    >>> asyncio.run(async_main())
+    {execsql}BEGIN (implicit)
+    ...
+    CREATE TABLE t1 (
+        name VARCHAR(50) NOT NULL,
+        PRIMARY KEY (name)
+    )
+    ...
+    INSERT INTO t1 (name) VALUES (?)
+    [...] [('some name 1',), ('some name 2',)]
+    COMMIT
+    BEGIN (implicit)
+    SELECT t1.name
+    FROM t1
+    WHERE t1.name = ?
+    [...] ('some name 1',)
+    [('some name 1',)]
+    ROLLBACK
 
 Above, the :meth:`_asyncio.AsyncConnection.run_sync` method may be used to
 invoke special DDL functions such as :meth:`_schema.MetaData.create_all` that
@@ -134,121 +157,205 @@ Synopsis - ORM
 ---------------
 
 Using :term:`2.0 style` querying, the :class:`_asyncio.AsyncSession` class
-provides full ORM functionality. Within the default mode of use, special care
-must be taken to avoid :term:`lazy loading` or other expired-attribute access
-involving ORM relationships and column attributes; the next
-section :ref:`asyncio_orm_avoid_lazyloads` details this.   The example below
-illustrates a complete example including mapper and session configuration::
+provides full ORM functionality.
 
-    import asyncio
+Within the default mode of use, special care must be taken to avoid :term:`lazy
+loading` or other expired-attribute access involving ORM relationships and
+column attributes; the next section :ref:`asyncio_orm_avoid_lazyloads` details
+this.
 
-    from sqlalchemy import Column
-    from sqlalchemy import DateTime
-    from sqlalchemy import ForeignKey
-    from sqlalchemy import func
-    from sqlalchemy import Integer
-    from sqlalchemy import String
-    from sqlalchemy.ext.asyncio import AsyncSession
-    from sqlalchemy.ext.asyncio import create_async_engine
-    from sqlalchemy.future import select
-    from sqlalchemy.orm import declarative_base
-    from sqlalchemy.orm import relationship
-    from sqlalchemy.orm import selectinload
-    from sqlalchemy.orm import sessionmaker
+.. warning::
 
-    Base = declarative_base()
+    A single instance of :class:`_asyncio.AsyncSession` is **not safe for
+    use in multiple, concurrent tasks**.  See the sections
+    :ref:`asyncio_concurrency` and :ref:`session_faq_threadsafe` for background.
 
+The example below illustrates a complete example including mapper and session
+configuration:
 
-    class A(Base):
-        __tablename__ = "a"
+.. sourcecode:: pycon+sql
 
-        id = Column(Integer, primary_key=True)
-        data = Column(String)
-        create_date = Column(DateTime, server_default=func.now())
-        bs = relationship("B")
+    >>> from __future__ import annotations
 
-        # required in order to access columns with server defaults
-        # or SQL expression defaults, subsequent to a flush, without
-        # triggering an expired load
-        __mapper_args__ = {"eager_defaults": True}
+    >>> import asyncio
+    >>> import datetime
+    >>> from typing import List
 
-
-    class B(Base):
-        __tablename__ = "b"
-        id = Column(Integer, primary_key=True)
-        a_id = Column(ForeignKey("a.id"))
-        data = Column(String)
+    >>> from sqlalchemy import ForeignKey
+    >>> from sqlalchemy import func
+    >>> from sqlalchemy import select
+    >>> from sqlalchemy.ext.asyncio import AsyncAttrs
+    >>> from sqlalchemy.ext.asyncio import async_sessionmaker
+    >>> from sqlalchemy.ext.asyncio import AsyncSession
+    >>> from sqlalchemy.ext.asyncio import create_async_engine
+    >>> from sqlalchemy.orm import DeclarativeBase
+    >>> from sqlalchemy.orm import Mapped
+    >>> from sqlalchemy.orm import mapped_column
+    >>> from sqlalchemy.orm import relationship
+    >>> from sqlalchemy.orm import selectinload
 
 
-    async def async_main():
-        engine = create_async_engine(
-            "postgresql+asyncpg://scott:tiger@localhost/test",
-            echo=True,
-        )
+    >>> class Base(AsyncAttrs, DeclarativeBase):
+    ...     pass
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
-            await conn.run_sync(Base.metadata.create_all)
+    >>> class B(Base):
+    ...     __tablename__ = "b"
+    ...
+    ...     id: Mapped[int] = mapped_column(primary_key=True)
+    ...     a_id: Mapped[int] = mapped_column(ForeignKey("a.id"))
+    ...     data: Mapped[str]
 
-        # expire_on_commit=False will prevent attributes from being expired
-        # after commit.
-        async_session = sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    >>> class A(Base):
+    ...     __tablename__ = "a"
+    ...
+    ...     id: Mapped[int] = mapped_column(primary_key=True)
+    ...     data: Mapped[str]
+    ...     create_date: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+    ...     bs: Mapped[List[B]] = relationship()
 
-        async with async_session() as session:
-            async with session.begin():
-                session.add_all(
-                    [
-                        A(bs=[B(), B()], data="a1"),
-                        A(bs=[B()], data="a2"),
-                        A(bs=[B(), B()], data="a3"),
-                    ]
-                )
-
-            stmt = select(A).options(selectinload(A.bs))
-
-            result = await session.execute(stmt)
-
-            for a1 in result.scalars():
-                print(a1)
-                print(f"created at: {a1.create_date}")
-                for b1 in a1.bs:
-                    print(b1)
-
-            result = await session.execute(select(A).order_by(A.id))
-
-            a1 = result.scalars().first()
-
-            a1.data = "new data"
-
-            await session.commit()
-
-            # access attribute subsequent to commit; this is what
-            # expire_on_commit=False allows
-            print(a1.data)
-
-        # for AsyncEngine created in function scope, close and
-        # clean-up pooled connections
-        await engine.dispose()
+    >>> async def insert_objects(async_session: async_sessionmaker[AsyncSession]) -> None:
+    ...     async with async_session() as session:
+    ...         async with session.begin():
+    ...             session.add_all(
+    ...                 [
+    ...                     A(bs=[B(data="b1"), B(data="b2")], data="a1"),
+    ...                     A(bs=[], data="a2"),
+    ...                     A(bs=[B(data="b3"), B(data="b4")], data="a3"),
+    ...                 ]
+    ...             )
 
 
-    asyncio.run(async_main())
+    >>> async def select_and_update_objects(
+    ...     async_session: async_sessionmaker[AsyncSession],
+    ... ) -> None:
+    ...     async with async_session() as session:
+    ...         stmt = select(A).order_by(A.id).options(selectinload(A.bs))
+    ...
+    ...         result = await session.execute(stmt)
+    ...
+    ...         for a in result.scalars():
+    ...             print(a, a.data)
+    ...             print(f"created at: {a.create_date}")
+    ...             for b in a.bs:
+    ...                 print(b, b.data)
+    ...
+    ...         result = await session.execute(select(A).order_by(A.id).limit(1))
+    ...
+    ...         a1 = result.scalars().one()
+    ...
+    ...         a1.data = "new data"
+    ...
+    ...         await session.commit()
+    ...
+    ...         # access attribute subsequent to commit; this is what
+    ...         # expire_on_commit=False allows
+    ...         print(a1.data)
+    ...
+    ...         # alternatively, AsyncAttrs may be used to access any attribute
+    ...         # as an awaitable (new in 2.0.13)
+    ...         for b1 in await a1.awaitable_attrs.bs:
+    ...             print(b1, b1.data)
+
+
+    >>> async def async_main() -> None:
+    ...     engine = create_async_engine("sqlite+aiosqlite://", echo=True)
+    ...
+    ...     # async_sessionmaker: a factory for new AsyncSession objects.
+    ...     # expire_on_commit - don't expire objects after transaction commit
+    ...     async_session = async_sessionmaker(engine, expire_on_commit=False)
+    ...
+    ...     async with engine.begin() as conn:
+    ...         await conn.run_sync(Base.metadata.create_all)
+    ...
+    ...     await insert_objects(async_session)
+    ...     await select_and_update_objects(async_session)
+    ...
+    ...     # for AsyncEngine created in function scope, close and
+    ...     # clean-up pooled connections
+    ...     await engine.dispose()
+
+
+    >>> asyncio.run(async_main())
+    {execsql}BEGIN (implicit)
+    ...
+    CREATE TABLE a (
+        id INTEGER NOT NULL,
+        data VARCHAR NOT NULL,
+        create_date DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        PRIMARY KEY (id)
+    )
+    ...
+    CREATE TABLE b (
+        id INTEGER NOT NULL,
+        a_id INTEGER NOT NULL,
+        data VARCHAR NOT NULL,
+        PRIMARY KEY (id),
+        FOREIGN KEY(a_id) REFERENCES a (id)
+    )
+    ...
+    COMMIT
+    BEGIN (implicit)
+    INSERT INTO a (data) VALUES (?) RETURNING id, create_date
+    [...] ('a1',)
+    ...
+    INSERT INTO b (a_id, data) VALUES (?, ?) RETURNING id
+    [...] (1, 'b2')
+    ...
+    COMMIT
+    BEGIN (implicit)
+    SELECT a.id, a.data, a.create_date
+    FROM a ORDER BY a.id
+    [...] ()
+    SELECT b.a_id AS b_a_id, b.id AS b_id, b.data AS b_data
+    FROM b
+    WHERE b.a_id IN (?, ?, ?)
+    [...] (1, 2, 3)
+    <A object at ...> a1
+    created at: ...
+    <B object at ...> b1
+    <B object at ...> b2
+    <A object at ...> a2
+    created at: ...
+    <A object at ...> a3
+    created at: ...
+    <B object at ...> b3
+    <B object at ...> b4
+    SELECT a.id, a.data, a.create_date
+    FROM a ORDER BY a.id
+    LIMIT ? OFFSET ?
+    [...] (1, 0)
+    UPDATE a SET data=? WHERE a.id = ?
+    [...] ('new data', 1)
+    COMMIT
+    new data
+    <B object at ...> b1
+    <B object at ...> b2
 
 In the example above, the :class:`_asyncio.AsyncSession` is instantiated using
-the optional :class:`_orm.sessionmaker` helper, and associated with an
-:class:`_asyncio.AsyncEngine` against particular database URL. It is
-then used in a Python asynchronous context manager (i.e. ``async with:``
-statement) so that it is automatically closed at the end of the block; this is
-equivalent to calling the :meth:`_asyncio.AsyncSession.close` method.
+the optional :class:`_asyncio.async_sessionmaker` helper, which provides
+a factory for new :class:`_asyncio.AsyncSession` objects with a fixed set
+of parameters, which here includes associating it with
+an :class:`_asyncio.AsyncEngine` against particular database URL. It is then
+passed to other methods where it may be used in a Python asynchronous context
+manager (i.e. ``async with:`` statement) so that it is automatically closed at
+the end of the block; this is equivalent to calling the
+:meth:`_asyncio.AsyncSession.close` method.
 
-.. note:: :class:`_asyncio.AsyncSession` uses SQLAlchemy's future mode, which
-   has several potentially breaking changes.  One such change is the new
-   default behavior of ``cascade_backrefs`` is ``False``, which may affect
-   how related objects are saved to the database.
 
-   .. seealso::
+.. _asyncio_concurrency:
 
-     :ref:`change_5150`
+Using AsyncSession with Concurrent Tasks
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+The :class:`_asyncio.AsyncSession` object is a **mutable, stateful object**
+which represents a **single, stateful database transaction in progress**. Using
+concurrent tasks with asyncio, with APIs such as ``asyncio.gather()`` for
+example, should use a **separate** :class:`_asyncio.AsyncSession` **per individual
+task**.
+
+See the section :ref:`session_faq_threadsafe` for a general description of
+the :class:`_orm.Session` and :class:`_asyncio.AsyncSession` with regards to
+how they should be used with concurrent workloads.
 
 .. _asyncio_orm_avoid_lazyloads:
 
@@ -256,23 +363,101 @@ Preventing Implicit IO when Using AsyncSession
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Using traditional asyncio, the application needs to avoid any points at which
-IO-on-attribute access may occur. Above, the following measures are taken to
-prevent this:
+IO-on-attribute access may occur.   Techniques that can be used to help
+this are below, many of which are illustrated in the preceding example.
 
-* The :func:`_orm.selectinload` eager loader is employed in order to eagerly
+* Attributes that are lazy-loading relationships, deferred columns or
+  expressions, or are being accessed in expiration scenarios can take advantage
+  of the  :class:`_asyncio.AsyncAttrs` mixin.  This mixin, when added to a
+  specific class or more generally to the Declarative ``Base`` superclass,
+  provides an accessor :attr:`_asyncio.AsyncAttrs.awaitable_attrs`
+  which delivers any attribute as an awaitable::
+
+    from __future__ import annotations
+
+    from typing import List
+
+    from sqlalchemy.ext.asyncio import AsyncAttrs
+    from sqlalchemy.orm import DeclarativeBase
+    from sqlalchemy.orm import Mapped
+    from sqlalchemy.orm import relationship
+
+
+    class Base(AsyncAttrs, DeclarativeBase):
+        pass
+
+
+    class A(Base):
+        __tablename__ = "a"
+
+        # ... rest of mapping ...
+
+        bs: Mapped[List[B]] = relationship()
+
+
+    class B(Base):
+        __tablename__ = "b"
+
+        # ... rest of mapping ...
+
+  Accessing the ``A.bs`` collection on newly loaded instances of ``A`` when
+  eager loading is not in use will normally use :term:`lazy loading`, which in
+  order to succeed will usually emit IO to the database, which will fail under
+  asyncio as no implicit IO is allowed. To access this attribute directly under
+  asyncio without any prior loading operations, the attribute can be accessed
+  as an awaitable by indicating the :attr:`_asyncio.AsyncAttrs.awaitable_attrs`
+  prefix::
+
+    a1 = (await session.scalars(select(A))).one()
+    for b1 in await a1.awaitable_attrs.bs:
+        print(b1)
+
+  The :class:`_asyncio.AsyncAttrs` mixin provides a succinct facade over the
+  internal approach that's also used by the
+  :meth:`_asyncio.AsyncSession.run_sync` method.
+
+
+  .. versionadded:: 2.0.13
+
+  .. seealso::
+
+      :class:`_asyncio.AsyncAttrs`
+
+
+* Collections can be replaced with **write only collections** that will never
+  emit IO implicitly, by using the :ref:`write_only_relationship` feature in
+  SQLAlchemy 2.0. Using this feature, collections are never read from, only
+  queried using explicit SQL calls.  See the example
+  ``async_orm_writeonly.py`` in the :ref:`examples_asyncio` section for
+  an example of write-only collections used with asyncio.
+
+  When using write only collections, the program's behavior is simple and easy
+  to predict regarding collections. However, the downside is that there is not
+  any built-in system for loading many of these collections all at once, which
+  instead would need to be performed manually.  Therefore, many of the
+  bullets below address specific techniques when using traditional lazy-loaded
+  relationships with asyncio, which requires more care.
+
+* If not using :class:`_asyncio.AsyncAttrs`, relationships can be declared
+  with ``lazy="raise"`` so that by default they will not attempt to emit SQL.
+  In order to load collections, :term:`eager loading` would be used instead.
+
+* The most useful eager loading strategy is the
+  :func:`_orm.selectinload` eager loader, which is employed in the previous
+  example in order to eagerly
   load the ``A.bs`` collection within the scope of the
   ``await session.execute()`` call::
 
       stmt = select(A).options(selectinload(A.bs))
 
-  ..
+* When constructing new objects, **collections are always assigned a default,
+  empty collection**, such as a list in the above example::
 
-  If the default loader strategy of "lazyload" were left in place, the access
-  of the ``A.bs`` attribute would raise an asyncio exception.
-  There are a variety of ORM loader options available, which may be configured
-  at the default mapping level or used on a per-query basis, documented at
-  :ref:`loading_toplevel`.
+      A(bs=[], data="a2")
 
+  This allows the ``.bs`` collection on the above ``A`` object to be present and
+  readable when the ``A`` object is flushed; otherwise, when the ``A`` is
+  flushed, ``.bs`` would be unloaded and would raise an error on access.
 
 * The :class:`_asyncio.AsyncSession` is configured using
   :paramref:`_orm.Session.expire_on_commit` set to False, so that we may access
@@ -284,9 +469,7 @@ prevent this:
       async_session = AsyncSession(engine, expire_on_commit=False)
 
       # sessionmaker version
-      async_session = sessionmaker(
-          engine, expire_on_commit=False, class_=AsyncSession
-      )
+      async_session = async_sessionmaker(engine, expire_on_commit=False)
 
       async with async_session() as session:
           result = await session.execute(select(A).order_by(A.id))
@@ -300,30 +483,38 @@ prevent this:
           # expire_on_commit=False allows
           print(a1.data)
 
-* The :paramref:`_schema.Column.server_default` value on the ``created_at``
-  column will not be refreshed by default after an INSERT; instead, it is
-  normally
-  :ref:`expired so that it can be loaded when needed <orm_server_defaults>`.
-  Similar behavior applies to a column where the
-  :paramref:`_schema.Column.default` parameter is assigned to a SQL expression
-  object. To access this value with asyncio, it has to be refreshed within the
-  flush process, which is achieved by setting the
-  :paramref:`_orm.mapper.eager_defaults` parameter on the mapping::
-
-
-    class A(Base):
-        # ...
-
-        # column with a server_default, or SQL expression default
-        create_date = Column(DateTime, server_default=func.now())
-
-        # add this so that it can be accessed
-        __mapper_args__ = {"eager_defaults": True}
-
 Other guidelines include:
 
 * Methods like :meth:`_asyncio.AsyncSession.expire` should be avoided in favor of
-  :meth:`_asyncio.AsyncSession.refresh`
+  :meth:`_asyncio.AsyncSession.refresh`; **if** expiration is absolutely needed.
+  Expiration should generally **not** be needed as
+  :paramref:`_orm.Session.expire_on_commit`
+  should normally be set to ``False`` when using asyncio.
+
+* A lazy-loaded relationship **can be loaded explicitly under asyncio** using
+  :meth:`_asyncio.AsyncSession.refresh`, **if** the desired attribute name
+  is passed explicitly to
+  :paramref:`_orm.Session.refresh.attribute_names`, e.g.::
+
+    # assume a_obj is an A that has lazy loaded A.bs collection
+    a_obj = await async_session.get(A, [1])
+
+    # force the collection to load by naming it in attribute_names
+    await async_session.refresh(a_obj, ["bs"])
+
+    # collection is present
+    print(f"bs collection: {a_obj.bs}")
+
+  It's of course preferable to use eager loading up front in order to have
+  collections already set up without the need to lazy-load.
+
+  .. versionadded:: 2.0.4 Added support for
+     :meth:`_asyncio.AsyncSession.refresh` and the underlying
+     :meth:`_orm.Session.refresh` method to force lazy-loaded relationships
+     to load, if they are named explicitly in the
+     :paramref:`_orm.Session.refresh.attribute_names` parameter.
+     In previous versions, the relationship would be silently skipped even
+     if named in the parameter.
 
 * Avoid using the ``all`` cascade option documented at :ref:`unitofwork_cascades`
   in favor of listing out the desired cascade features explicitly.   The
@@ -331,14 +522,12 @@ Other guidelines include:
   setting, which means that the :meth:`.AsyncSession.refresh` method will
   expire the attributes on related objects, but not necessarily refresh those
   related objects assuming eager loading is not configured within the
-  :func:`_orm.relationship`, leaving them in an expired state.   A future
-  release may introduce the ability to indicate eager loader options when
-  invoking :meth:`.Session.refresh` and/or :meth:`.AsyncSession.refresh`.
+  :func:`_orm.relationship`, leaving them in an expired state.
 
 * Appropriate loader options should be employed for :func:`_orm.deferred`
   columns, if used at all, in addition to that of :func:`_orm.relationship`
-  constructs as noted above.  See :ref:`deferred` for background on
-  deferred column loading.
+  constructs as noted above.  See :ref:`orm_queryguide_column_deferral` for
+  background on deferred column loading.
 
 .. _dynamic_asyncio:
 
@@ -351,14 +540,24 @@ Other guidelines include:
 
       user = await session.get(User, 42)
       addresses = (await session.scalars(user.addresses.statement)).all()
-      stmt = user.addresses.statement.where(
-          Address.email_address.startswith("patrick")
-      )
+      stmt = user.addresses.statement.where(Address.email_address.startswith("patrick"))
       addresses_filter = (await session.scalars(stmt)).all()
+
+  The :ref:`write only <write_only_relationship>` technique, introduced in
+  version 2.0 of SQLAlchemy, is fully compatible with asyncio and should be
+  preferred.
 
   .. seealso::
 
     :ref:`migration_20_dynamic_loaders` - notes on migration to 2.0 style
+
+* If using asyncio with a database that does not support RETURNING, such as
+  MySQL 8, server default values such as generated timestamps will not be
+  available on newly flushed objects unless the
+  :paramref:`_orm.Mapper.eager_defaults` option is used. In SQLAlchemy 2.0,
+  this behavior is applied automatically to backends like PostgreSQL, SQLite
+  and MariaDB which use RETURNING to fetch new values when rows are
+  INSERTed.
 
 .. _session_run_sync:
 
@@ -512,6 +711,11 @@ asyncio-facing APIs:
   :class:`_asyncio.AsyncSession` class, use the :class:`_orm.Session` class as
   the target.
 
+* To register at the :class:`_orm.sessionmaker` level, combine an explicit
+  :class:`_orm.sessionmaker` with an :class:`_asyncio.async_sessionmaker`
+  using :paramref:`_asyncio.async_sessionmaker.sync_session_class`, and
+  associate events with the :class:`_orm.sessionmaker`.
+
 When working within an event handler that is within an asyncio context, objects
 like the :class:`_engine.Connection` continue to work in their usual
 "synchronous" way without requiring ``await`` or ``async`` usage; when messages
@@ -521,17 +725,24 @@ are passed a DBAPI level connection, such as :meth:`_events.PoolEvents.connect`,
 the object is a :term:`pep-249` compliant "connection" object which will adapt
 sync-style calls into the asyncio driver.
 
+Examples of Event Listeners with Async Engines / Sessions / Sessionmakers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Some examples of sync style event handlers associated with async-facing API
-constructs are illustrated below::
+constructs are illustrated below:
+
+* **Core Events on AsyncEngine**
+
+  In this example, we access the :attr:`_asyncio.AsyncEngine.sync_engine`
+  attribute of :class:`_asyncio.AsyncEngine` as the target for
+  :class:`.ConnectionEvents` and :class:`.PoolEvents`::
 
     import asyncio
 
-    from sqlalchemy import event, text
+    from sqlalchemy import event
+    from sqlalchemy import text
     from sqlalchemy.engine import Engine
-    from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-    from sqlalchemy.orm import Session
-
-    ## Core events ##
+    from sqlalchemy.ext.asyncio import create_async_engine
 
     engine = create_async_engine("postgresql+asyncpg://scott:tiger@localhost:5432/test")
 
@@ -559,7 +770,37 @@ constructs are illustrated below::
         print("before execute!")
 
 
-    ## ORM events ##
+    async def go():
+        async with engine.connect() as conn:
+            await conn.execute(text("select 1"))
+        await engine.dispose()
+
+
+    asyncio.run(go())
+
+  Output:
+
+  .. sourcecode:: text
+
+    New DBAPI connection: <AdaptedConnection <asyncpg.connection.Connection object at 0x7f33f9b16960>>
+    execute from event
+    before execute!
+
+
+* **ORM Events on AsyncSession**
+
+  In this example, we access :attr:`_asyncio.AsyncSession.sync_session` as the
+  target for :class:`_orm.SessionEvents`::
+
+    import asyncio
+
+    from sqlalchemy import event
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.orm import Session
+
+    engine = create_async_engine("postgresql+asyncpg://scott:tiger@localhost:5432/test")
 
     session = AsyncSession(engine)
 
@@ -593,14 +834,50 @@ constructs are illustrated below::
 
     asyncio.run(go())
 
-The above example prints something along the lines of::
+  Output:
 
-    New DBAPI connection: <AdaptedConnection <asyncpg.connection.Connection ...>>
-    execute from event
-    before execute!
+  .. sourcecode:: text
+
     before commit!
     execute from event
     after commit!
+
+
+* **ORM Events on async_sessionmaker**
+
+  For this use case, we make a :class:`_orm.sessionmaker` as the event target,
+  then assign it to the :class:`_asyncio.async_sessionmaker` using
+  the :paramref:`_asyncio.async_sessionmaker.sync_session_class` parameter::
+
+    import asyncio
+
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from sqlalchemy.orm import sessionmaker
+
+    sync_maker = sessionmaker()
+    maker = async_sessionmaker(sync_session_class=sync_maker)
+
+
+    @event.listens_for(sync_maker, "before_commit")
+    def before_commit(session):
+        print("before commit")
+
+
+    async def main():
+        async_session = maker()
+
+        await async_session.commit()
+
+
+    asyncio.run(main())
+
+  Output:
+
+  .. sourcecode:: text
+
+    before commit
+
 
 .. topic:: asyncio and events, two opposites
 
@@ -609,11 +886,13 @@ The above example prints something along the lines of::
     particular SQLAlchemy API has been invoked by end-user code, and *before*
     some other internal aspect of that API occurs.
 
-    Constrast this to the architecture of the asyncio extension, which takes
+    Contrast this to the architecture of the asyncio extension, which takes
     place on the **exterior** of SQLAlchemy's usual flow from end-user API to
     DBAPI function.
 
-    The flow of messaging may be visualized as follows::
+    The flow of messaging may be visualized as follows:
+
+    .. sourcecode:: text
 
          SQLAlchemy    SQLAlchemy        SQLAlchemy          SQLAlchemy   plain
           asyncio      asyncio           ORM/Core            asyncio      asyncio
@@ -680,10 +959,12 @@ value will be invoked after being returned::
 
 
     @event.listens_for(engine.sync_engine, "connect")
-    def register_custom_types(dbapi_connection, ...):
+    def register_custom_types(dbapi_connection, *args):
         dbapi_connection.run_async(
             lambda connection: connection.set_type_codec(
-                "MyCustomType", encoder, decoder, ...
+                "MyCustomType",
+                encoder,
+                decoder,  # ...
             )
         )
 
@@ -746,13 +1027,19 @@ the constructor. The example below illustrates using the
 
     from asyncio import current_task
 
-    from sqlalchemy.orm import sessionmaker
-    from sqlalchemy.ext.asyncio import async_scoped_session
-    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.ext.asyncio import (
+        async_scoped_session,
+        async_sessionmaker,
+    )
 
-    async_session_factory = sessionmaker(some_async_engine, class_=AsyncSession)
-    AsyncScopedSession = async_scoped_session(async_session_factory, scopefunc=current_task)
-
+    async_session_factory = async_sessionmaker(
+        some_async_engine,
+        expire_on_commit=False,
+    )
+    AsyncScopedSession = async_scoped_session(
+        async_session_factory,
+        scopefunc=current_task,
+    )
     some_async_session = AsyncScopedSession()
 
 .. warning:: The "scopefunc" used by :class:`_asyncio.async_scoped_session`
@@ -837,6 +1124,8 @@ Engine API Documentation
 
 .. autofunction:: async_engine_from_config
 
+.. autofunction:: create_async_pool_from_url
+
 .. autoclass:: AsyncEngine
    :members:
 
@@ -867,6 +1156,8 @@ cursor.
    :members:
    :inherited-members:
 
+.. autoclass:: AsyncTupleResult
+
 ORM Session API Documentation
 -----------------------------
 
@@ -874,9 +1165,18 @@ ORM Session API Documentation
 
 .. autofunction:: async_session
 
+.. autofunction:: close_all_sessions
+
+.. autoclass:: async_sessionmaker
+   :members:
+   :inherited-members:
+
 .. autoclass:: async_scoped_session
    :members:
    :inherited-members:
+
+.. autoclass:: AsyncAttrs
+   :members:
 
 .. autoclass:: AsyncSession
    :members:

@@ -1,15 +1,17 @@
+from unittest.mock import call
+from unittest.mock import Mock
+
 from sqlalchemy import exc
+from sqlalchemy import testing
 from sqlalchemy.orm import collections
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import validates
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
-from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import ne_
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
-from sqlalchemy.testing.mock import call
-from sqlalchemy.testing.mock import Mock
 from test.orm import _fixtures
 
 
@@ -18,7 +20,7 @@ class ValidatorTest(_fixtures.FixtureTest):
         users = self.tables.users
         canary = Mock()
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("name")
             def validate_name(self, key, name):
                 canary(key, name)
@@ -50,7 +52,7 @@ class ValidatorTest(_fixtures.FixtureTest):
 
         canary = Mock()
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("addresses")
             def validate_address(self, key, ad):
                 canary(key, ad)
@@ -85,7 +87,7 @@ class ValidatorTest(_fixtures.FixtureTest):
             self.classes.Address,
         )
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("name")
             def validate_name(self, key, name):
                 ne_(name, "fred")
@@ -105,7 +107,7 @@ class ValidatorTest(_fixtures.FixtureTest):
         self.mapper_registry.map_imperatively(Address, addresses)
 
         eq_(
-            dict((k, v[0].__name__) for k, v in list(u_m.validators.items())),
+            {k: v[0].__name__ for k, v in list(u_m.validators.items())},
             {"name": "validate_name", "addresses": "validate_address"},
         )
 
@@ -117,7 +119,7 @@ class ValidatorTest(_fixtures.FixtureTest):
         )
         canary = Mock()
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("name", include_removes=True)
             def validate_name(self, key, item, remove):
                 canary(key, item, remove)
@@ -173,7 +175,7 @@ class ValidatorTest(_fixtures.FixtureTest):
             self.classes.Address,
         )
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("addresses", include_removes=True)
             def validate_address(self, key, item, remove):
                 if not remove:
@@ -208,7 +210,7 @@ class ValidatorTest(_fixtures.FixtureTest):
             self.classes.Address,
         )
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @validates("addresses", include_removes=True)
             def validate_address(self, key, item, remove):
                 if not remove:
@@ -224,7 +226,7 @@ class ValidatorTest(_fixtures.FixtureTest):
             properties={
                 "addresses": relationship(
                     Address,
-                    collection_class=collections.attribute_mapped_collection(
+                    collection_class=collections.attribute_keyed_dict(
                         "email_address"
                     ),
                 )
@@ -256,13 +258,13 @@ class ValidatorTest(_fixtures.FixtureTest):
         users = self.tables.users
         canary = Mock()
 
-        class SomeValidator(object):
+        class SomeValidator:
             def __call__(self, obj, key, name):
                 canary(key, name)
                 ne_(name, "fred")
                 return name + " modified"
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             sv = validates("name")(SomeValidator())
 
         self.mapper_registry.map_imperatively(User, users)
@@ -272,7 +274,7 @@ class ValidatorTest(_fixtures.FixtureTest):
     def test_validator_multi_warning(self):
         users = self.tables.users
 
-        class Foo(object):
+        class Foo:
             @validates("name")
             def validate_one(self, key, value):
                 pass
@@ -290,7 +292,7 @@ class ValidatorTest(_fixtures.FixtureTest):
             users,
         )
 
-        class Bar(object):
+        class Bar:
             @validates("id")
             def validate_three(self, key, value):
                 return value + 10
@@ -308,61 +310,54 @@ class ValidatorTest(_fixtures.FixtureTest):
             users,
         )
 
-    def test_validator_wo_backrefs_wo_removes(self):
-        self._test_validator_backrefs(False, False)
-
-    def test_validator_wo_backrefs_w_removes(self):
-        self._test_validator_backrefs(False, True)
-
-    def test_validator_w_backrefs_wo_removes(self):
-        self._test_validator_backrefs(True, False)
-
-    def test_validator_w_backrefs_w_removes(self):
-        self._test_validator_backrefs(True, True)
-
-    def _test_validator_backrefs(self, include_backrefs, include_removes):
+    @testing.variation("include_backrefs", [True, False, "default"])
+    @testing.variation("include_removes", [True, False, "default"])
+    def test_validator_backrefs(self, include_backrefs, include_removes):
         users, addresses = (self.tables.users, self.tables.addresses)
         canary = Mock()
 
-        class User(fixtures.ComparableEntity):
+        need_remove_param = (
+            bool(include_removes) and not include_removes.default
+        )
+        validate_kw = {}
+        if not include_removes.default:
+            validate_kw["include_removes"] = bool(include_removes)
+        if not include_backrefs.default:
+            validate_kw["include_backrefs"] = bool(include_backrefs)
 
-            if include_removes:
+        expect_include_backrefs = include_backrefs.default or bool(
+            include_backrefs
+        )
+        expect_include_removes = (
+            bool(include_removes) and not include_removes.default
+        )
 
-                @validates(
-                    "addresses",
-                    include_removes=True,
-                    include_backrefs=include_backrefs,
-                )
+        class User(ComparableEntity):
+            if need_remove_param:
+
+                @validates("addresses", **validate_kw)
                 def validate_address(self, key, item, remove):
                     canary(key, item, remove)
                     return item
 
             else:
 
-                @validates(
-                    "addresses",
-                    include_removes=False,
-                    include_backrefs=include_backrefs,
-                )
+                @validates("addresses", **validate_kw)
                 def validate_address(self, key, item):
                     canary(key, item)
                     return item
 
-        class Address(fixtures.ComparableEntity):
-            if include_removes:
+        class Address(ComparableEntity):
+            if need_remove_param:
 
-                @validates(
-                    "user",
-                    include_backrefs=include_backrefs,
-                    include_removes=True,
-                )
+                @validates("user", **validate_kw)
                 def validate_user(self, key, item, remove):
                     canary(key, item, remove)
                     return item
 
             else:
 
-                @validates("user", include_backrefs=include_backrefs)
+                @validates("user", **validate_kw)
                 def validate_user(self, key, item):
                     canary(key, item)
                     return item
@@ -389,8 +384,8 @@ class ValidatorTest(_fixtures.FixtureTest):
         # comparisons don't get caught
         calls = list(canary.mock_calls)
 
-        if include_backrefs:
-            if include_removes:
+        if expect_include_backrefs:
+            if expect_include_removes:
                 eq_(
                     calls,
                     [
@@ -432,7 +427,7 @@ class ValidatorTest(_fixtures.FixtureTest):
                     ],
                 )
         else:
-            if include_removes:
+            if expect_include_removes:
                 eq_(
                     calls,
                     [

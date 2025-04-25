@@ -23,7 +23,7 @@ class WarnDeprecatedLimitedTest(fixtures.TestBase):
 
         actually just verifying that _hash_limit_string works as expected
         """
-        occurrences = 100
+        occurrences = 500
         cap = 10
 
         printouts = set()
@@ -36,13 +36,13 @@ class WarnDeprecatedLimitedTest(fixtures.TestBase):
             messages.add(message)
 
         eq_(len(printouts), occurrences)
-        eq_(len(messages), cap)
+        assert cap / 2 < len(messages) <= cap
 
 
 class ClsWarningTest(fixtures.TestBase):
     @testing.fixture
     def dep_cls_fixture(self):
-        class Connectable(object):
+        class Connectable:
             """a docstring"""
 
             some_member = "foo"
@@ -63,7 +63,7 @@ class ClsWarningTest(fixtures.TestBase):
 
         import inspect
 
-        class PlainClass(object):
+        class PlainClass:
             some_member = "bar"
 
         pc_keys = dict(inspect.getmembers(PlainClass()))

@@ -6,6 +6,7 @@ These are generally very old 0.1-era tests and at some point should
 be cleaned up and modernized.
 
 """
+
 import datetime
 
 import sqlalchemy as sa
@@ -31,7 +32,6 @@ class EagerTest(fixtures.MappedTest):
 
     @classmethod
     def define_tables(cls, metadata):
-
         Table(
             "owners",
             metadata,
@@ -306,7 +306,6 @@ class EagerTest(fixtures.MappedTest):
         result_str = ["%d %s" % (t.id, t.category.name) for t in result]
         eq_(result_str, ["1 Some Category", "3 Some Category"])
 
-    @testing.crashes("sybase", "FIXME: unknown, verify not fails_on")
     def test_without_outerjoin_literal(self):
         Thing, tests = (self.classes.Thing, self.tables.tests)
 
@@ -779,7 +778,7 @@ class EagerTest5(fixtures.MappedTest):
         d2 = sess.get(DerivedII, "uid2")
         sess.expunge_all()
 
-        # object is not in the session; therefore the lazy load cant trigger
+        # object is not in the session; therefore the lazy load can't trigger
         # here, eager load had to succeed
         assert len([c for c in d2.comments]) == 1
 

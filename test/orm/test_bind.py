@@ -1,3 +1,5 @@
+from unittest.mock import Mock
+
 import sqlalchemy as sa
 from sqlalchemy import delete
 from sqlalchemy import ForeignKey
@@ -6,9 +8,11 @@ from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import select
+from sqlalchemy import String
 from sqlalchemy import table
 from sqlalchemy import testing
 from sqlalchemy import true
+from sqlalchemy import union_all
 from sqlalchemy import update
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import backref
@@ -23,7 +27,6 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.fixtures import fixture_session
-from sqlalchemy.testing.mock import Mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from test.orm import _fixtures
@@ -185,6 +188,10 @@ class BindIntegrationTest(_fixtures.FixtureTest):
         (lambda Address: {"mapper": Address}, "e2"),
         (lambda Address: {"clause": Query([Address])._statement_20()}, "e2"),
         (lambda addresses: {"clause": select(addresses)}, "e2"),
+        (lambda Dingaling: {"mapper": Dingaling}, "e4"),
+        (lambda addresses_view: {"clause": addresses_view}, "e4"),
+        (lambda addresses_view: {"clause": select(addresses_view)}, "e4"),
+        (lambda users_view: {"clause": select(users_view)}, "e2"),
         (
             lambda User, addresses: {
                 "mapper": User,
@@ -259,23 +266,48 @@ class BindIntegrationTest(_fixtures.FixtureTest):
             self.tables.addresses,
             self.classes.User,
         )
+        Dingaling = self.classes.Dingaling
 
         self.mapper_registry.map_imperatively(
             User, users, properties={"addresses": relationship(Address)}
         )
         self.mapper_registry.map_imperatively(Address, addresses)
 
+        users_view = table("users", Column("id", Integer, primary_key=True))
+        addresses_view = table(
+            "addresses",
+            Column("id", Integer, primary_key=True),
+            Column("user_id", Integer),
+            Column("email_address", String),
+        )
+        j = users_view.join(
+            addresses_view, users_view.c.id == addresses_view.c.user_id
+        )
+        self.mapper_registry.map_imperatively(
+            Dingaling,
+            j,
+            properties={
+                "user_t_id": users_view.c.id,
+                "address_id": addresses_view.c.id,
+            },
+        )
+
         e1 = engines.testing_engine()
         e2 = engines.testing_engine()
         e3 = engines.testing_engine()
+        e4 = engines.testing_engine()
 
         testcase = testing.resolve_lambda(
             testcase,
             User=User,
             Address=Address,
+            Dingaling=Dingaling,
             e1=e1,
             e2=e2,
             e3=e3,
+            e4=e4,
+            users_view=users_view,
+            addresses_view=addresses_view,
             addresses=addresses,
             users=users,
         )
@@ -283,9 +315,11 @@ class BindIntegrationTest(_fixtures.FixtureTest):
         sess = Session(e3)
         sess.bind_mapper(User, e1)
         sess.bind_mapper(Address, e2)
+        sess.bind_mapper(Dingaling, e4)
+        sess.bind_table(users_view, e2)
 
-        engine = {"e1": e1, "e2": e2, "e3": e3}[expected]
-        conn = sess.connection(**testcase)
+        engine = {"e1": e1, "e2": e2, "e3": e3, "e4": e4}[expected]
+        conn = sess.connection(bind_arguments=testcase)
         is_(conn.engine, engine)
 
         sess.close()
@@ -331,8 +365,24 @@ class BindIntegrationTest(_fixtures.FixtureTest):
         ),
         (
             lambda User: select(1).where(User.name == "ed"),
-            # no mapper for this one because the plugin is not "orm"
-            lambda User: {"clause": mock.ANY},
+            # changed by #9805
+            lambda User: {"clause": mock.ANY, "mapper": inspect(User)},
+            "e1",
+        ),
+        (
+            lambda User: select(
+                union_all(select(User), select(User)).subquery()
+            ),
+            # added for #10058, testing for #9805
+            lambda User: {"clause": mock.ANY, "mapper": inspect(User)},
+            "e1",
+        ),
+        (
+            lambda session, User: session.query(
+                union_all(select(User), select(User)).subquery()
+            ).statement,
+            # added for #10058, testing for #9805
+            lambda User: {"clause": mock.ANY, "mapper": inspect(User)},
             "e1",
         ),
         (
@@ -347,6 +397,7 @@ class BindIntegrationTest(_fixtures.FixtureTest):
         ),
         (
             lambda User: update(User)
+            .execution_options(synchronize_session=False)
             .values(name="not ed")
             .where(User.name == "ed"),
             lambda User: {"clause": mock.ANY, "mapper": inspect(User)},
@@ -391,7 +442,7 @@ class BindIntegrationTest(_fixtures.FixtureTest):
                 canary.get_bind(**kw)
                 return Session.get_bind(self, **kw)
 
-        sess = GetBindSession(e3, future=True)
+        sess = GetBindSession(e3)
         sess.bind_mapper(User, e1)
         sess.bind_mapper(Address, e2)
 
@@ -414,6 +465,14 @@ class BindIntegrationTest(_fixtures.FixtureTest):
 
         with mock.patch(
             "sqlalchemy.orm.context.ORMCompileState.orm_setup_cursor_result"
+        ), mock.patch(
+            "sqlalchemy.orm.context.ORMCompileState.orm_execute_statement"
+        ), mock.patch(
+            "sqlalchemy.orm.bulk_persistence."
+            "BulkORMInsert.orm_execute_statement"
+        ), mock.patch(
+            "sqlalchemy.orm.bulk_persistence."
+            "BulkUDCompileState.orm_setup_cursor_result"
         ):
             sess.execute(statement)
 
@@ -458,7 +517,7 @@ class BindIntegrationTest(_fixtures.FixtureTest):
         c = testing.db.connect()
         sess = Session(bind=c)
         sess.begin()
-        transaction = sess._legacy_transaction()
+        transaction = sess.get_transaction()
         u = User(name="u1")
         sess.add(u)
         sess.flush()
@@ -470,7 +529,7 @@ class BindIntegrationTest(_fixtures.FixtureTest):
 
         assert_raises_message(
             sa.exc.InvalidRequestError,
-            "Session already has a Connection " "associated",
+            "Session already has a Connection associated",
             transaction._connection_for_bind,
             testing.db.connect(),
             None,
@@ -484,13 +543,24 @@ class BindIntegrationTest(_fixtures.FixtureTest):
 
         self.mapper_registry.map_imperatively(User, users)
         with testing.db.connect() as c:
-
             sess = Session(bind=c)
+
             u = User(name="u1")
             sess.add(u)
             sess.flush()
+
+            # new in 2.0:
+            # autobegin occurred, so c is in a transaction.
+
+            assert c.in_transaction()
             sess.close()
+
+            # .close() does a rollback, so that will end the
+            # transaction on the connection.  This is how it was
+            # working before also even if transaction was started.
+            # is this what we really want?
             assert not c.in_transaction()
+
             assert (
                 c.exec_driver_sql("select count(1) from users").scalar() == 0
             )
@@ -500,13 +570,21 @@ class BindIntegrationTest(_fixtures.FixtureTest):
             sess.add(u)
             sess.flush()
             sess.commit()
-            assert not c.in_transaction()
-            assert (
-                c.exec_driver_sql("select count(1) from users").scalar() == 1
-            )
 
-            with c.begin():
-                c.exec_driver_sql("delete from users")
+            # new in 2.0:
+            # commit OTOH doesn't actually do a commit.
+            # so still in transaction due to autobegin
+            assert c.in_transaction()
+
+            sess = Session(bind=c)
+            u = User(name="u3")
+            sess.add(u)
+            sess.flush()
+            sess.rollback()
+
+            # like .close(), rollback() also ends the transaction
+            assert not c.in_transaction()
+
             assert (
                 c.exec_driver_sql("select count(1) from users").scalar() == 0
             )
@@ -536,7 +614,6 @@ class SessionBindTest(fixtures.MappedTest):
         meta = MetaData()
         test_table.to_metadata(meta)
 
-        assert meta.tables["test_table"].bind is None
         cls.mapper_registry.map_imperatively(Foo, meta.tables["test_table"])
 
     def test_session_bind(self):
@@ -662,7 +739,7 @@ class GetBindTest(fixtures.MappedTest):
         session = self._fixture({})
         assert_raises_message(
             sa.exc.UnboundExecutionError,
-            "Could not locate a bind configured on mapper mapped class",
+            "Could not locate a bind configured on mapper ",
             session.get_bind,
             self.classes.BaseClass,
         )
@@ -673,7 +750,7 @@ class GetBindTest(fixtures.MappedTest):
 
         assert_raises_message(
             sa.exc.UnboundExecutionError,
-            "Could not locate a bind configured on mapper mapped class",
+            "Could not locate a bind configured on mapper ",
             session.get_bind,
             self.classes.ConcreteSubClass,
         )

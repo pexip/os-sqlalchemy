@@ -1897,7 +1897,7 @@
         de-associated from any of its orphan-enabled parents.  Previously,
         the pending object would be expunged only if de-associated
         from all of its orphan-enabled parents.  The new flag ``legacy_is_orphan``
-        is added to :func:`_orm.mapper` which re-establishes the
+        is added to :class:`_orm.Mapper` which re-establishes the
         legacy behavior.
 
         See the change note and example case at :ref:`legacy_is_orphan_addition`
@@ -2070,7 +2070,9 @@
 
       Will maintain the columns clause of the SELECT as coming from the
       unaliased "user", as specified; the select_from only takes place in the
-      FROM clause::
+      FROM clause:
+
+      .. sourcecode:: sql
 
         SELECT users.name AS users_name FROM users AS users_1
         JOIN users ON users.name < users_1.name
@@ -2081,7 +2083,9 @@
 
         session.query(User.name).select_from(user_table.select().where(user_table.c.id > 5))
 
-      Which produces::
+      Which produces:
+
+      .. sourcecode:: sql
 
         SELECT anon_1.name AS anon_1_name FROM (SELECT users.id AS id,
         users.name AS name FROM users WHERE users.id > :id_1) AS anon_1
@@ -3495,7 +3499,7 @@
       ready for general use yet, however
       it does have *extremely* rudimental
       functionality now.
-      https://bitbucket.org/zzzeek/sqlalchemy-access
+      https://github.com/gordthompson/sqlalchemy-access
 
     .. change::
         :tags: maxdb, moved
@@ -3503,8 +3507,9 @@
 
       The MaxDB dialect, which hasn't been
       functional for several years, is
-      moved out to a pending bitbucket project,
-      https://bitbucket.org/zzzeek/sqlalchemy-maxdb.
+      moved out to a pending bitbucket project, (deleted; to view
+      the MaxDB code see the commit before it was removed at
+      https://github.com/sqlalchemy/sqlalchemy/tree/ba67f7dbc5eb7a1ed2a3e1b56df72a837130f7bb/lib/sqlalchemy/dialects/maxdb)
 
     .. change::
         :tags: sqlite, feature

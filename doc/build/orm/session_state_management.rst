@@ -30,9 +30,6 @@ It's helpful to know the states which an instance can have within a session:
   the session's transaction is rolled back, a deleted object moves
   *back* to the persistent state.
 
-  .. versionchanged:: 1.1 The 'deleted' state is a newly added session
-     object state distinct from the 'persistent' state.
-
 * **Detached** - an instance which corresponds, or previously corresponded,
   to a record in the database, but is not currently in any session.
   The detached object will contain a database identity marker, however
@@ -291,17 +288,17 @@ Lets use the canonical example of the User and Address objects::
     class User(Base):
         __tablename__ = "user"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50), nullable=False)
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50), nullable=False)
         addresses = relationship("Address", backref="user")
 
 
     class Address(Base):
         __tablename__ = "address"
 
-        id = Column(Integer, primary_key=True)
-        email_address = Column(String(50), nullable=False)
-        user_id = Column(Integer, ForeignKey("user.id"), nullable=False)
+        id = mapped_column(Integer, primary_key=True)
+        email_address = mapped_column(String(50), nullable=False)
+        user_id = mapped_column(Integer, ForeignKey("user.id"), nullable=False)
 
 Assume a ``User`` object with one ``Address``, already persistent::
 
@@ -370,7 +367,7 @@ to ``user_id``, causing a failure.
 Most :meth:`~.Session.merge` issues can be examined by first checking -
 is the object prematurely in the session ?
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
     >>> a1 = Address(id=existing_a1, user_id=user.id)
     >>> assert a1 not in session
@@ -419,7 +416,7 @@ When we talk about expiration of data we are usually talking about an object
 that is in the :term:`persistent` state.   For example, if we load an object
 as follows::
 
-    user = session.query(User).filter_by(name="user1").first()
+    user = session.scalars(select(User).filter_by(name="user1").limit(1)).first()
 
 The above ``User`` object is persistent, and has a series of attributes
 present; if we were to look inside its ``__dict__``, we'd see that state
@@ -449,10 +446,10 @@ We see that while the internal "state" still hangs around, the values which
 correspond to the ``id`` and ``name`` columns are gone.   If we were to access
 one of these columns and are watching SQL, we'd see this:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
     >>> print(user.name)
-    {opensql}SELECT user.id AS user_id, user.name AS user_name
+    {execsql}SELECT user.id AS user_id, user.name AS user_name
     FROM user
     WHERE user.id = ?
     (1,)
@@ -532,9 +529,9 @@ be that of a column-mapped attribute::
     will be refreshed with data from the database::
 
         stmt = (
-            select(User).
-            execution_options(populate_existing=True).
-            where((User.name.in_(['a', 'b', 'c']))
+            select(User)
+            .execution_options(populate_existing=True)
+            .where((User.name.in_(["a", "b", "c"])))
         )
         for user in session.execute(stmt).scalars():
             print(user)  # will be refreshed for those columns that came back from the query

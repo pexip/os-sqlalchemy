@@ -5,17 +5,28 @@ to selected entities.
 """
 
 import datetime
+from functools import partial
 
 from sqlalchemy import Column
+from sqlalchemy import create_engine
 from sqlalchemy import DateTime
+from sqlalchemy import ForeignKey
+from sqlalchemy import Integer
 from sqlalchemy import orm
+from sqlalchemy import select
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship
+from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import sessionmaker
 
 
-class HasTemporal(object):
+class HasTemporal:
     """Mixin that identifies a class as having a timestamp column"""
 
     timestamp = Column(
-        DateTime, default=datetime.datetime.utcnow, nullable=False
+        DateTime,
+        default=partial(datetime.datetime.now, datetime.timezone.utc),
+        nullable=False,
     )
 
 
@@ -28,13 +39,6 @@ def temporal_range(range_lower, range_upper):
 
 
 if __name__ == "__main__":
-
-    from sqlalchemy import Integer, Column, ForeignKey
-    from sqlalchemy import select
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import relationship, sessionmaker, selectinload
-    from sqlalchemy.ext.declarative import declarative_base
-
     Base = declarative_base()
 
     class Parent(HasTemporal, Base):
@@ -50,7 +54,7 @@ if __name__ == "__main__":
     engine = create_engine("sqlite://", echo=True)
     Base.metadata.create_all(engine)
 
-    Session = sessionmaker(bind=engine, future=True)
+    Session = sessionmaker(bind=engine)
 
     sess = Session()
 

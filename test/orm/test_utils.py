@@ -1,31 +1,151 @@
+import re
+
 from sqlalchemy import Column
+from sqlalchemy import event
+from sqlalchemy import ForeignKey
 from sqlalchemy import inspect
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import select
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy import util
+from sqlalchemy.engine import result
 from sqlalchemy.ext.hybrid import hybrid_method
 from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import clear_mappers
+from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import synonym
 from sqlalchemy.orm import util as orm_util
 from sqlalchemy.orm import with_polymorphic
 from sqlalchemy.orm.path_registry import PathRegistry
+from sqlalchemy.orm.path_registry import PathToken
 from sqlalchemy.orm.path_registry import RootRegistry
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.assertions import is_true
 from sqlalchemy.testing.fixtures import fixture_session
-from sqlalchemy.util import compat
 from test.orm import _fixtures
 from .inheritance import _poly_fixtures
+
+
+class ContextualWarningsTest(fixtures.TestBase):
+    """
+    Test for #7305
+
+    """
+
+    @testing.fixture
+    def plain_fixture(cls, decl_base):
+        class Foo(decl_base):
+            __tablename__ = "foo"
+            id = Column(Integer, primary_key=True)
+
+        decl_base.metadata.create_all(testing.db)
+        return Foo
+
+    @testing.fixture
+    def overlap_fixture(cls, decl_base):
+        class Foo(decl_base):
+            __tablename__ = "foo"
+            id = Column(Integer, primary_key=True)
+            bars = relationship(
+                "Bar",
+                primaryjoin="Foo.id==Bar.foo_id",
+            )
+
+        class Bar(decl_base):
+            __tablename__ = "bar"
+            id = Column(Integer, primary_key=True)
+            foo_id = Column(Integer, ForeignKey("foo.id"))
+            foos = relationship(
+                "Foo",
+                primaryjoin="Bar.foo_id==Foo.id",
+            )
+
+        return Foo, Bar
+
+    def test_configure_mappers_explicit(self, overlap_fixture, decl_base):
+        with expect_warnings(
+            re.escape(
+                "relationship 'Bar.foos' will copy column foo.id to column "
+                "bar.foo_id, which conflicts with relationship(s): 'Foo.bars' "
+                "(copies foo.id to bar.foo_id). "
+            ),
+        ):
+            decl_base.registry.configure()
+
+    def test_configure_mappers_implicit_aliased(self, overlap_fixture):
+        Foo, Bar = overlap_fixture
+        with expect_warnings(
+            re.escape(
+                "relationship 'Bar.foos' will copy column foo.id "
+                "to column bar.foo_id, which conflicts with"
+            )
+            + ".*"
+            + re.escape(
+                "(This warning originated from the `configure_mappers()` "
+                "process, which was "
+                "invoked automatically in response to a user-initiated "
+                "operation.)"
+            ),
+        ):
+            FooAlias = aliased(Foo)
+            assert hasattr(FooAlias, "bars")
+
+    def test_configure_mappers_implicit_instantiate(self, overlap_fixture):
+        Foo, Bar = overlap_fixture
+        with expect_warnings(
+            re.escape(
+                "relationship 'Bar.foos' will copy column foo.id "
+                "to column bar.foo_id, which conflicts with"
+            )
+            + ".*"
+            + re.escape(
+                "(This warning originated from the `configure_mappers()` "
+                "process, which was "
+                "invoked automatically in response to a user-initiated "
+                "operation.)"
+            ),
+        ):
+            foo = Foo()
+            assert hasattr(foo, "bars")
+
+    def test_autoflush_implicit(self, plain_fixture):
+        Foo = plain_fixture
+
+        sess = fixture_session()
+
+        @event.listens_for(Foo, "before_insert")
+        def emit_a_warning(mapper, connection, state):
+            sess.add(Foo())
+
+        sess.add(Foo())
+
+        with expect_warnings(
+            re.escape(
+                "Usage of the 'Session.add()' operation is not "
+                "currently supported within the execution stage of the flush "
+                "process. Results may not be consistent.  Consider using "
+                "alternative event listeners or connection-level operations "
+                "instead."
+            )
+            + ".*"
+            + re.escape(
+                "(This warning originated from the Session 'autoflush' "
+                "process, which was invoked automatically in response to a "
+                "user-initiated operation. Consider using ``no_autoflush`` "
+                "context manager if this warning happended while "
+                "initializing objects.)"
+            ),
+        ):
+            sess.execute(select(Foo))
 
 
 class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
@@ -46,7 +166,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         return table
 
     def test_simple(self):
-        class Point(object):
+        class Point:
             pass
 
         table = self._fixture(Point)
@@ -61,7 +181,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         assert alias.id.__clause_element__().table is not table
 
     def test_named_entity(self):
-        class Point(object):
+        class Point:
             pass
 
         self._fixture(Point)
@@ -73,7 +193,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_named_selectable(self):
-        class Point(object):
+        class Point:
             pass
 
         table = self._fixture(Point)
@@ -85,7 +205,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_not_instantiatable(self):
-        class Point(object):
+        class Point:
             pass
 
         self._fixture(Point)
@@ -94,7 +214,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         assert_raises(TypeError, alias)
 
     def test_instancemethod(self):
-        class Point(object):
+        class Point:
             def zero(self):
                 self.x, self.y = 0, 0
 
@@ -106,7 +226,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         assert getattr(alias, "zero")
 
     def test_classmethod(self):
-        class Point(object):
+        class Point:
             @classmethod
             def max_x(cls):
                 return 100
@@ -119,7 +239,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         assert Point.max_x() == alias.max_x() == 100
 
     def test_simple_property(self):
-        class Point(object):
+        class Point:
             @property
             def max_x(self):
                 return 100
@@ -133,7 +253,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         assert Point.max_x is alias.max_x
 
     def test_descriptors(self):
-        class descriptor(object):
+        class descriptor:
             def __init__(self, fn):
                 self.fn = fn
 
@@ -146,7 +266,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
             def method(self):
                 return "method"
 
-        class Point(object):
+        class Point:
             center = (0, 0)
 
             @descriptor
@@ -171,7 +291,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
                 assert child.table is table
 
     def test_hybrid_descriptor_one(self):
-        class Point(object):
+        class Point:
             def __init__(self, x, y):
                 self.x, self.y = x, y
 
@@ -191,7 +311,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_hybrid_descriptor_two(self):
-        class Point(object):
+        class Point:
             def __init__(self, x, y):
                 self.x, self.y = x, y
 
@@ -203,7 +323,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         alias = aliased(Point)
 
         eq_(str(Point.double_x), "Point.double_x")
-        eq_(str(alias.double_x), "AliasedClass_Point.double_x")
+        eq_(str(alias.double_x), "aliased(Point).double_x")
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
@@ -217,7 +337,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_hybrid_descriptor_three(self):
-        class Point(object):
+        class Point:
             def __init__(self, x, y):
                 self.x, self.y = x, y
 
@@ -229,7 +349,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         alias = aliased(Point)
 
         eq_(str(Point.x_alone), "Point.x_alone")
-        eq_(str(alias.x_alone), "AliasedClass_Point.x_alone")
+        eq_(str(alias.x_alone), "aliased(Point).x_alone")
 
         # from __clause_element__() perspective, Point.x_alone
         # and Point.x return the same thing, so that's good
@@ -289,7 +409,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_proxy_descriptor_one(self):
-        class Point(object):
+        class Point:
             def __init__(self, x, y):
                 self.x, self.y = x, y
 
@@ -297,7 +417,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         alias = aliased(Point)
 
         eq_(str(Point.x_syn), "Point.x_syn")
-        eq_(str(alias.x_syn), "AliasedClass_Point.x_syn")
+        eq_(str(alias.x_syn), "aliased(Point).x_syn")
 
         sess = fixture_session()
         self.assert_compile(
@@ -313,14 +433,14 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
                     return cls.x
                 raise AttributeError(key)
 
-        class Point(compat.with_metaclass(MetaPoint)):
+        class Point(metaclass=MetaPoint):
             pass
 
         self._fixture(Point)
         alias = aliased(Point)
 
         eq_(str(Point.x_syn), "Point.x")
-        eq_(str(alias.x_syn), "AliasedClass_Point.x")
+        eq_(str(alias.x_syn), "aliased(Point).x")
 
         # from __clause_element__() perspective, Point.x_syn
         # and Point.x return the same thing, so that's good
@@ -354,7 +474,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
                     return cls._impl_double_x
                 raise AttributeError(key)
 
-        class Point(compat.with_metaclass(MetaPoint)):
+        class Point(metaclass=MetaPoint):
             @hybrid_property
             def _impl_double_x(self):
                 return self.x * 2
@@ -363,7 +483,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         alias = aliased(Point)
 
         eq_(str(Point.double_x), "Point._impl_double_x")
-        eq_(str(alias.double_x), "AliasedClass_Point._impl_double_x")
+        eq_(str(alias.double_x), "aliased(Point)._impl_double_x")
         eq_(str(Point.double_x.__clause_element__()), "point.x * :x_1")
         eq_(str(alias.double_x.__clause_element__()), "point_1.x * :x_1")
 
@@ -387,7 +507,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
                     return double_x.__get__(None, cls)
                 raise AttributeError(key)
 
-        class Point(compat.with_metaclass(MetaPoint)):
+        class Point(metaclass=MetaPoint):
             pass
 
         self._fixture(Point)
@@ -407,7 +527,7 @@ class AliasedClassTest(fixtures.MappedTest, AssertsCompiledSQL):
         )
 
     def test_parententity_vs_parentmapper(self):
-        class Point(object):
+        class Point:
             pass
 
         self._fixture(Point, properties={"x_syn": synonym("x")})
@@ -464,8 +584,7 @@ class IdentityKeyTest(_fixtures.FixtureTest):
 
     def _cases():
         return testing.combinations(
-            (orm_util,),
-            (Session,),
+            (orm_util,), (Session,), argnames="ormutil"
         )
 
     @_cases()
@@ -503,12 +622,29 @@ class IdentityKeyTest(_fixtures.FixtureTest):
         eq_(key, (User, (u.id,), None))
 
     @_cases()
-    def test_identity_key_3(self, ormutil):
+    @testing.combinations("dict", "row", "mapping", argnames="rowtype")
+    def test_identity_key_3(self, ormutil, rowtype):
+        """test a real Row works with identity_key.
+
+        this was broken w/ 1.4 future mode as we are assuming a mapping
+        here.  to prevent regressions, identity_key now accepts any of
+        dict, RowMapping, Row for the "row".
+
+        found_during_type_annotation
+
+
+        """
         User, users = self.classes.User, self.tables.users
 
         self.mapper_registry.map_imperatively(User, users)
 
-        row = {users.c.id: 1, users.c.name: "Frank"}
+        if rowtype == "dict":
+            row = {users.c.id: 1, users.c.name: "Frank"}
+        elif rowtype in ("mapping", "row"):
+            row = result.result_tuple([users.c.id, users.c.name])((1, "Frank"))
+            if rowtype == "mapping":
+                row = row._mapping
+
         key = ormutil.identity_key(User, row=row)
         eq_(key, (User, (1,), None))
 
@@ -586,6 +722,38 @@ class PathRegistryTest(_fixtures.FixtureTest):
         )
         is_(path[0], umapper)
         is_(path[2], amapper)
+
+    def test_indexed_key_token(self):
+        umapper = inspect(self.classes.User)
+        amapper = inspect(self.classes.Address)
+        path = PathRegistry.coerce(
+            (
+                umapper,
+                umapper.attrs.addresses,
+                amapper,
+                PathToken.intern(":*"),
+            )
+        )
+        is_true(path.is_token)
+        eq_(path[1], umapper.attrs.addresses)
+        eq_(path[3], ":*")
+
+        with expect_raises(IndexError):
+            path[amapper]
+
+    def test_slice_token(self):
+        umapper = inspect(self.classes.User)
+        amapper = inspect(self.classes.Address)
+        path = PathRegistry.coerce(
+            (
+                umapper,
+                umapper.attrs.addresses,
+                amapper,
+                PathToken.intern(":*"),
+            )
+        )
+        is_true(path.is_token)
+        eq_(path[1:3], (umapper.attrs.addresses, amapper))
 
     def test_indexed_key(self):
         umapper = inspect(self.classes.User)
@@ -840,62 +1008,6 @@ class PathRegistryTest(_fixtures.FixtureTest):
         eq_(p1.serialize(), [(User, "addresses"), (Address, "email_address")])
         eq_(p2.serialize(), [(User, "addresses"), (Address, None)])
         eq_(p3.serialize(), [(User, "addresses")])
-
-    def test_serialize_context_dict(self):
-        reg = util.OrderedDict()
-        umapper = inspect(self.classes.User)
-        amapper = inspect(self.classes.Address)
-
-        p1 = PathRegistry.coerce((umapper, umapper.attrs.addresses))
-        p2 = PathRegistry.coerce((umapper, umapper.attrs.addresses, amapper))
-        p3 = PathRegistry.coerce((amapper, amapper.attrs.email_address))
-
-        p1.set(reg, "p1key", "p1value")
-        p2.set(reg, "p2key", "p2value")
-        p3.set(reg, "p3key", "p3value")
-        eq_(
-            reg,
-            {
-                ("p1key", p1.path): "p1value",
-                ("p2key", p2.path): "p2value",
-                ("p3key", p3.path): "p3value",
-            },
-        )
-
-        serialized = PathRegistry.serialize_context_dict(
-            reg, ("p1key", "p2key")
-        )
-        eq_(
-            serialized,
-            [
-                (("p1key", p1.serialize()), "p1value"),
-                (("p2key", p2.serialize()), "p2value"),
-            ],
-        )
-
-    def test_deseralize_context_dict(self):
-        umapper = inspect(self.classes.User)
-        amapper = inspect(self.classes.Address)
-
-        p1 = PathRegistry.coerce((umapper, umapper.attrs.addresses))
-        p2 = PathRegistry.coerce((umapper, umapper.attrs.addresses, amapper))
-        p3 = PathRegistry.coerce((amapper, amapper.attrs.email_address))
-
-        serialized = [
-            (("p1key", p1.serialize()), "p1value"),
-            (("p2key", p2.serialize()), "p2value"),
-            (("p3key", p3.serialize()), "p3value"),
-        ]
-        deserialized = PathRegistry.deserialize_context_dict(serialized)
-
-        eq_(
-            deserialized,
-            {
-                ("p1key", p1.path): "p1value",
-                ("p2key", p2.path): "p2value",
-                ("p3key", p3.path): "p3value",
-            },
-        )
 
     def test_deseralize(self):
         User = self.classes.User

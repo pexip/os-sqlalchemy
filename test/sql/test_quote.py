@@ -1,5 +1,3 @@
-#!coding: utf-8
-
 from sqlalchemy import CheckConstraint
 from sqlalchemy import Column
 from sqlalchemy import column
@@ -13,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy import sql
 from sqlalchemy import Table
 from sqlalchemy import testing
-from sqlalchemy import util
 from sqlalchemy.engine import default
 from sqlalchemy.sql import compiler
 from sqlalchemy.sql import LABEL_STYLE_TABLENAME_PLUS_COL
@@ -198,7 +195,9 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         """test the quoting of labels.
 
         If labels aren't quoted, a query in postgresql in particular will
-        fail since it produces::
+        fail since it produces:
+
+        .. sourcecode:: sql
 
             SELECT
                 LaLa.lowercase, LaLa."UPPERCASE", LaLa."MixedCase", LaLa."ASC"
@@ -249,12 +248,53 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_repr_unicode(self):
-        name = quoted_name(u"姓名", None)
+        name = quoted_name("姓名", None)
 
-        if util.py2k:
-            eq_(repr(name), "'\u59d3\u540d'")
-        else:
-            eq_(repr(name), repr(u"姓名"))
+        eq_(repr(name), repr("姓名"))
+
+    def test_literal_column_label_embedded_select_samename_explicit_quote(
+        self,
+    ):
+        col = sql.literal_column("NEEDS QUOTES").label(
+            quoted_name("NEEDS QUOTES", True)
+        )
+
+        self.assert_compile(
+            select(col).subquery().select(),
+            'SELECT anon_1."NEEDS QUOTES" FROM '
+            '(SELECT NEEDS QUOTES AS "NEEDS QUOTES") AS anon_1',
+        )
+
+    def test_literal_column_label_embedded_select_diffname_explicit_quote(
+        self,
+    ):
+        col = sql.literal_column("NEEDS QUOTES").label(
+            quoted_name("NEEDS QUOTES_", True)
+        )
+
+        self.assert_compile(
+            select(col).subquery().select(),
+            'SELECT anon_1."NEEDS QUOTES_" FROM '
+            '(SELECT NEEDS QUOTES AS "NEEDS QUOTES_") AS anon_1',
+        )
+
+    def test_literal_column_label_embedded_select_diffname(self):
+        col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES_")
+
+        self.assert_compile(
+            select(col).subquery().select(),
+            'SELECT anon_1."NEEDS QUOTES_" FROM (SELECT NEEDS QUOTES AS '
+            '"NEEDS QUOTES_") AS anon_1',
+        )
+
+    def test_literal_column_label_embedded_select_samename(self):
+        col = sql.literal_column("NEEDS QUOTES").label("NEEDS QUOTES")
+
+        self.assert_compile(
+            select(col).subquery().select(),
+            'SELECT anon_1."NEEDS QUOTES" FROM (SELECT NEEDS QUOTES AS '
+            '"NEEDS QUOTES") AS anon_1',
+        )
 
     def test_lower_case_names(self):
         # Create table with quote defaults
@@ -492,7 +532,6 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_subquery_four(self):
-
         # Not lower case names, quotes off, should not quote
         metadata = MetaData()
         t1 = Table(
@@ -784,7 +823,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         # what if table/schema *are* quoted?
         self.assert_compile(
             t1.select().set_label_style(LABEL_STYLE_TABLENAME_PLUS_COL),
-            "SELECT " "Foo.T1.Col1 AS Foo_T1_Col1 " "FROM " "Foo.T1",
+            "SELECT Foo.T1.Col1 AS Foo_T1_Col1 FROM Foo.T1",
         )
 
     def test_quote_flag_propagate_check_constraint(self):
@@ -793,7 +832,7 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
         CheckConstraint(t.c.x > 5)
         self.assert_compile(
             schema.CreateTable(t),
-            "CREATE TABLE t (" '"x" INTEGER, ' 'CHECK ("x" > 5)' ")",
+            'CREATE TABLE t ("x" INTEGER, CHECK ("x" > 5))',
         )
 
     def test_quote_flag_propagate_index(self):
@@ -821,7 +860,6 @@ class QuoteTest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class PreparerTest(fixtures.TestBase):
-
     """Test the db-agnostic quoting services of IdentifierPreparer."""
 
     def test_unformat(self):
@@ -846,9 +884,7 @@ class PreparerTest(fixtures.TestBase):
     def test_unformat_custom(self):
         class Custom(compiler.IdentifierPreparer):
             def __init__(self, dialect):
-                super(Custom, self).__init__(
-                    dialect, initial_quote="`", final_quote="`"
-                )
+                super().__init__(dialect, initial_quote="`", final_quote="`")
 
             def _escape_identifier(self, value):
                 return value.replace("`", "``")
@@ -958,18 +994,18 @@ class QuotedIdentTest(fixtures.TestBase):
         eq_(q2.quote, False)
 
     def test_coerce_none(self):
-        q1 = quoted_name(None, False)
+        q1 = quoted_name.construct(None, False)
         eq_(q1, None)
 
     def test_apply_map_quoted(self):
         q1 = _anonymous_label(quoted_name("x%s", True))
-        q2 = q1.apply_map(("bar"))
+        q2 = q1.apply_map("bar")
         eq_(q2, "xbar")
         eq_(q2.quote, True)
 
     def test_apply_map_plain(self):
         q1 = _anonymous_label(quoted_name("x%s", None))
-        q2 = q1.apply_map(("bar"))
+        q2 = q1.apply_map("bar")
         eq_(q2, "xbar")
         self._assert_not_quoted(q2)
 
@@ -1003,7 +1039,7 @@ class NameNormalizeTest(fixtures.TestBase):
         ("NAME", "name", False),
         ("NA ME", "NA ME", False),
         ("NaMe", "NaMe", False),
-        (u"姓名", u"姓名", False),
+        ("姓名", "姓名", False),
         ("name", "name", True),  # an all-lower case name needs quote forced
     )
     def test_name_normalize(self, original, normalized, is_quote):
@@ -1019,7 +1055,7 @@ class NameNormalizeTest(fixtures.TestBase):
         ("name", "NAME", False),
         ("NA ME", "NA ME", False),
         ("NaMe", "NaMe", False),
-        (u"姓名", u"姓名", False),
+        ("姓名", "姓名", False),
         (quoted_name("name", quote=True), "name", True),
     )
     def test_name_denormalize(self, original, denormalized, is_quote):

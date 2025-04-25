@@ -3,15 +3,17 @@
 Builds upon the dictlike.py example to also add differently typed
 columns to the "fact" table, e.g.::
 
-  Table('properties', metadata
-        Column('owner_id', Integer, ForeignKey('owner.id'),
-               primary_key=True),
-        Column('key', UnicodeText),
-        Column('type', Unicode(16)),
-        Column('int_value', Integer),
-        Column('char_value', UnicodeText),
-        Column('bool_value', Boolean),
-        Column('decimal_value', Numeric(10,2)))
+  Table(
+      "properties",
+      metadata,
+      Column("owner_id", Integer, ForeignKey("owner.id"), primary_key=True),
+      Column("key", UnicodeText),
+      Column("type", Unicode(16)),
+      Column("int_value", Integer),
+      Column("char_value", UnicodeText),
+      Column("bool_value", Boolean),
+      Column("decimal_value", Numeric(10, 2)),
+  )
 
 For any given properties row, the value of the 'type' column will point to the
 '_value' column active for that row.
@@ -24,14 +26,32 @@ date.
 
 """
 
+from sqlalchemy import and_
+from sqlalchemy import Boolean
+from sqlalchemy import case
+from sqlalchemy import cast
+from sqlalchemy import Column
+from sqlalchemy import create_engine
 from sqlalchemy import event
+from sqlalchemy import ForeignKey
+from sqlalchemy import Integer
 from sqlalchemy import literal_column
+from sqlalchemy import null
+from sqlalchemy import or_
+from sqlalchemy import String
+from sqlalchemy import Unicode
+from sqlalchemy import UnicodeText
+from sqlalchemy.ext.associationproxy import association_proxy
+from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.ext.hybrid import hybrid_property
+from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Session
+from sqlalchemy.orm.collections import attribute_keyed_dict
 from sqlalchemy.orm.interfaces import PropComparator
 from .dictlike import ProxiedDictMixin
 
 
-class PolymorphicVerticalProperty(object):
+class PolymorphicVerticalProperty:
     """A key/value pair with polymorphic value storage.
 
     The class which is mapped should indicate typing information
@@ -83,7 +103,7 @@ class PolymorphicVerticalProperty(object):
                 for attribute, discriminator in pairs
                 if attribute is not None
             ]
-            return case(whens, value=self.cls.type, else_=null())
+            return case(*whens, value=self.cls.type, else_=null())
 
         def __eq__(self, other):
             return self._case() == cast(other, String)
@@ -116,26 +136,6 @@ def on_new_class(mapper, cls_):
 
 
 if __name__ == "__main__":
-    from sqlalchemy import (
-        Column,
-        Integer,
-        Unicode,
-        ForeignKey,
-        UnicodeText,
-        and_,
-        or_,
-        String,
-        Boolean,
-        cast,
-        null,
-        case,
-        create_engine,
-    )
-    from sqlalchemy.orm import relationship, Session
-    from sqlalchemy.orm.collections import attribute_mapped_collection
-    from sqlalchemy.ext.declarative import declarative_base
-    from sqlalchemy.ext.associationproxy import association_proxy
-
     Base = declarative_base()
 
     class AnimalFact(PolymorphicVerticalProperty, Base):
@@ -162,7 +162,7 @@ if __name__ == "__main__":
         name = Column(Unicode(100))
 
         facts = relationship(
-            "AnimalFact", collection_class=attribute_mapped_collection("key")
+            "AnimalFact", collection_class=attribute_keyed_dict("key")
         )
 
         _proxied = association_proxy(

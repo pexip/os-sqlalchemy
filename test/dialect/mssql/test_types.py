@@ -1,4 +1,3 @@
-# -*- encoding: utf-8
 import codecs
 import datetime
 import decimal
@@ -6,6 +5,7 @@ import os
 
 import sqlalchemy as sa
 from sqlalchemy import Boolean
+from sqlalchemy import cast
 from sqlalchemy import Column
 from sqlalchemy import column
 from sqlalchemy import Date
@@ -18,6 +18,7 @@ from sqlalchemy import LargeBinary
 from sqlalchemy import literal
 from sqlalchemy import MetaData
 from sqlalchemy import Numeric
+from sqlalchemy import NVARCHAR
 from sqlalchemy import PickleType
 from sqlalchemy import schema
 from sqlalchemy import select
@@ -31,10 +32,11 @@ from sqlalchemy import Time
 from sqlalchemy import types
 from sqlalchemy import Unicode
 from sqlalchemy import UnicodeText
-from sqlalchemy import util
 from sqlalchemy.dialects.mssql import base as mssql
+from sqlalchemy.dialects.mssql import NTEXT
 from sqlalchemy.dialects.mssql import ROWVERSION
 from sqlalchemy.dialects.mssql import TIMESTAMP
+from sqlalchemy.dialects.mssql import UNIQUEIDENTIFIER
 from sqlalchemy.dialects.mssql.base import _MSDate
 from sqlalchemy.dialects.mssql.base import BIT
 from sqlalchemy.dialects.mssql.base import DATETIMEOFFSET
@@ -47,7 +49,6 @@ from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
 from sqlalchemy.testing import ComparesTables
-from sqlalchemy.testing import emits_warning_on
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises_message
@@ -55,6 +56,7 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_not
 from sqlalchemy.testing import pickleable
+from sqlalchemy.testing.suite import test_types
 from sqlalchemy.util import b
 
 
@@ -298,6 +300,8 @@ class TypeDDLTest(fixtures.TestBase):
             (types.Float, [None], {}, "FLOAT"),
             (types.Float, [12], {}, "FLOAT(12)"),
             (mssql.MSReal, [], {}, "REAL"),
+            (types.Double, [], {}, "DOUBLE PRECISION"),
+            (types.Double, [53], {}, "DOUBLE PRECISION"),
             (types.Integer, [], {}, "INTEGER"),
             (types.BigInteger, [], {}, "BIGINT"),
             (mssql.MSTinyInteger, [], {}, "TINYINT"),
@@ -670,7 +674,6 @@ class TypeRoundTripTest(
             eq_(value, returned)
 
     def test_float(self, metadata, connection):
-
         float_table = Table(
             "float_table",
             metadata,
@@ -725,7 +728,6 @@ class TypeRoundTripTest(
             )
             eq_(value, returned)
 
-    @emits_warning_on("mssql+mxodbc", r".*does not have any indexes.*")
     def test_dates(self, metadata, connection):
         "Exercise type specification for date types."
 
@@ -810,11 +812,40 @@ class TypeRoundTripTest(
             2,
             32,
             123456,
-            util.timezone(datetime.timedelta(hours=-5)),
+            datetime.timezone(datetime.timedelta(hours=-5)),
         )
         return t, (d1, t1, d2, d3)
 
-    def test_date_roundtrips(self, date_fixture, connection):
+    def test_date_roundtrips_no_offset(self, date_fixture, connection):
+        t, (d1, t1, d2, d3) = date_fixture
+        connection.execute(
+            t.insert(),
+            dict(
+                adate=d1,
+                adatetime=d2,
+                atime1=t1,
+                atime2=d2,
+            ),
+        )
+
+        row = connection.execute(t.select()).first()
+        eq_(
+            (
+                row.adate,
+                row.adatetime,
+                row.atime1,
+                row.atime2,
+            ),
+            (
+                d1,
+                d2,
+                t1,
+                d2.time(),
+            ),
+        )
+
+    @testing.skip_if("+pymssql", "offsets dont seem to work")
+    def test_date_roundtrips_w_offset(self, date_fixture, connection):
         t, (d1, t1, d2, d3) = date_fixture
         connection.execute(
             t.insert(),
@@ -848,12 +879,13 @@ class TypeRoundTripTest(
                 11,
                 2,
                 32,
-                tzinfo=util.timezone(datetime.timedelta(hours=-5)),
+                tzinfo=datetime.timezone(datetime.timedelta(hours=-5)),
             ),
         ),
         (datetime.datetime(2007, 10, 30, 11, 2, 32)),
         argnames="date",
     )
+    @testing.skip_if("+pymssql", "unknown failures")
     def test_tz_present_or_non_in_dates(self, date_fixture, connection, date):
         t, (d1, t1, d2, d3) = date_fixture
         connection.execute(
@@ -869,7 +901,7 @@ class TypeRoundTripTest(
         ).first()
 
         if not date.tzinfo:
-            eq_(row, (date, date.replace(tzinfo=util.timezone.utc)))
+            eq_(row, (date, date.replace(tzinfo=datetime.timezone.utc)))
         else:
             eq_(row, (date.replace(tzinfo=None), date))
 
@@ -895,7 +927,7 @@ class TypeRoundTripTest(
                 2,
                 32,
                 123456,
-                util.timezone(datetime.timedelta(hours=1)),
+                datetime.timezone(datetime.timedelta(hours=1)),
             ),
             1,
             False,
@@ -910,7 +942,7 @@ class TypeRoundTripTest(
                 2,
                 32,
                 123456,
-                util.timezone(datetime.timedelta(hours=-5)),
+                datetime.timezone(datetime.timedelta(hours=-5)),
             ),
             -5,
             False,
@@ -925,11 +957,10 @@ class TypeRoundTripTest(
                 2,
                 32,
                 123456,
-                util.timezone(datetime.timedelta(seconds=4000)),
+                datetime.timezone(datetime.timedelta(seconds=4000)),
             ),
             None,
             True,
-            testing.requires.python37,
         ),
         (
             "dto_param_datetime_naive",
@@ -954,6 +985,7 @@ class TypeRoundTripTest(
         id_="iaaa",
         argnames="dto_param_value, expected_offset_hours, should_fail",
     )
+    @testing.skip_if("+pymssql", "offsets dont seem to work")
     def test_datetime_offset(
         self,
         datetimeoffset_fixture,
@@ -994,13 +1026,12 @@ class TypeRoundTripTest(
                     2,
                     32,
                     123456,
-                    util.timezone(
+                    datetime.timezone(
                         datetime.timedelta(hours=expected_offset_hours)
                     ),
                 ),
             )
 
-    @emits_warning_on("mssql+mxodbc", r".*does not have any indexes.*")
     @testing.combinations(
         ("legacy_large_types", False),
         ("sql2012_large_types", True, lambda: testing.only_on("mssql >= 11")),
@@ -1077,43 +1108,49 @@ class TypeRoundTripTest(
                         col.type.length, binary_table.c[col.name].type.length
                     )
 
-    def test_autoincrement(self, metadata, connection):
+    @testing.combinations(True, False, argnames="implicit_returning")
+    def test_autoincrement(self, metadata, connection, implicit_returning):
         Table(
             "ai_1",
             metadata,
             Column("int_y", Integer, primary_key=True, autoincrement=True),
             Column("int_n", Integer, DefaultClause("0"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_2",
             metadata,
             Column("int_y", Integer, primary_key=True, autoincrement=True),
             Column("int_n", Integer, DefaultClause("0"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_3",
             metadata,
             Column("int_n", Integer, DefaultClause("0"), primary_key=True),
             Column("int_y", Integer, primary_key=True, autoincrement=True),
+            implicit_returning=implicit_returning,
         )
-
         Table(
             "ai_4",
             metadata,
             Column("int_n", Integer, DefaultClause("0"), primary_key=True),
             Column("int_n2", Integer, DefaultClause("0"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_5",
             metadata,
             Column("int_y", Integer, primary_key=True, autoincrement=True),
             Column("int_n", Integer, DefaultClause("0"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_6",
             metadata,
             Column("o1", String(1), DefaultClause("x"), primary_key=True),
             Column("int_y", Integer, primary_key=True, autoincrement=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_7",
@@ -1121,12 +1158,14 @@ class TypeRoundTripTest(
             Column("o1", String(1), DefaultClause("x"), primary_key=True),
             Column("o2", String(1), DefaultClause("x"), primary_key=True),
             Column("int_y", Integer, autoincrement=True, primary_key=True),
+            implicit_returning=implicit_returning,
         )
         Table(
             "ai_8",
             metadata,
             Column("o1", String(1), DefaultClause("x"), primary_key=True),
             Column("o2", String(1), DefaultClause("x"), primary_key=True),
+            implicit_returning=implicit_returning,
         )
         metadata.create_all(connection)
 
@@ -1155,42 +1194,18 @@ class TypeRoundTripTest(
                     eq_(col.autoincrement, "auto")
                     is_not(tbl._autoincrement_column, col)
 
-            # mxodbc can't handle scope_identity() with DEFAULT VALUES
-
-            if testing.db.driver == "mxodbc":
-                eng = [
-                    engines.testing_engine(
-                        options={"implicit_returning": True}
-                    )
-                ]
+            connection.execute(tbl.insert())
+            if "int_y" in tbl.c:
+                eq_(
+                    connection.execute(select(tbl.c.int_y)).scalar(),
+                    1,
+                )
+                assert (
+                    list(connection.execute(tbl.select()).first()).count(1)
+                    == 1
+                )
             else:
-                eng = [
-                    engines.testing_engine(
-                        options={"implicit_returning": False}
-                    ),
-                    engines.testing_engine(
-                        options={"implicit_returning": True}
-                    ),
-                ]
-
-            for counter, engine in enumerate(eng):
-                connection.execute(tbl.insert())
-                if "int_y" in tbl.c:
-                    eq_(
-                        connection.execute(select(tbl.c.int_y)).scalar(),
-                        counter + 1,
-                    )
-                    assert (
-                        list(connection.execute(tbl.select()).first()).count(
-                            counter + 1
-                        )
-                        == 1
-                    )
-                else:
-                    assert 1 not in list(
-                        connection.execute(tbl.select()).first()
-                    )
-                connection.execute(tbl.delete())
+                assert 1 not in list(connection.execute(tbl.select()).first())
 
 
 class StringTest(fixtures.TestBase, AssertsCompiledSQL):
@@ -1215,25 +1230,214 @@ class StringTest(fixtures.TestBase, AssertsCompiledSQL):
 
     def test_string_text_literal_binds_explicit_unicode_right(self):
         self.assert_compile(
-            column("x", String()) == util.u("foo"),
+            column("x", String()) == "foo",
             "x = 'foo'",
             literal_binds=True,
         )
 
-    def test_string_text_explicit_literal_binds(self):
-        # the literal expression here coerces the right side to
-        # Unicode on Python 3 for plain string, test with unicode
-        # string just to confirm literal is doing this
-        self.assert_compile(
-            column("x", String()) == literal(util.u("foo")),
-            "x = N'foo'",
-            literal_binds=True,
-        )
+    @testing.combinations(None, String(), Unicode(), argnames="coltype")
+    @testing.combinations(None, String(), Unicode(), argnames="literaltype")
+    @testing.combinations("réve🐍 illé", "hello", "réveillé", argnames="value")
+    def test_string_text_explicit_literal_binds(
+        self, coltype, literaltype, value
+    ):
+        """test #7551, dynamic coercion for string literals"""
+
+        lhs = column("x", coltype)
+        rhs = literal(value, type_=literaltype)
+
+        rhs_force_unicode = isinstance(literaltype, Unicode)
+        rhs_tests_as_unicode = literaltype is None and value != "hello"
+
+        should_it_be_n = rhs_force_unicode or rhs_tests_as_unicode
+
+        if should_it_be_n:
+            self.assert_compile(
+                lhs == rhs,
+                f"x = N'{value}'",
+                literal_binds=True,
+            )
+        else:
+            self.assert_compile(
+                lhs == rhs,
+                f"x = '{value}'",
+                literal_binds=True,
+            )
 
     def test_text_text_literal_binds(self):
         self.assert_compile(
             column("x", Text()) == "foo", "x = 'foo'", literal_binds=True
         )
+
+
+class StringRoundTripTest(fixtures.TestBase):
+    """tests for #8661
+
+
+    at the moment most of these are using the default setinputsizes enabled
+    behavior, with the exception of the plain executemany() calls for inserts.
+
+
+    """
+
+    __only_on__ = "mssql"
+    __backend__ = True
+
+    @testing.combinations(
+        ("unicode", True), ("ascii", False), argnames="unicode_", id_="ia"
+    )
+    @testing.combinations(
+        String,
+        Unicode,
+        NVARCHAR,
+        NTEXT,
+        Text,
+        UnicodeText,
+        argnames="datatype",
+    )
+    @testing.combinations(
+        100, 1999, 2000, 2001, 3999, 4000, 4001, 5000, argnames="length"
+    )
+    def test_long_strings_inpplace(
+        self, connection, unicode_, length, datatype
+    ):
+        if datatype is NVARCHAR and length != "max" and length > 4000:
+            return
+        elif unicode_ and datatype not in (NVARCHAR, UnicodeText):
+            return
+
+        if datatype in (String, NVARCHAR):
+            dt = datatype(length)
+        else:
+            dt = datatype()
+
+        if length == "max":
+            length = 12000
+
+        if unicode_:
+            data = "réve🐍illé" * ((length // 9) + 1)
+            data = data[0 : (length // 2)]
+        else:
+            data = "abcdefg" * ((length // 7) + 1)
+            data = data[0:length]
+            assert len(data) == length
+
+        stmt = select(cast(literal(data, type_=dt), type_=dt))
+        result = connection.scalar(stmt)
+        eq_(result, data)
+
+    @testing.combinations(
+        ("unicode", True), ("ascii", False), argnames="unicode_", id_="ia"
+    )
+    @testing.combinations(
+        ("returning", True),
+        ("noreturning", False),
+        argnames="use_returning",
+        id_="ia",
+    )
+    @testing.combinations(
+        # disabled due to #9603
+        # ("insertmany", True),
+        ("insertsingle", False),
+        argnames="insertmany",
+        id_="ia",
+    )
+    @testing.combinations(
+        String,
+        Unicode,
+        NVARCHAR,
+        NTEXT,
+        Text,
+        UnicodeText,
+        argnames="datatype",
+    )
+    @testing.combinations(
+        100, 1999, 2000, 2001, 3999, 4000, 4001, 5000, "max", argnames="length"
+    )
+    def test_long_strings_in_context(
+        self,
+        connection,
+        metadata,
+        unicode_,
+        length,
+        datatype,
+        use_returning,
+        insertmany,
+    ):
+        if datatype is NVARCHAR and length != "max" and length > 4000:
+            return
+        elif unicode_ and datatype not in (NVARCHAR, UnicodeText):
+            return
+
+        if datatype in (String, NVARCHAR):
+            dt = datatype(length)
+        else:
+            dt = datatype()
+
+        t = Table(
+            "t",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("data", dt),
+        )
+
+        t.create(connection)
+
+        if length == "max":
+            length = 12000
+
+        if unicode_:
+            data = "réve🐍illé" * ((length // 9) + 1)
+            data = data[0 : (length // 2)]
+        else:
+            data = "abcdefg" * ((length // 7) + 1)
+            data = data[0:length]
+            assert len(data) == length
+
+        if insertmany:
+            insert_data = [{"data": data}, {"data": data}, {"data": data}]
+            expected_data = [data, data, data]
+        else:
+            insert_data = {"data": data}
+            expected_data = [data]
+
+        if use_returning:
+            result = connection.execute(
+                t.insert().returning(t.c.data), insert_data
+            )
+            eq_(result.scalars().all(), expected_data)
+        else:
+            connection.execute(t.insert(), insert_data)
+
+        result = connection.scalars(select(t.c.data))
+        eq_(result.all(), expected_data)
+
+        # note that deprecate_large_types indicates that UnicodeText
+        # will be fulfilled by NVARCHAR, and not NTEXT.  However if NTEXT
+        # is used directly, it isn't supported in WHERE clauses:
+        # "The data types ntext and (anything, including ntext itself) are
+        # incompatible in the equal to operator."
+        if datatype is NTEXT:
+            return
+
+        # test WHERE criteria
+        connection.execute(
+            t.insert(), [{"data": "some other data %d" % i} for i in range(3)]
+        )
+
+        result = connection.scalars(select(t.c.data).where(t.c.data == data))
+        eq_(result.all(), expected_data)
+
+        result = connection.scalars(
+            select(t.c.data).where(t.c.data != data).order_by(t.c.id)
+        )
+        eq_(result.all(), ["some other data %d" % i for i in range(3)])
+
+
+class UniqueIdentifierTest(test_types.UuidTest):
+    __only_on__ = "mssql"
+    __backend__ = True
+    datatype = UNIQUEIDENTIFIER
 
 
 class MyPickleType(types.TypeDecorator):
@@ -1242,7 +1446,7 @@ class MyPickleType(types.TypeDecorator):
 
     def process_bind_param(self, value, dialect):
         if value:
-            value.stuff = "BIND" + value.stuff
+            value = pickleable.Foo(value.moredata, stuff="BIND" + value.stuff)
         return value
 
     def process_result_value(self, value, dialect):
@@ -1423,3 +1627,22 @@ class BooleanTest(fixtures.TestBase, AssertsCompiledSQL):
             ddl,
         )
         assert isinstance(tbl.c.boo.type.as_generic(), Boolean)
+
+
+class NumberTest(fixtures.TestBase, AssertsCompiledSQL):
+    __dialect__ = mssql.dialect()
+
+    @testing.combinations(
+        ("sa", sqltypes.Float(), "FLOAT"),  # ideally it should render real
+        ("sa", sqltypes.Double(), "DOUBLE PRECISION"),
+        ("sa", sqltypes.FLOAT(), "FLOAT"),
+        ("sa", sqltypes.REAL(), "REAL"),
+        ("sa", sqltypes.DOUBLE(), "DOUBLE"),
+        ("sa", sqltypes.DOUBLE_PRECISION(), "DOUBLE PRECISION"),
+        ("mssql", mssql.FLOAT(), "FLOAT"),
+        ("mssql", mssql.DOUBLE_PRECISION(), "DOUBLE PRECISION"),
+        ("mssql", mssql.REAL(), "REAL"),
+        id_="ira",
+    )
+    def test_float_type_compile(self, type_, sql_text):
+        self.assert_compile(type_, sql_text)

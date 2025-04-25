@@ -1,5 +1,3 @@
-#! coding:utf-8
-
 from sqlalchemy import and_
 from sqlalchemy import delete
 from sqlalchemy import exc
@@ -21,7 +19,7 @@ from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
 
-class _DeleteTestBase(object):
+class _DeleteTestBase:
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -78,11 +76,15 @@ class DeleteTest(_DeleteTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_where_empty(self):
         table1 = self.tables.mytable
 
-        with expect_deprecated():
+        with expect_deprecated(
+            r"Invoking and_\(\) without arguments is deprecated"
+        ):
             self.assert_compile(
                 table1.delete().where(and_()), "DELETE FROM mytable"
             )
-        with expect_deprecated():
+        with expect_deprecated(
+            r"Invoking or_\(\) without arguments is deprecated"
+        ):
             self.assert_compile(
                 table1.delete().where(or_()), "DELETE FROM mytable"
             )
@@ -307,7 +309,7 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
             ),
         )
 
-    @testing.requires.delete_from
+    @testing.requires.delete_using
     def test_exec_two_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
@@ -326,7 +328,7 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         ]
         self._assert_table(connection, addresses, expected)
 
-    @testing.requires.delete_from
+    @testing.requires.delete_using
     def test_exec_three_table(self, connection):
         users = self.tables.users
         addresses = self.tables.addresses
@@ -342,7 +344,7 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         expected = [(2, 5, "ding 2/5")]
         self._assert_table(connection, dingalings, expected)
 
-    @testing.requires.delete_from
+    @testing.requires.delete_using
     def test_exec_two_table_plus_alias(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
@@ -359,7 +361,7 @@ class DeleteFromRoundTripTest(fixtures.TablesTest):
         expected = [(1, 7, "x", "jack@bean.com"), (5, 9, "x", "fred@fred.com")]
         self._assert_table(connection, addresses, expected)
 
-    @testing.requires.delete_from
+    @testing.requires.delete_using
     def test_exec_alias_plus_table(self, connection):
         users, addresses = self.tables.users, self.tables.addresses
         dingalings = self.tables.dingalings
