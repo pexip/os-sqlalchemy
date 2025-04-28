@@ -25,13 +25,14 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 
 
-class _UpdateFromTestBase(object):
+class _UpdateFromTestBase:
     @classmethod
     def define_tables(cls, metadata):
         Table(
@@ -112,6 +113,59 @@ class _UpdateFromTestBase(object):
 class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     __dialect__ = "default_enhanced"
 
+    @testing.variation("twotable", [True, False])
+    @testing.variation("values", ["none", "blank"])
+    def test_update_no_params(self, values, twotable):
+        """test issue identified while doing #9721
+
+        UPDATE with empty VALUES but multiple tables would raise a
+        NoneType error; fixed this to emit an empty "SET" the way a single
+        table UPDATE currently does.
+
+        both cases should probably raise CompileError, however this could
+        be backwards incompatible with current use cases (such as other test
+        suites)
+
+        """
+
+        table1 = self.tables.mytable
+        table2 = self.tables.myothertable
+
+        stmt = table1.update().where(table1.c.name == "jill")
+        if twotable:
+            stmt = stmt.where(table2.c.otherid == table1.c.myid)
+
+        if values.blank:
+            stmt = stmt.values()
+
+        if twotable:
+            if values.blank:
+                self.assert_compile(
+                    stmt,
+                    "UPDATE mytable SET  FROM myothertable "
+                    "WHERE mytable.name = :name_1 "
+                    "AND myothertable.otherid = mytable.myid",
+                )
+            elif values.none:
+                self.assert_compile(
+                    stmt,
+                    "UPDATE mytable SET myid=:myid, name=:name, "
+                    "description=:description FROM myothertable "
+                    "WHERE mytable.name = :name_1 "
+                    "AND myothertable.otherid = mytable.myid",
+                )
+        elif values.blank:
+            self.assert_compile(
+                stmt,
+                "UPDATE mytable SET  WHERE mytable.name = :name_1",
+            )
+        elif values.none:
+            self.assert_compile(
+                stmt,
+                "UPDATE mytable SET myid=:myid, name=:name, "
+                "description=:description WHERE mytable.name = :name_1",
+            )
+
     def test_update_literal_binds(self):
         table1 = self.tables.mytable
 
@@ -128,7 +182,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_custom_key_thing(self):
         table1 = self.tables.mytable
 
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return table1.c.name
 
@@ -147,7 +201,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_ordered_custom_key_thing(self):
         table1 = self.tables.mytable
 
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return table1.c.name
 
@@ -166,7 +220,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_broken_custom_key_thing(self):
         table1 = self.tables.mytable
 
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return 5
 
@@ -180,7 +234,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
     def test_update_ordered_broken_custom_key_thing(self):
         table1 = self.tables.mytable
 
-        class Thing(object):
+        class Thing:
             def __clause_element__(self):
                 return 5
 
@@ -316,7 +370,11 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
 
     def test_binds_that_match_columns(self):
         """test bind params named after column names
-        replace the normal SET/VALUES generation."""
+        replace the normal SET/VALUES generation.
+
+        See also test_compiler.py::CrudParamOverlapTest
+
+        """
 
         t = table("foo", column("x"), column("y"))
 
@@ -355,7 +413,6 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
         )
 
     def test_labels_no_collision(self):
-
         t = table("foo", column("id"), column("foo_id"))
 
         self.assert_compile(
@@ -558,7 +615,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "name=(mytable.name || :name_1) "
             "WHERE "
             "mytable.myid = hoho(:hoho_1) AND "
-            "mytable.name = :param_2 || mytable.name || :param_3",
+            "mytable.name = (:param_2 || mytable.name || :param_3)",
         )
 
     def test_unconsumed_names_kwargs(self):
@@ -619,7 +676,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "myid=do_stuff(mytable.myid, :param_1) "
             "WHERE "
             "mytable.myid = hoho(:hoho_1) AND "
-            "mytable.name = :param_2 || mytable.name || :param_3",
+            "mytable.name = (:param_2 || mytable.name || :param_3)",
         )
 
     def test_update_ordered_parameters_newstyle_2(self):
@@ -649,7 +706,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "myid=do_stuff(mytable.myid, :param_1) "
             "WHERE "
             "mytable.myid = hoho(:hoho_1) AND "
-            "mytable.name = :param_2 || mytable.name || :param_3",
+            "mytable.name = (:param_2 || mytable.name || :param_3)",
         )
 
     def test_update_ordered_parameters_multiple(self):
@@ -719,7 +776,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             "name=(mytable.name || :name_1) "
             "WHERE "
             "mytable.myid = hoho(:hoho_1) AND "
-            "mytable.name = :param_2 || mytable.name || :param_3",
+            "mytable.name = (:param_2 || mytable.name || :param_3)",
         )
 
     def test_where_empty(self):
@@ -829,7 +886,7 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
                 (t, combination)
                 for i, combination in zip(range(10), combinations())
             ],
-            argnames="t, idx_to_value"
+            argnames="t, idx_to_value",
         )
 
     @random_update_order_parameters()
@@ -906,7 +963,8 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             dialect=dialect,
         )
 
-    def test_update_bound_ordering(self):
+    @testing.variation("paramstyle", ["qmark", "format", "numeric"])
+    def test_update_bound_ordering(self, paramstyle):
         """test that bound parameters between the UPDATE and FROM clauses
         order correctly in different SQL compilation scenarios.
 
@@ -920,30 +978,46 @@ class UpdateTest(_UpdateFromTestBase, fixtures.TablesTest, AssertsCompiledSQL):
             .values(name="foo")
         )
 
-        dialect = default.StrCompileDialect()
-        dialect.positional = True
-        self.assert_compile(
-            upd,
-            "UPDATE mytable SET name=:name FROM (SELECT "
-            "myothertable.otherid AS otherid, "
-            "myothertable.othername AS othername "
-            "FROM myothertable "
-            "WHERE myothertable.otherid = :otherid_1) AS anon_1 "
-            "WHERE mytable.name = anon_1.othername",
-            checkpositional=("foo", 5),
-            dialect=dialect,
-        )
-
-        self.assert_compile(
-            upd,
-            "UPDATE mytable, (SELECT myothertable.otherid AS otherid, "
-            "myothertable.othername AS othername "
-            "FROM myothertable "
-            "WHERE myothertable.otherid = %s) AS anon_1 SET mytable.name=%s "
-            "WHERE mytable.name = anon_1.othername",
-            checkpositional=(5, "foo"),
-            dialect=mysql.dialect(),
-        )
+        if paramstyle.qmark:
+            dialect = default.StrCompileDialect(paramstyle="qmark")
+            self.assert_compile(
+                upd,
+                "UPDATE mytable SET name=? FROM (SELECT "
+                "myothertable.otherid AS otherid, "
+                "myothertable.othername AS othername "
+                "FROM myothertable "
+                "WHERE myothertable.otherid = ?) AS anon_1 "
+                "WHERE mytable.name = anon_1.othername",
+                checkpositional=("foo", 5),
+                dialect=dialect,
+            )
+        elif paramstyle.format:
+            self.assert_compile(
+                upd,
+                "UPDATE mytable, (SELECT myothertable.otherid AS otherid, "
+                "myothertable.othername AS othername "
+                "FROM myothertable "
+                "WHERE myothertable.otherid = %s) AS anon_1 "
+                "SET mytable.name=%s "
+                "WHERE mytable.name = anon_1.othername",
+                checkpositional=(5, "foo"),
+                dialect=mysql.dialect(),
+            )
+        elif paramstyle.numeric:
+            dialect = default.StrCompileDialect(paramstyle="numeric")
+            self.assert_compile(
+                upd,
+                "UPDATE mytable SET name=:1 FROM (SELECT "
+                "myothertable.otherid AS otherid, "
+                "myothertable.othername AS othername "
+                "FROM myothertable "
+                "WHERE myothertable.otherid = :2) AS anon_1 "
+                "WHERE mytable.name = anon_1.othername",
+                checkpositional=("foo", 5),
+                dialect=dialect,
+            )
+        else:
+            paramstyle.fail()
 
 
 class UpdateFromCompileTest(
@@ -1015,6 +1089,46 @@ class UpdateFromCompileTest(
             checkparams={"addresses_name": "new address", "name": "newname"},
             dialect="mysql",
         )
+
+    def test_update_from_join_unsupported_cases(self):
+        """
+        found_during_typing
+
+        It's unclear how to cleanly guard against this case without producing
+        false positives, particularly due to the support for UPDATE
+        of a CTE.  I'm also not sure of the nature of the failure and why
+        it happens this way.
+
+        """
+        users, addresses = self.tables.users, self.tables.addresses
+
+        j = users.join(addresses)
+
+        with expect_raises_message(
+            exc.CompileError,
+            r"Encountered unsupported case when compiling an INSERT or UPDATE "
+            r"statement.  If this is a multi-table "
+            r"UPDATE statement, please provide string-named arguments to the "
+            r"values\(\) method with distinct names; support for multi-table "
+            r"UPDATE statements that "
+            r"target multiple tables for UPDATE is very limited",
+        ):
+            update(j).where(addresses.c.email_address == "e1").values(
+                {users.c.id: 10, addresses.c.email_address: "asdf"}
+            ).compile(dialect=mysql.dialect())
+
+        with expect_raises_message(
+            exc.CompileError,
+            r"Encountered unsupported case when compiling an INSERT or UPDATE "
+            r"statement.  If this is a multi-table "
+            r"UPDATE statement, please provide string-named arguments to the "
+            r"values\(\) method with distinct names; support for multi-table "
+            r"UPDATE statements that "
+            r"target multiple tables for UPDATE is very limited",
+        ):
+            update(j).where(addresses.c.email_address == "e1").compile(
+                dialect=mysql.dialect()
+            )
 
     def test_update_from_join_mysql_whereclause(self):
         users, addresses = self.tables.users, self.tables.addresses
@@ -1484,7 +1598,7 @@ class UpdateFromMultiTableUpdateDefaultsTest(
             .where(users.c.name == "ed")
         )
 
-        eq_(set(ret.prefetch_cols()), set([users.c.some_update]))
+        eq_(set(ret.prefetch_cols()), {users.c.some_update})
 
         expected = [
             (2, 8, "updated"),
@@ -1511,7 +1625,7 @@ class UpdateFromMultiTableUpdateDefaultsTest(
 
         eq_(
             set(ret.prefetch_cols()),
-            set([users.c.some_update, foobar.c.some_update]),
+            {users.c.some_update, foobar.c.some_update},
         )
 
         expected = [

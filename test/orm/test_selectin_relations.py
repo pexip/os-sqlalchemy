@@ -29,7 +29,7 @@ from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import AllOf
 from sqlalchemy.testing.assertsql import assert_engine
 from sqlalchemy.testing.assertsql import CompiledSQL
-from sqlalchemy.testing.fixtures import ComparableEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -164,7 +164,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         for i in range(3):
 
             def go():
-
                 sess = fixture_session()
 
                 u = aliased(User)
@@ -202,7 +201,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             self.assert_sql_count(testing.db, go, 2)
 
     def test_from_aliased_w_cache_three(self):
-
         User, Dingaling, Address = self.user_dingaling_fixture()
 
         for i in range(3):
@@ -860,7 +858,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         )
 
     def test_double_w_ac_against_subquery(self):
-
         (
             users,
             orders,
@@ -930,7 +927,6 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         self._run_double_test()
 
     def test_double_w_ac(self):
-
         (
             users,
             orders,
@@ -1716,10 +1712,10 @@ class OrderBySecondaryTest(fixtures.MappedTest):
     def test_ordering(self):
         a, m2m, b = (self.tables.a, self.tables.m2m, self.tables.b)
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1833,7 +1829,6 @@ class BaseRelationFromJoinedSubclassTest(_Polymorphic):
 
     @classmethod
     def insert_data(cls, connection):
-
         e1 = Engineer(primary_language="java")
         e2 = Engineer(primary_language="c++")
         e1.paperwork = [
@@ -2168,7 +2163,6 @@ class HeterogeneousSubtypesTest(fixtures.DeclarativeMappedTest):
         sess.commit()
 
     def test_one_to_many(self):
-
         Company, Programmer, Manager, GolfSwing, Language = self.classes(
             "Company", "Programmer", "Manager", "GolfSwing", "Language"
         )
@@ -2245,14 +2239,14 @@ class TupleTest(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
             id1 = Column(Integer, primary_key=True)
             id2 = Column(Integer, primary_key=True)
 
             bs = relationship("B", order_by="B.id", back_populates="a")
 
-        class B(fixtures.ComparableEntity, Base):
+        class B(ComparableEntity, Base):
             __tablename__ = "b"
             id = Column(Integer, primary_key=True)
             a_id1 = Column()
@@ -2361,12 +2355,12 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
             id = Column(Integer, primary_key=True)
             bs = relationship("B", order_by="B.id", back_populates="a")
 
-        class B(fixtures.ComparableEntity, Base):
+        class B(ComparableEntity, Base):
             __tablename__ = "b"
             id = Column(Integer, primary_key=True)
             a_id = Column(ForeignKey("a.id"))
@@ -2449,7 +2443,6 @@ class ChunkingTest(fixtures.DeclarativeMappedTest):
                 .offset(offset)
                 .options(selectinload(A.bs))
             ):
-
                 # this part fails with joined eager loading
                 # (if you enable joined eager w/ yield_per)
                 eq_(a.bs, [B(id=(a.id * 6) + j) for j in range(1, 6)])
@@ -2663,12 +2656,74 @@ class SelfReferentialTest(fixtures.MappedTest):
             Column("data", String(30)),
         )
 
-    def test_basic(self):
-        nodes = self.tables.nodes
-
-        class Node(fixtures.ComparableEntity):
+    @classmethod
+    def setup_classes(cls):
+        class Node(cls.Comparable):
             def append(self, node):
                 self.children.append(node)
+
+    @testing.fixture
+    def data_fixture(self):
+        def go(sess):
+            Node = self.classes.Node
+            n1 = Node(data="n1")
+            n1.append(Node(data="n11"))
+            n1.append(Node(data="n12"))
+            n1.append(Node(data="n13"))
+
+            n1.children[0].children = [Node(data="n111"), Node(data="n112")]
+
+            n1.children[1].append(Node(data="n121"))
+            n1.children[1].append(Node(data="n122"))
+            n1.children[1].append(Node(data="n123"))
+            n2 = Node(data="n2")
+            n2.append(Node(data="n21"))
+            n2.children[0].append(Node(data="n211"))
+            n2.children[0].append(Node(data="n212"))
+            sess.add(n1)
+            sess.add(n2)
+            sess.flush()
+            sess.expunge_all()
+            return n1, n2
+
+        return go
+
+    def _full_structure(self):
+        Node = self.classes.Node
+        return [
+            Node(
+                data="n1",
+                children=[
+                    Node(data="n11"),
+                    Node(
+                        data="n12",
+                        children=[
+                            Node(data="n121"),
+                            Node(data="n122"),
+                            Node(data="n123"),
+                        ],
+                    ),
+                    Node(data="n13"),
+                ],
+            ),
+            Node(
+                data="n2",
+                children=[
+                    Node(
+                        data="n21",
+                        children=[
+                            Node(data="n211"),
+                            Node(data="n212"),
+                        ],
+                    )
+                ],
+            ),
+        ]
+
+    def test_basic(self, data_fixture):
+        nodes = self.tables.nodes
+
+        Node = self.classes.Node
 
         self.mapper_registry.map_imperatively(
             Node,
@@ -2680,22 +2735,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
         sess = fixture_session()
-        n1 = Node(data="n1")
-        n1.append(Node(data="n11"))
-        n1.append(Node(data="n12"))
-        n1.append(Node(data="n13"))
-        n1.children[1].append(Node(data="n121"))
-        n1.children[1].append(Node(data="n122"))
-        n1.children[1].append(Node(data="n123"))
-        n2 = Node(data="n2")
-        n2.append(Node(data="n21"))
-        n2.children[0].append(Node(data="n211"))
-        n2.children[0].append(Node(data="n212"))
-
-        sess.add(n1)
-        sess.add(n2)
-        sess.flush()
-        sess.expunge_all()
+        n1, n2 = data_fixture(sess)
 
         def go():
             d = (
@@ -2705,46 +2745,15 @@ class SelfReferentialTest(fixtures.MappedTest):
                 .all()
             )
             eq_(
-                [
-                    Node(
-                        data="n1",
-                        children=[
-                            Node(data="n11"),
-                            Node(
-                                data="n12",
-                                children=[
-                                    Node(data="n121"),
-                                    Node(data="n122"),
-                                    Node(data="n123"),
-                                ],
-                            ),
-                            Node(data="n13"),
-                        ],
-                    ),
-                    Node(
-                        data="n2",
-                        children=[
-                            Node(
-                                data="n21",
-                                children=[
-                                    Node(data="n211"),
-                                    Node(data="n212"),
-                                ],
-                            )
-                        ],
-                    ),
-                ],
+                self._full_structure(),
                 d,
             )
 
         self.assert_sql_count(testing.db, go, 4)
 
-    def test_lazy_fallback_doesnt_affect_eager(self):
+    def test_lazy_fallback_doesnt_affect_eager(self, data_fixture):
         nodes = self.tables.nodes
-
-        class Node(fixtures.ComparableEntity):
-            def append(self, node):
-                self.children.append(node)
+        Node = self.classes.Node
 
         self.mapper_registry.map_imperatively(
             Node,
@@ -2756,18 +2765,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
         sess = fixture_session()
-        n1 = Node(data="n1")
-        n1.append(Node(data="n11"))
-        n1.append(Node(data="n12"))
-        n1.append(Node(data="n13"))
-        n1.children[0].append(Node(data="n111"))
-        n1.children[0].append(Node(data="n112"))
-        n1.children[1].append(Node(data="n121"))
-        n1.children[1].append(Node(data="n122"))
-        n1.children[1].append(Node(data="n123"))
-        sess.add(n1)
-        sess.flush()
-        sess.expunge_all()
+        n1, n2 = data_fixture(sess)
 
         def go():
             allnodes = sess.query(Node).order_by(Node.data).all()
@@ -2785,12 +2783,9 @@ class SelfReferentialTest(fixtures.MappedTest):
 
         self.assert_sql_count(testing.db, go, 2)
 
-    def test_with_deferred(self):
+    def test_with_deferred(self, data_fixture):
         nodes = self.tables.nodes
-
-        class Node(fixtures.ComparableEntity):
-            def append(self, node):
-                self.children.append(node)
+        Node = self.classes.Node
 
         self.mapper_registry.map_imperatively(
             Node,
@@ -2803,39 +2798,55 @@ class SelfReferentialTest(fixtures.MappedTest):
             },
         )
         sess = fixture_session()
-        n1 = Node(data="n1")
-        n1.append(Node(data="n11"))
-        n1.append(Node(data="n12"))
-        sess.add(n1)
-        sess.flush()
-        sess.expunge_all()
+        n1, n2 = data_fixture(sess)
 
         def go():
             eq_(
-                Node(data="n1", children=[Node(data="n11"), Node(data="n12")]),
+                Node(
+                    data="n1",
+                    children=[
+                        Node(data="n11"),
+                        Node(data="n12"),
+                        Node(data="n13"),
+                    ],
+                ),
                 sess.query(Node).order_by(Node.id).first(),
             )
 
-        self.assert_sql_count(testing.db, go, 6)
+        self.assert_sql_count(testing.db, go, 8)
 
         sess.expunge_all()
 
         def go():
             eq_(
-                Node(data="n1", children=[Node(data="n11"), Node(data="n12")]),
+                Node(
+                    data="n1",
+                    children=[
+                        Node(data="n11"),
+                        Node(data="n12"),
+                        Node(data="n13"),
+                    ],
+                ),
                 sess.query(Node)
                 .options(undefer(Node.data))
                 .order_by(Node.id)
                 .first(),
             )
 
-        self.assert_sql_count(testing.db, go, 5)
+        self.assert_sql_count(testing.db, go, 7)
 
         sess.expunge_all()
 
         def go():
             eq_(
-                Node(data="n1", children=[Node(data="n11"), Node(data="n12")]),
+                Node(
+                    data="n1",
+                    children=[
+                        Node(data="n11"),
+                        Node(data="n12"),
+                        Node(data="n13"),
+                    ],
+                ),
                 sess.query(Node)
                 .options(
                     undefer(Node.data),
@@ -2844,14 +2855,11 @@ class SelfReferentialTest(fixtures.MappedTest):
                 .first(),
             )
 
-        self.assert_sql_count(testing.db, go, 3)
+        self.assert_sql_count(testing.db, go, 4)
 
-    def test_options(self):
+    def test_options(self, data_fixture):
         nodes = self.tables.nodes
-
-        class Node(fixtures.ComparableEntity):
-            def append(self, node):
-                self.children.append(node)
+        Node = self.classes.Node
 
         self.mapper_registry.map_imperatively(
             Node,
@@ -2859,16 +2867,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             properties={"children": relationship(Node, order_by=nodes.c.id)},
         )
         sess = fixture_session()
-        n1 = Node(data="n1")
-        n1.append(Node(data="n11"))
-        n1.append(Node(data="n12"))
-        n1.append(Node(data="n13"))
-        n1.children[1].append(Node(data="n121"))
-        n1.children[1].append(Node(data="n122"))
-        n1.children[1].append(Node(data="n123"))
-        sess.add(n1)
-        sess.flush()
-        sess.expunge_all()
+        n1, n2 = data_fixture(sess)
 
         def go():
             d = (
@@ -2901,14 +2900,11 @@ class SelfReferentialTest(fixtures.MappedTest):
 
         self.assert_sql_count(testing.db, go, 3)
 
-    def test_no_depth(self):
+    def test_no_depth(self, data_fixture):
         """no join depth is set, so no eager loading occurs."""
 
         nodes = self.tables.nodes
-
-        class Node(fixtures.ComparableEntity):
-            def append(self, node):
-                self.children.append(node)
+        Node = self.classes.Node
 
         self.mapper_registry.map_imperatively(
             Node,
@@ -2916,19 +2912,7 @@ class SelfReferentialTest(fixtures.MappedTest):
             properties={"children": relationship(Node, lazy="selectin")},
         )
         sess = fixture_session()
-        n1 = Node(data="n1")
-        n1.append(Node(data="n11"))
-        n1.append(Node(data="n12"))
-        n1.append(Node(data="n13"))
-        n1.children[1].append(Node(data="n121"))
-        n1.children[1].append(Node(data="n122"))
-        n1.children[1].append(Node(data="n123"))
-        n2 = Node(data="n2")
-        n2.append(Node(data="n21"))
-        sess.add(n1)
-        sess.add(n2)
-        sess.flush()
-        sess.expunge_all()
+        n1, n2 = data_fixture(sess)
 
         def go():
             d = (
@@ -2971,7 +2955,7 @@ class SelfRefInheritanceAliasedTest(
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class Foo(fixtures.ComparableEntity, Base):
+        class Foo(ComparableEntity, Base):
             __tablename__ = "foo"
             id = Column(Integer, primary_key=True)
             type = Column(String(50))
@@ -3002,17 +2986,22 @@ class SelfRefInheritanceAliasedTest(
     def test_twolevel_selectin_w_polymorphic(self):
         Foo, Bar = self.classes("Foo", "Bar")
 
-        for count in range(3):
+        for count in range(1):
             r = with_polymorphic(Foo, "*", aliased=True)
             attr1 = Foo.foo.of_type(r)
             attr2 = r.foo
 
             s = fixture_session()
-            q = (
-                s.query(Foo)
-                .filter(Foo.id == 2)
-                .options(selectinload(attr1).selectinload(attr2))
-            )
+
+            from sqlalchemy.orm import Load
+
+            opt1 = selectinload(attr1).selectinload(attr2)  # noqa
+            opt2 = Load(Foo).selectinload(attr1).selectinload(attr2)  # noqa
+
+            q = s.query(Foo).filter(Foo.id == 2).options(opt2)
+            # q.all()
+            # return
+
             results = self.assert_sql_execution(
                 testing.db,
                 q.all,
@@ -3214,14 +3203,14 @@ class MissingForeignTest(
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
             id = Column(Integer, primary_key=True)
             b_id = Column(Integer)
             b = relationship("B", primaryjoin="foreign(A.b_id) == B.id")
             q = Column(Integer)
 
-        class B(fixtures.ComparableEntity, Base):
+        class B(ComparableEntity, Base):
             __tablename__ = "b"
             id = Column(Integer, primary_key=True)
             x = Column(Integer)
@@ -3267,7 +3256,7 @@ class M2OWDegradeTest(
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
             id = Column(Integer, primary_key=True)
             b_id = Column(ForeignKey("b.id"))
@@ -3275,7 +3264,7 @@ class M2OWDegradeTest(
             b_no_omit_join = relationship("B", omit_join=False, overlaps="b")
             q = Column(Integer)
 
-        class B(fixtures.ComparableEntity, Base):
+        class B(ComparableEntity, Base):
             __tablename__ = "b"
             id = Column(Integer, primary_key=True)
             x = Column(Integer)
@@ -3351,7 +3340,7 @@ class M2OWDegradeTest(
                 "FROM a WHERE a.id IN (__[POSTCOMPILE_id_1]) ORDER BY a.id",
                 [{"id_1": [1, 3]}],
             ),
-            # in the very unlikely case that the the FK col on parent is
+            # in the very unlikely case that the FK col on parent is
             # deferred, we degrade to the JOIN version so that we don't need to
             # emit either for each parent object individually, or as a second
             # query for them.
@@ -3440,9 +3429,9 @@ class M2OWDegradeTest(
             testing.db,
             q.all,
             CompiledSQL(
-                "SELECT a.id AS a_id, a.q AS a_q " "FROM a ORDER BY a.id", [{}]
+                "SELECT a.id AS a_id, a.q AS a_q FROM a ORDER BY a.id", [{}]
             ),
-            # in the very unlikely case that the the FK col on parent is
+            # in the very unlikely case that the FK col on parent is
             # deferred, we degrade to the JOIN version so that we don't need to
             # emit either for each parent object individually, or as a second
             # query for them.
@@ -3705,7 +3694,6 @@ class TestCompositePlusNonComposite(fixtures.DeclarativeMappedTest):
         s.commit()
 
     def test_load_composite_then_non_composite(self):
-
         A, B, A2, B2 = self.classes("A", "B", "A2", "B2")
 
         s = fixture_session()

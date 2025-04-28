@@ -15,6 +15,7 @@ it uses a fixed number of tables to serve any number of potential parent
 objects, but is also slightly more complex.
 
 """
+
 from sqlalchemy import Column
 from sqlalchemy import create_engine
 from sqlalchemy import ForeignKey
@@ -29,7 +30,7 @@ from sqlalchemy.orm import Session
 
 
 @as_declarative()
-class Base(object):
+class Base:
     """Base class which provides automated table name
     and surrogate primary key column.
 
@@ -81,7 +82,7 @@ class Address(Base):
         )
 
 
-class HasAddresses(object):
+class HasAddresses:
     """HasAddresses mixin, creates a relationship to
     the address_association table for each parent.
 

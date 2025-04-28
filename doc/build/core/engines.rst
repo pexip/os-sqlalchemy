@@ -23,16 +23,19 @@ Creating an engine is just a matter of issuing a single call,
 
     from sqlalchemy import create_engine
 
-    engine = create_engine("postgresql://scott:tiger@localhost:5432/mydatabase")
+    engine = create_engine("postgresql+psycopg2://scott:tiger@localhost:5432/mydatabase")
 
 The above engine creates a :class:`.Dialect` object tailored towards
-PostgreSQL, as well as a :class:`_pool.Pool` object which will establish a DBAPI
-connection at ``localhost:5432`` when a connection request is first received.
-Note that the :class:`_engine.Engine` and its underlying :class:`_pool.Pool` do **not**
-establish the first actual DBAPI connection until the :meth:`_engine.Engine.connect`
-method is called, or an operation which is dependent on this method such as
-:meth:`_engine.Engine.execute` is invoked. In this way, :class:`_engine.Engine` and
-:class:`_pool.Pool` can be said to have a *lazy initialization* behavior.
+PostgreSQL, as well as a :class:`_pool.Pool` object which will establish a
+DBAPI connection at ``localhost:5432`` when a connection request is first
+received. Note that the :class:`_engine.Engine` and its underlying
+:class:`_pool.Pool` do **not** establish the first actual DBAPI connection
+until the :meth:`_engine.Engine.connect` or :meth:`_engine.Engine.begin`
+methods are called.  Either of these methods may also be invoked by other
+SQLAlchemy :class:`_engine.Engine` dependent objects such as the ORM
+:class:`_orm.Session` object when they first require database connectivity.
+In this way, :class:`_engine.Engine` and :class:`_pool.Pool` can be said to
+have a *lazy initialization* behavior.
 
 The :class:`_engine.Engine`, once created, can either be used directly to interact with the database,
 or can be passed to a :class:`.Session` object to work with the ORM.   This section
@@ -65,7 +68,7 @@ well as optional keyword arguments for additional configuration. In some cases
 a file path is accepted, and in others a "data source name" replaces the "host"
 and "database" portions. The typical form of a database URL is:
 
-.. sourcecode:: none
+.. sourcecode:: text
 
     dialect+driver://username:password@host:port/database
 
@@ -88,7 +91,7 @@ Below is an example of a URL that includes the password ``"kx@jj5/g"``, where th
 "at" sign and slash characters are represented as ``%40`` and ``%2F``,
 respectively:
 
-.. sourcecode:: none
+.. sourcecode:: text
 
     postgresql+pg8000://dbuser:kx%40jj5%2Fg@pghost10/appdb
 
@@ -130,7 +133,7 @@ The :class:`.URL` object is created using the :meth:`_engine.URL.create()`
 constructor method, passing all fields individually.   Special characters
 such as those within passwords may be passed without any modification::
 
-    from sqlalchemy.engine import URL
+    from sqlalchemy import URL
 
     url_object = URL.create(
         "postgresql+pg8000",
@@ -197,13 +200,23 @@ More notes on connecting to MySQL at :ref:`mysql_toplevel`.
 Oracle
 ^^^^^^^^^^
 
-The Oracle dialect uses cx_oracle as the default DBAPI::
+The preferred Oracle Database dialect uses the python-oracledb driver as the
+DBAPI::
 
-    engine = create_engine("oracle://scott:tiger@127.0.0.1:1521/sidname")
+      engine = create_engine(
+          "oracle+oracledb://scott:tiger@127.0.0.1:1521/?service_name=freepdb1"
+      )
 
-    engine = create_engine("oracle+cx_oracle://scott:tiger@tnsname")
+      engine = create_engine("oracle+oracledb://scott:tiger@tnsalias")
 
-More notes on connecting to Oracle at :ref:`oracle_toplevel`.
+For historical reasons, the Oracle dialect uses the obsolete cx_Oracle driver
+as the default DBAPI::
+
+      engine = create_engine("oracle://scott:tiger@127.0.0.1:1521/?service_name=freepdb1")
+
+      engine = create_engine("oracle+cx_oracle://scott:tiger@tnsalias")
+
+More notes on connecting to Oracle Database at :ref:`oracle_toplevel`.
 
 Microsoft SQL Server
 ^^^^^^^^^^^^^^^^^^^^
@@ -269,73 +282,10 @@ Engine Creation API
 
 .. autofunction:: sqlalchemy.engine.make_url
 
+.. autofunction:: sqlalchemy.create_pool_from_url
 
 .. autoclass:: sqlalchemy.engine.URL
     :members:
-
-    .. py:attribute:: drivername
-        :annotation: str
-
-        database backend and driver name, such as
-        ``postgresql+psycopg2``
-
-    .. py:attribute::  username
-        :annotation: str
-
-        username string
-
-    .. py:attribute::  password
-        :annotation: str
-
-        password, which is normally a string but may also be any
-        object that has a ``__str__()`` method.
-
-    .. py:attribute::  host
-        :annotation: str
-
-        string hostname
-
-    .. py:attribute::  port
-        :annotation: int
-
-        integer port number
-
-    .. py:attribute::  database
-        :annotation: str
-
-        string database name
-
-    .. py:attribute::  query
-        :annotation: Mapping[str, Union[str, Sequence[str]]]
-
-        an immutable mapping representing the query string.  contains strings
-        for keys and either strings or tuples of strings for values, e.g.::
-
-            >>> from sqlalchemy.engine import make_url
-            >>> url = make_url(
-            ...     "postgresql://user:pass@host/dbname?alt_host=host1&alt_host=host2&ssl_cipher=%2Fpath%2Fto%2Fcrt"
-            ... )
-            >>> url.query
-            immutabledict({'alt_host': ('host1', 'host2'), 'ssl_cipher': '/path/to/crt'})
-
-         To create a mutable copy of this mapping, use the ``dict`` constructor::
-
-            mutable_query_opts = dict(url.query)
-
-        .. seealso::
-
-          :attr:`_engine.URL.normalized_query` - normalizes all values into sequences
-          for consistent processing
-
-          Methods for altering the contents of :attr:`_engine.URL.query`:
-
-          :meth:`_engine.URL.update_query_dict`
-
-          :meth:`_engine.URL.update_query_string`
-
-          :meth:`_engine.URL.update_query_pairs`
-
-          :meth:`_engine.URL.difference_update_query`
 
 Pooling
 =======
@@ -431,7 +381,7 @@ underlying implementation the connection::
 
 
     engine = create_engine(
-        "postgresql://user:pass@hostname/dbname",
+        "postgresql+psycopg2://user:pass@hostname/dbname",
         connect_args={"connection_factory": MyConnectionFactory},
     )
 
@@ -458,7 +408,7 @@ collections can then be modified in place to alter how they are used::
 
     from sqlalchemy import event
 
-    engine = create_engine("postgresql://user:pass@hostname/dbname")
+    engine = create_engine("postgresql+psycopg2://user:pass@hostname/dbname")
 
 
     @event.listens_for(engine, "do_connect")
@@ -478,7 +428,7 @@ parameter, this could be implemented as::
 
     from sqlalchemy import event
 
-    engine = create_engine("postgresql://user@hostname/dbname")
+    engine = create_engine("postgresql+psycopg2://user@hostname/dbname")
 
 
     @event.listens_for(engine, "do_connect")
@@ -502,7 +452,7 @@ SQLAlchemy::
 
     from sqlalchemy import event
 
-    engine = create_engine("postgresql://user:pass@hostname/dbname")
+    engine = create_engine("postgresql+psycopg2://user:pass@hostname/dbname")
 
 
     @event.listens_for(engine, "connect")
@@ -520,7 +470,7 @@ and returning it::
 
     from sqlalchemy import event
 
-    engine = create_engine("postgresql://user:pass@hostname/dbname")
+    engine = create_engine("postgresql+psycopg2://user:pass@hostname/dbname")
 
 
     @event.listens_for(engine, "do_connect")
@@ -568,7 +518,7 @@ namespace of SA loggers that can be turned on is as follows:
   on :paramref:`_sa.create_engine.echo_pool`, respectively.
 
 * ``sqlalchemy.dialects`` - controls custom logging for SQL dialects, to the
-  extend that logging is used within specific dialects, which is generally
+  extent that logging is used within specific dialects, which is generally
   minimal.
 
 * ``sqlalchemy.orm`` - controls logging of various ORM functions to the extent
@@ -638,20 +588,56 @@ getting duplicate log lines.
 Setting the Logging Name
 -------------------------
 
-The logger name of instance such as an :class:`~sqlalchemy.engine.Engine` or
-:class:`~sqlalchemy.pool.Pool` defaults to using a truncated hex identifier
-string. To set this to a specific name, use the
+The logger name for :class:`~sqlalchemy.engine.Engine` or
+:class:`~sqlalchemy.pool.Pool` is set to be the module-qualified class name of the
+object.  This name can be further qualified with an additional name
+using the
 :paramref:`_sa.create_engine.logging_name` and
-:paramref:`_sa.create_engine.pool_logging_name`  with
-:func:`sqlalchemy.create_engine`::
+:paramref:`_sa.create_engine.pool_logging_name` parameters with
+:func:`sqlalchemy.create_engine`; the name will be appended to existing
+class-qualified logging name.   This use is recommended for applications that
+make use of multiple global :class:`.Engine` instances simultaenously, so
+that they may be distinguished in logging::
 
+    >>> import logging
     >>> from sqlalchemy import create_engine
     >>> from sqlalchemy import text
-    >>> e = create_engine("sqlite://", echo=True, logging_name="myengine")
+    >>> logging.basicConfig()
+    >>> logging.getLogger("sqlalchemy.engine.Engine.myengine").setLevel(logging.INFO)
+    >>> e = create_engine("sqlite://", logging_name="myengine")
     >>> with e.connect() as conn:
     ...     conn.execute(text("select 'hi'"))
     2020-10-24 12:47:04,291 INFO sqlalchemy.engine.Engine.myengine select 'hi'
     2020-10-24 12:47:04,292 INFO sqlalchemy.engine.Engine.myengine ()
+
+.. tip::
+
+    The :paramref:`_sa.create_engine.logging_name` and
+    :paramref:`_sa.create_engine.pool_logging_name` parameters may also be used in
+    conjunction with :paramref:`_sa.create_engine.echo` and
+    :paramref:`_sa.create_engine.echo_pool`. However, an unavoidable double logging
+    condition will occur if other engines are created with echo flags set to True
+    and **no** logging name. This is because a handler will be added automatically
+    for ``sqlalchemy.engine.Engine`` which will log messages both for the name-less
+    engine as well as engines with logging names.   For example::
+
+        from sqlalchemy import create_engine, text
+
+        e1 = create_engine("sqlite://", echo=True, logging_name="myname")
+        with e1.begin() as conn:
+            conn.execute(text("SELECT 1"))
+
+        e2 = create_engine("sqlite://", echo=True)
+        with e2.begin() as conn:
+            conn.execute(text("SELECT 2"))
+
+        with e1.begin() as conn:
+            conn.execute(text("SELECT 3"))
+
+    The above scenario will double log ``SELECT 3``.  To resolve, ensure
+    all engines have a ``logging_name`` set, or use explicit logger / handler
+    setup without using :paramref:`_sa.create_engine.echo` and
+    :paramref:`_sa.create_engine.echo_pool`.
 
 .. _dbengine_logging_tokens:
 
@@ -676,7 +662,7 @@ tokens::
     >>> from sqlalchemy import create_engine
     >>> e = create_engine("sqlite://", echo="debug")
     >>> with e.connect().execution_options(logging_token="track1") as conn:
-    ...     conn.execute("select 1").all()
+    ...     conn.execute(text("select 1")).all()
     2021-02-03 11:48:45,754 INFO sqlalchemy.engine.Engine [track1] select 1
     2021-02-03 11:48:45,754 INFO sqlalchemy.engine.Engine [track1] [raw sql] ()
     2021-02-03 11:48:45,754 DEBUG sqlalchemy.engine.Engine [track1] Col ('1',)
@@ -693,14 +679,14 @@ of an application without creating new engines::
     >>> e1 = e.execution_options(logging_token="track1")
     >>> e2 = e.execution_options(logging_token="track2")
     >>> with e1.connect() as conn:
-    ...     conn.execute("select 1").all()
+    ...     conn.execute(text("select 1")).all()
     2021-02-03 11:51:08,960 INFO sqlalchemy.engine.Engine [track1] select 1
     2021-02-03 11:51:08,960 INFO sqlalchemy.engine.Engine [track1] [raw sql] ()
     2021-02-03 11:51:08,960 DEBUG sqlalchemy.engine.Engine [track1] Col ('1',)
     2021-02-03 11:51:08,961 DEBUG sqlalchemy.engine.Engine [track1] Row (1,)
 
     >>> with e2.connect() as conn:
-    ...     conn.execute("select 2").all()
+    ...     conn.execute(text("select 2")).all()
     2021-02-03 11:52:05,518 INFO sqlalchemy.engine.Engine [track2] Select 1
     2021-02-03 11:52:05,519 INFO sqlalchemy.engine.Engine [track2] [raw sql] ()
     2021-02-03 11:52:05,520 DEBUG sqlalchemy.engine.Engine [track2] Col ('1',)
@@ -720,4 +706,3 @@ these parameters from being logged for privacy purposes, enable the
     ...     conn.execute(text("select :some_private_name"), {"some_private_name": "pii"})
     2020-10-24 12:48:32,808 INFO sqlalchemy.engine.Engine select ?
     2020-10-24 12:48:32,808 INFO sqlalchemy.engine.Engine [SQL parameters hidden due to hide_parameters=True]
-

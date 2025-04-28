@@ -1,5 +1,3 @@
-# coding: utf-8
-
 from sqlalchemy import desc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
@@ -20,11 +18,12 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import scoped_session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.testing import AssertsCompiledSQL
+from sqlalchemy.testing import combinations
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
-from sqlalchemy.util import ue
 
 
 def pickle_protocols():
@@ -32,16 +31,15 @@ def pickle_protocols():
     # return iter([-1, 0, 1, 2])
 
 
-class User(fixtures.ComparableEntity):
+class User(ComparableEntity):
     pass
 
 
-class Address(fixtures.ComparableEntity):
+class Address(ComparableEntity):
     pass
 
 
 class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
-
     run_setup_mappers = "once"
     run_inserts = "once"
     run_deletes = None
@@ -195,7 +193,6 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
             ],
         )
 
-    @testing.requires.non_broken_pickle
     def test_query_two(self):
         q = (
             Session.query(User)
@@ -206,7 +203,6 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
         eq_(q2.all(), [User(name="fred")])
         eq_(list(q2.with_entities(User.id, User.name)), [(9, "fred")])
 
-    @testing.requires.non_broken_pickle
     def test_query_three(self):
         ua = aliased(User)
         q = (
@@ -233,9 +229,8 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
             pickled_failing = serializer.dumps(j, prot)
             serializer.loads(pickled_failing, users.metadata, None)
 
-    @testing.requires.non_broken_pickle
     def test_orm_join(self):
-        from sqlalchemy.orm.util import join
+        from sqlalchemy.orm import join
 
         j = join(User, Address, User.addresses)
 
@@ -264,7 +259,6 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
             [(u7, u8), (u7, u9), (u7, u10), (u8, u9), (u8, u10)],
         )
 
-    @testing.requires.non_broken_pickle
     def test_any(self):
         r = User.addresses.any(Address.email == "x")
         ser = serializer.dumps(r, -1)
@@ -273,22 +267,56 @@ class SerializeTest(AssertsCompiledSQL, fixtures.MappedTest):
 
     def test_unicode(self):
         m = MetaData()
-        t = Table(
-            ue("\u6e2c\u8a66"), m, Column(ue("\u6e2c\u8a66_id"), Integer)
-        )
+        t = Table("\u6e2c\u8a66", m, Column("\u6e2c\u8a66_id", Integer))
 
-        expr = select(t).where(t.c[ue("\u6e2c\u8a66_id")] == 5)
+        expr = select(t).where(t.c["\u6e2c\u8a66_id"] == 5)
 
         expr2 = serializer.loads(serializer.dumps(expr, -1), m)
 
         self.assert_compile(
             expr2,
-            ue(
-                'SELECT "\u6e2c\u8a66"."\u6e2c\u8a66_id" FROM "\u6e2c\u8a66" '
-                'WHERE "\u6e2c\u8a66"."\u6e2c\u8a66_id" = :\u6e2c\u8a66_id_1'
-            ),
+            'SELECT "\u6e2c\u8a66"."\u6e2c\u8a66_id" FROM "\u6e2c\u8a66" '
+            'WHERE "\u6e2c\u8a66"."\u6e2c\u8a66_id" = :\u6e2c\u8a66_id_1',
             dialect="default",
         )
+
+    @combinations(
+        (
+            lambda: func.max(users.c.name).over(range_=(None, 0)),
+            "max(users.name) OVER (RANGE BETWEEN UNBOUNDED "
+            "PRECEDING AND CURRENT ROW)",
+        ),
+        (
+            lambda: func.max(users.c.name).over(range_=(0, None)),
+            "max(users.name) OVER (RANGE BETWEEN CURRENT "
+            "ROW AND UNBOUNDED FOLLOWING)",
+        ),
+        (
+            lambda: func.max(users.c.name).over(rows=(None, 0)),
+            "max(users.name) OVER (ROWS BETWEEN UNBOUNDED "
+            "PRECEDING AND CURRENT ROW)",
+        ),
+        (
+            lambda: func.max(users.c.name).over(rows=(0, None)),
+            "max(users.name) OVER (ROWS BETWEEN CURRENT "
+            "ROW AND UNBOUNDED FOLLOWING)",
+        ),
+        (
+            lambda: func.max(users.c.name).over(groups=(None, 0)),
+            "max(users.name) OVER (GROUPS BETWEEN UNBOUNDED "
+            "PRECEDING AND CURRENT ROW)",
+        ),
+        (
+            lambda: func.max(users.c.name).over(groups=(0, None)),
+            "max(users.name) OVER (GROUPS BETWEEN CURRENT "
+            "ROW AND UNBOUNDED FOLLOWING)",
+        ),
+    )
+    def test_over(self, over_fn, sql):
+        o = over_fn()
+        self.assert_compile(o, sql)
+        ol = serializer.loads(serializer.dumps(o), users.metadata)
+        self.assert_compile(ol, sql)
 
 
 class ColumnPropertyWParamTest(
@@ -325,9 +353,9 @@ class ColumnPropertyWParamTest(
         # note in the original, the same bound parameter is used twice
         self.assert_compile(
             expr,
-            "SELECT test.some_id AS test_some_id, "
+            "SELECT "
             "CAST(left(test.some_id, :left_1) AS INTEGER) AS anon_1, "
-            "test.id AS test_id FROM test WHERE "
+            "test.id AS test_id, test.some_id AS test_some_id FROM test WHERE "
             "CAST(left(test.some_id, :left_1) AS INTEGER) = :param_1",
             checkparams={"left_1": 6, "param_1": 123456},
         )
@@ -337,13 +365,8 @@ class ColumnPropertyWParamTest(
         # the same value however
         self.assert_compile(
             expr2,
-            "SELECT test.some_id AS test_some_id, "
-            "CAST(left(test.some_id, :left_1) AS INTEGER) AS anon_1, "
-            "test.id AS test_id FROM test WHERE "
+            "SELECT CAST(left(test.some_id, :left_1) AS INTEGER) AS anon_1, "
+            "test.id AS test_id, test.some_id AS test_some_id FROM test WHERE "
             "CAST(left(test.some_id, :left_2) AS INTEGER) = :param_1",
             checkparams={"left_1": 6, "left_2": 6, "param_1": 123456},
         )
-
-
-if __name__ == "__main__":
-    testing.main()

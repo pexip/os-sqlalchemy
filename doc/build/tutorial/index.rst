@@ -1,4 +1,4 @@
-.. |tutorial_title| replace:: SQLAlchemy 1.4 / 2.0 Tutorial
+.. |tutorial_title| replace:: SQLAlchemy Unified Tutorial
 .. |next| replace:: :doc:`engine`
 
 .. footer_topic:: |tutorial_title|
@@ -9,24 +9,24 @@
 
 .. rst-class:: orm_core
 
-=============================
-SQLAlchemy 1.4 / 2.0 Tutorial
-=============================
+============================
+SQLAlchemy Unified Tutorial
+============================
 
 .. admonition:: About this document
 
-    The new SQLAlchemy Tutorial is now integrated between Core and ORM and
-    serves as a unified introduction to SQLAlchemy as a whole.   In the new
-    :term:`2.0 style` of working, fully available in the :ref:`1.4 release
-    <migration_14_toplevel>`, the ORM now uses Core-style querying with the
+    The SQLAlchemy Unified Tutorial is integrated between the Core and ORM
+    components of SQLAlchemy and serves as a unified introduction to SQLAlchemy
+    as a whole. For users of SQLAlchemy within the 1.x series, in the
+    :term:`2.0 style` of working, the ORM uses Core-style querying with the
     :func:`_sql.select` construct, and transactional semantics between Core
-    connections and ORM sessions are equivalent.   Take note of the blue
-    border styles for each section, that will tell you how "ORM-ish" a
-    particular topic is!
+    connections and ORM sessions are equivalent. Take note of the blue border
+    styles for each section, that will tell you how "ORM-ish" a particular
+    topic is!
 
     Users who are already familiar with SQLAlchemy, and especially those
-    looking to migrate existing applications to work under SQLAlchemy 2.0
-    within the 1.4 transitional phase should check out the
+    looking to migrate existing applications to work under the SQLAlchemy 2.0
+    series within the 1.4 transitional phase should check out the
     :ref:`migration_20_toplevel` document as well.
 
     For the newcomer, this document has a **lot** of detail, however by the
@@ -42,9 +42,14 @@ These APIs are known as **Core** and **ORM**.
     to a database, interacting with database queries and results, and
     programmatic construction of SQL statements.
 
-    Sections that have a **dark blue border on the right** will discuss
-    concepts that are **primarily Core-only**; when using the ORM, these
-    concepts are still in play but are less often explicit in user code.
+    Sections that are **primarily Core-only** will not refer to the ORM.
+    SQLAlchemy constructs used in these sections will be imported from the
+    ``sqlalchemy`` namespace. As an additional indicator of subject
+    classification, they will also include a **dark blue border on the right**.
+    When using the ORM, these concepts are still in play but are less often
+    explicit in user code. ORM users should read these sections, but not expect
+    to be using these APIs directly for ORM-centric code.
+
 
 .. container:: orm-header
 
@@ -56,14 +61,28 @@ These APIs are known as **Core** and **ORM**.
     SQL Expression Language to allow SQL queries to be composed and invoked
     in terms of user-defined objects.
 
-    Sections that have a **light blue border on the left** will discuss
-    concepts that are **primarily ORM-only**.  Core-only users
-    can skip these.
+    Sections that are **primarily ORM-only** should be **titled to
+    include the phrase "ORM"**, so that it's clear this is an ORM related topic.
+    SQLAlchemy constructs used in these sections will be imported from the
+    ``sqlalchemy.orm`` namespace. Finally, as an additional indicator of
+    subject classification, they will also include a **light blue border on the
+    left**. Core-only users can skip these.
 
 .. container:: core-header, orm-dependency
 
-    A section that has **both light and dark borders on both sides** will
-    discuss a **Core concept that is also used explicitly with the ORM**.
+    **Most** sections in this tutorial discuss **Core concepts that
+    are also used explicitly with the ORM**. SQLAlchemy 2.0 in particular
+    features a much greater level of integration of Core API use within the
+    ORM.
+
+    For each of these sections, there will be **introductory text** discussing the
+    degree to which ORM users should expect to be using these programming
+    patterns. SQLAlchemy constructs in these sections will be imported from the
+    ``sqlalchemy`` namespace with some potential use of ``sqlalchemy.orm``
+    constructs at the same time. As an additional indicator of subject
+    classification, these sections will also include **both a thinner light
+    border on the left, and a thicker dark border on the right**. Core and ORM
+    users should familiarize with concepts in these sections equally.
 
 
 Tutorial Overview
@@ -132,32 +151,13 @@ the reader is invited to work with the code examples given in real time with
 their own Python interpreter.
 
 If running the examples, it is advised that the reader performs a quick check to
-verify that we are on  **version 1.4** of SQLAlchemy:
+verify that we are on  **version 2.0** of SQLAlchemy:
 
 .. sourcecode:: pycon+sql
 
     >>> import sqlalchemy
     >>> sqlalchemy.__version__  # doctest: +SKIP
-    1.4.0
-
-.. rst-class:: core-header, orm-dependency
-
-A Note on the Future
----------------------
-
-This tutorial describes a new API that's released in SQLAlchemy 1.4 known
-as :term:`2.0 style`.   The purpose of the 2.0-style API is to provide forwards
-compatibility with :ref:`SQLAlchemy 2.0 <migration_20_toplevel>`, which is
-planned as the next generation of SQLAlchemy.
-
-In order to provide the full 2.0 API, a new flag called ``future`` will be
-used, which will be seen as the tutorial describes the :class:`_engine.Engine`
-and :class:`_orm.Session` objects.   These flags fully enable 2.0-compatibility
-mode and allow the code in the tutorial to proceed fully.  When using the
-``future`` flag with the :func:`_sa.create_engine` function, the object
-returned is a subclass of :class:`sqlalchemy.engine.Engine` described as
-:class:`sqlalchemy.future.Engine`. This tutorial will be referring to
-:class:`sqlalchemy.future.Engine`.
+    2.0.0
 
 
 

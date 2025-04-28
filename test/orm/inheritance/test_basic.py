@@ -4,6 +4,7 @@ from sqlalchemy import column
 from sqlalchemy import event
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import ForeignKey
+from sqlalchemy import ForeignKeyConstraint
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import Integer
@@ -22,6 +23,8 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import exc as orm_exc
 from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import object_mapper
 from sqlalchemy.orm import polymorphic_union
 from sqlalchemy.orm import relationship
@@ -32,6 +35,7 @@ from sqlalchemy.sql.selectable import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
@@ -42,6 +46,8 @@ from sqlalchemy.testing.assertsql import CompiledSQL
 from sqlalchemy.testing.assertsql import Conditional
 from sqlalchemy.testing.assertsql import Or
 from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.entities import BasicEntity
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -78,7 +84,7 @@ class O2MTest(fixtures.MappedTest):
         )
 
     def test_basic(self):
-        class Foo(object):
+        class Foo:
             def __init__(self, data=None):
                 self.data = data
 
@@ -171,6 +177,7 @@ class ColExpressionsTest(fixtures.DeclarativeMappedTest):
         rows = (
             s.query(B.id.expressions[0], B.id.expressions[1], func.sum(B.data))
             .group_by(*B.id.expressions)
+            .order_by(B.id.expressions[0])
             .all()
         )
         eq_(rows, [(1, 1, 5), (2, 2, 7)])
@@ -184,7 +191,7 @@ class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
 
             id = Column(
@@ -194,11 +201,9 @@ class PolyExpressionEagerLoad(fixtures.DeclarativeMappedTest):
             child_id = Column(Integer, ForeignKey("a.id"))
             child = relationship("A")
 
-            p_a = case((discriminator == "a", "a"), else_="b")
-
             __mapper_args__ = {
                 "polymorphic_identity": "a",
-                "polymorphic_on": p_a,
+                "polymorphic_on": case((discriminator == "a", "a"), else_="b"),
             }
 
         class B(A):
@@ -390,6 +395,35 @@ class PolymorphicOnNotLocalTest(fixtures.MappedTest):
             t2,
             polymorphic_on=lambda: "hi",
             polymorphic_identity=0,
+        )
+
+    def test_polymorphic_on_not_present_col_partial_wpoly(self):
+        """fix for partial with_polymorphic().
+
+        found_during_type_annotation
+
+        """
+        t2, t1 = self.tables.t2, self.tables.t1
+        Parent = self.classes.Parent
+        t1t2_join = select(t1.c.x).select_from(t1.join(t2)).alias()
+
+        def go():
+            t1t2_join_2 = (  # noqa: F841
+                select(t1.c.q).select_from(t1.join(t2)).alias()
+            )
+            self.mapper_registry.map_imperatively(
+                Parent,
+                t2,
+                polymorphic_on=t1t2_join.c.x,
+                with_polymorphic=("*", None),
+                polymorphic_identity=0,
+            )
+
+        assert_raises_message(
+            sa_exc.InvalidRequestError,
+            "Could not map polymorphic_on column 'x' to the mapped table - "
+            "polymorphic loads will not function properly",
+            go,
         )
 
     def test_polymorphic_on_not_present_col(self):
@@ -688,7 +722,7 @@ class FalseDiscriminatorTest(fixtures.MappedTest):
         )
 
     def test_false_on_sub(self):
-        class Foo(object):
+        class Foo:
             pass
 
         class Bar(Foo):
@@ -709,7 +743,7 @@ class FalseDiscriminatorTest(fixtures.MappedTest):
         assert isinstance(sess.query(Foo).one(), Bar)
 
     def test_false_on_base(self):
-        class Ding(object):
+        class Ding:
             pass
 
         class Bat(Ding):
@@ -751,7 +785,7 @@ class PolymorphicSynonymTest(fixtures.MappedTest):
         )
 
     def test_polymorphic_synonym(self):
-        class T1(fixtures.ComparableEntity):
+        class T1(ComparableEntity):
             def info(self):
                 return "THE INFO IS:" + self._info
 
@@ -1024,16 +1058,16 @@ class CascadeTest(fixtures.MappedTest):
         )
 
     def test_cascade(self):
-        class T1(fixtures.BasicEntity):
+        class T1(BasicEntity):
             pass
 
-        class T2(fixtures.BasicEntity):
+        class T2(BasicEntity):
             pass
 
         class T3(T2):
             pass
 
-        class T4(fixtures.BasicEntity):
+        class T4(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1106,7 +1140,7 @@ class M2OUseGetTest(fixtures.MappedTest):
         )
 
         # test [ticket:1186]
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
@@ -1374,7 +1408,7 @@ class EagerTargetingTest(fixtures.MappedTest):
     def test_adapt_stringency(self):
         b_table, a_table = self.tables.b_table, self.tables.a_table
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
         class B(A):
@@ -1482,10 +1516,10 @@ class FlushTest(fixtures.MappedTest):
             self.tables.user_roles,
         )
 
-        class User(object):
+        class User:
             pass
 
-        class Role(object):
+        class Role:
             pass
 
         class Admin(User):
@@ -1529,12 +1563,12 @@ class FlushTest(fixtures.MappedTest):
             self.tables.user_roles,
         )
 
-        class User(object):
+        class User:
             def __init__(self, email=None, password=None):
                 self.email = email
                 self.password = password
 
-        class Role(object):
+        class Role:
             def __init__(self, description=None):
                 self.description = description
 
@@ -1650,7 +1684,7 @@ class PassiveDeletesTest(fixtures.MappedTest):
             s.flush()
         asserter.assert_(
             RegexSQL(
-                "SELECT .* " "FROM c WHERE :param_1 = c.bid", [{"param_1": 3}]
+                "SELECT .* FROM c WHERE :param_1 = c.bid", [{"param_1": 3}]
             ),
             CompiledSQL("DELETE FROM c WHERE c.cid = :cid", [{"cid": 1}]),
             CompiledSQL("DELETE FROM b WHERE b.id = :id", [{"id": 3}]),
@@ -1779,7 +1813,19 @@ class PassiveDeletesTest(fixtures.MappedTest):
 
 
 class OptimizedGetOnDeferredTest(fixtures.MappedTest):
-    """test that the 'optimized get' path accommodates deferred columns."""
+    """test that the 'optimized get' path accommodates deferred columns.
+
+    Original issue tested is #3468, where loading of a deferred column
+    in an inherited subclass would fail.
+
+    At some point, the logic tested was no longer used and a less efficient
+    query was used to load these columns, but the test here did not inspect
+    the SQL such that this would be detected.
+
+    Test was then revised to more carefully test and now targets
+    #7463 as well.
+
+    """
 
     @classmethod
     def define_tables(cls, metadata):
@@ -1789,6 +1835,7 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
             Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
             ),
+            Column("type", String(10)),
         )
         Table(
             "b",
@@ -1810,11 +1857,12 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
         A, B = cls.classes("A", "B")
         a, b = cls.tables("a", "b")
 
-        cls.mapper_registry.map_imperatively(A, a)
+        cls.mapper_registry.map_imperatively(A, a, polymorphic_on=a.c.type)
         cls.mapper_registry.map_imperatively(
             B,
             b,
             inherits=A,
+            polymorphic_identity="b",
             properties={
                 "data": deferred(b.c.data),
                 "expr": column_property(b.c.data + "q", deferred=True),
@@ -1827,8 +1875,17 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
         b1 = B(data="x")
         sess.add(b1)
         sess.flush()
+        b_id = b1.id
 
-        eq_(b1.expr, "xq")
+        with self.sql_execution_asserter(testing.db) as asserter:
+            eq_(b1.expr, "xq")
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT b.data || :data_1 AS anon_1 "
+                "FROM b WHERE :param_1 = b.id",
+                [{"param_1": b_id, "data_1": "q"}],
+            )
+        )
 
     def test_expired_column(self):
         A, B = self.classes("A", "B")
@@ -1836,9 +1893,109 @@ class OptimizedGetOnDeferredTest(fixtures.MappedTest):
         b1 = B(data="x")
         sess.add(b1)
         sess.flush()
+        b_id = b1.id
         sess.expire(b1, ["data"])
 
+        with self.sql_execution_asserter(testing.db) as asserter:
+            eq_(b1.data, "x")
+        # uses efficient statement w/o JOIN to a
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT b.data AS b_data FROM b WHERE :param_1 = b.id",
+                [{"param_1": b_id}],
+            )
+        )
+
+    def test_refresh_column(self):
+        """refresh currently does not use the mapper "optimized get".
+
+        This could be added later by generalizing the code in
+        loading.py->load_scalar_attributes() to be used by session.refresh().
+
+        For #8703, where we are revisiting some of this logic for 2.0.0,
+        not doing this yet as enough is changing in 2.0 already.
+
+        """
+        A, B = self.classes("A", "B")
+        sess = fixture_session()
+        b1 = B(data="x")
+        sess.add(b1)
+        sess.flush()
+        pk = b1.id
+        sess.expire(b1, ["data"])
+
+        with self.sql_execution_asserter(testing.db) as asserter:
+            sess.refresh(b1, ["data"])
+
+        asserter.assert_(
+            CompiledSQL(
+                # full statement that has a JOIN in it.  Note that
+                # a.id is not included in the SELECT list
+                "SELECT b.data FROM a JOIN b ON a.id = b.id "
+                "WHERE a.id = :pk_1",
+                [{"pk_1": pk}],
+                # if we used load_scalar_attributes(), it would look like
+                # this
+                # "SELECT b.data AS b_data FROM b WHERE :param_1 = b.id",
+                # [{"param_1": b_id}],
+            )
+        )
+
+    def test_load_from_unloaded_subclass(self):
+        A, B = self.classes("A", "B")
+        sess = fixture_session()
+        b1 = B(data="x")
+        sess.add(b1)
+        sess.commit()
+        b_id = b1.id
+        sess.close()
+
+        # load polymorphically in terms of A, so that B needs another
+        # SELECT
+        b1 = sess.execute(select(A)).scalar()
+
+        # it's not loaded
+        assert "data" not in b1.__dict__
+
+        # but it loads successfully when requested
+        with self.sql_execution_asserter(testing.db) as asserter:
+            eq_(b1.data, "x")
+
+        # uses efficient statement w/o JOIN to a
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT b.data AS b_data FROM b WHERE :param_1 = b.id",
+                [{"param_1": b_id}],
+            )
+        )
+
+    def test_load_from_expired_subclass(self):
+        A, B = self.classes("A", "B")
+        sess = fixture_session()
+        b1 = B(data="x")
+        sess.add(b1)
+        sess.commit()
+        b_id = b1.id
+        sess.close()
+
+        b1 = sess.execute(select(A)).scalar()
+
+        # it's not loaded
+        assert "data" not in b1.__dict__
+
         eq_(b1.data, "x")
+        sess.expire(b1, ["data"])
+
+        with self.sql_execution_asserter(testing.db) as asserter:
+            eq_(b1.data, "x")
+
+        # uses efficient statement w/o JOIN to a
+        asserter.assert_(
+            CompiledSQL(
+                "SELECT b.data AS b_data FROM b WHERE :param_1 = b.id",
+                [{"param_1": b_id}],
+            )
+        )
 
 
 class JoinedNoFKSortingTest(fixtures.MappedTest):
@@ -1892,11 +2049,11 @@ class JoinedNoFKSortingTest(fixtures.MappedTest):
             testing.db,
             sess.flush,
             Conditional(
-                testing.db.dialect.insert_executemany_returning
-                and testing.db.dialect.supports_default_metavalue,
+                testing.db.dialect.insert_executemany_returning,
                 [
                     CompiledSQL(
-                        "INSERT INTO a (id) VALUES (DEFAULT)", [{}, {}, {}, {}]
+                        "INSERT INTO a (id) VALUES (DEFAULT) RETURNING a.id",
+                        [{}, {}, {}, {}],
                     ),
                 ],
                 [
@@ -1945,8 +2102,7 @@ class VersioningTest(fixtures.MappedTest):
             Column("parent", Integer, ForeignKey("base.id")),
         )
 
-    @testing.emits_warning(r".*updated rowcount")
-    @testing.requires.sane_rowcount_w_returning
+    @testing.requires.sane_rowcount
     def test_save_update(self):
         subtable, base, stuff = (
             self.tables.subtable,
@@ -1954,7 +2110,7 @@ class VersioningTest(fixtures.MappedTest):
             self.tables.stuff,
         )
 
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
@@ -2014,12 +2170,11 @@ class VersioningTest(fixtures.MappedTest):
         s2.subdata = "sess2 subdata"
         sess2.flush()
 
-    @testing.emits_warning(r".*(update|delete)d rowcount")
-    @testing.requires.sane_rowcount_w_returning
+    @testing.requires.sane_rowcount
     def test_delete(self):
         subtable, base = self.tables.subtable, self.tables.base
 
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
@@ -2092,7 +2247,7 @@ class DistinctPKTest(fixtures.MappedTest):
             Column("person_id", Integer, ForeignKey("persons.id")),
         )
 
-        class Person(object):
+        class Person:
             def __init__(self, name):
                 self.name = name
 
@@ -2147,7 +2302,7 @@ class DistinctPKTest(fixtures.MappedTest):
         )
         assert_warns_message(
             sa_exc.SAWarning,
-            r"On mapper mapped class Employee->employees, "
+            r"On mapper Mapper\[Employee\(employees\)\], "
             "primary key column 'persons.id' is being "
             "combined with distinct primary key column 'employees.eid' "
             "in attribute 'id'. Use explicit properties to give "
@@ -2233,7 +2388,7 @@ class SyncCompileTest(fixtures.MappedTest):
         j1 = testing.resolve_lambda(j1, **locals())
         j2 = testing.resolve_lambda(j2, **locals())
 
-        class A(object):
+        class A:
             def __init__(self, **kwargs):
                 for key, value in list(kwargs.items()):
                     setattr(self, key, value)
@@ -2312,7 +2467,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
 
     def test_plain(self):
         # control case
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2333,7 +2488,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         # in particular, here we do a "manual" version of
         # what we'd like the mapper to do.
 
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2366,7 +2521,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         assert sess.get(Sub, 10) is s1
 
     def test_override_onlyinparent(self):
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2401,11 +2556,103 @@ class OverrideColKeyTest(fixtures.MappedTest):
         # PK col
         assert s2.id == s2.base_id != 15
 
+    def test_subclass_renames_superclass_col_single_inh(self, decl_base):
+        """tested as part of #8705.
+
+        The step where we configure columns mapped to specific keys must
+        take place even if the given column is already in _columntoproperty,
+        as would be the case if the superclass maps that column already.
+
+        """
+
+        class A(decl_base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            a_data = Column(String)
+
+        class B(A):
+            b_data = column_property(A.__table__.c.a_data)
+
+        is_(A.a_data.property.columns[0], A.__table__.c.a_data)
+        is_(B.a_data.property.columns[0], A.__table__.c.a_data)
+        is_(B.b_data.property.columns[0], A.__table__.c.a_data)
+
+    def test_subsubclass_groups_super_cols(self, decl_base):
+        """tested for #9220, which is a regression caused by #8705."""
+
+        class BaseClass(decl_base):
+            __tablename__ = "basetable"
+
+            id = Column(Integer, primary_key=True)
+            name = Column(String(50))
+            type = Column(String(20))
+
+            __mapper_args__ = {
+                "polymorphic_on": type,
+                "polymorphic_identity": "base",
+            }
+
+        class SubClass(BaseClass):
+            __tablename__ = "subtable"
+
+            id = column_property(
+                Column(Integer, primary_key=True), BaseClass.id
+            )
+            base_id = Column(Integer, ForeignKey("basetable.id"))
+            subdata1 = Column(String(50))
+
+            __mapper_args__ = {"polymorphic_identity": "sub"}
+
+        class SubSubClass(SubClass):
+            __tablename__ = "subsubtable"
+
+            id = column_property(
+                Column(Integer, ForeignKey("subtable.id"), primary_key=True),
+                SubClass.id,
+                BaseClass.id,
+            )
+            subdata2 = Column(String(50))
+
+            __mapper_args__ = {"polymorphic_identity": "subsub"}
+
+        is_(SubSubClass.id.property.columns[0], SubSubClass.__table__.c.id)
+        is_(
+            SubSubClass.id.property.columns[1]._deannotate(),
+            SubClass.__table__.c.id,
+        )
+        is_(
+            SubSubClass.id.property.columns[2]._deannotate(),
+            BaseClass.__table__.c.id,
+        )
+
+    def test_column_setup_sanity_check(self, decl_base):
+        class A(decl_base):
+            __tablename__ = "a"
+
+            id = Column(Integer, primary_key=True)
+            a_data = Column(String)
+
+        class B(A):
+            __tablename__ = "b"
+            id = Column(Integer, ForeignKey("a.id"), primary_key=True)
+            b_data = Column(String)
+
+        is_(A.id.property.parent, inspect(A))
+        # overlapping cols get a new prop on the subclass, with cols merged
+        is_(B.id.property.parent, inspect(B))
+        eq_(B.id.property.columns, [B.__table__.c.id, A.__table__.c.id])
+
+        # totally independent cols remain w/ parent on the originating
+        # mapper
+        is_(B.a_data.property.parent, inspect(A))
+        is_(B.b_data.property.parent, inspect(B))
+
     def test_override_implicit(self):
         # this is originally [ticket:1111].
         # the pattern here is now disallowed by [ticket:1892]
 
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2415,7 +2662,12 @@ class OverrideColKeyTest(fixtures.MappedTest):
             Base, base, properties={"id": base.c.base_id}
         )
 
-        def go():
+        with expect_raises_message(
+            sa_exc.InvalidRequestError,
+            "Implicitly combining column base.base_id with column "
+            "subtable.base_id under attribute 'id'.  Please configure one "
+            "or more attributes for these same-named columns explicitly.",
+        ):
             self.mapper_registry.map_imperatively(
                 Sub,
                 subtable,
@@ -2423,14 +2675,8 @@ class OverrideColKeyTest(fixtures.MappedTest):
                 properties={"id": subtable.c.base_id},
             )
 
-        # Sub mapper compilation needs to detect that "base.c.base_id"
-        # is renamed in the inherited mapper as "id", even though
-        # it has its own "id" property.  It then generates
-        # an exception in 0.7 due to the implicit conflict.
-        assert_raises(sa_exc.InvalidRequestError, go)
-
     def test_pk_fk_different(self):
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2454,7 +2700,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         """test that descriptors prevent inheritance from propagating
         properties to subclasses."""
 
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2475,13 +2721,13 @@ class OverrideColKeyTest(fixtures.MappedTest):
         """test that descriptors prevent inheritance from propagating
         properties to subclasses."""
 
-        class MyDesc(object):
+        class MyDesc:
             def __get__(self, instance, owner):
                 if instance is None:
                     return self
                 return "im the data"
 
-        class Base(object):
+        class Base:
             pass
 
         class Sub(Base):
@@ -2497,7 +2743,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         assert sess.query(Sub).one().data == "im the data"
 
     def test_sub_columns_over_base_descriptors(self):
-        class Base(object):
+        class Base:
             @property
             def subdata(self):
                 return "this is base"
@@ -2523,7 +2769,7 @@ class OverrideColKeyTest(fixtures.MappedTest):
         assert sess.get(Sub, s1.base_id).subdata == "this is sub"
 
     def test_base_descriptors_over_base_cols(self):
-        class Base(object):
+        class Base:
             @property
             def data(self):
                 return "this is base"
@@ -2550,6 +2796,8 @@ class OverrideColKeyTest(fixtures.MappedTest):
 
 class OptimizedLoadTest(fixtures.MappedTest):
     """tests for the "optimized load" routine."""
+
+    __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
@@ -2588,10 +2836,10 @@ class OptimizedLoadTest(fixtures.MappedTest):
     def test_no_optimize_on_map_to_join(self):
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
-        class JoinBase(fixtures.ComparableEntity):
+        class JoinBase(ComparableEntity):
             pass
 
         class SubJoinBase(JoinBase):
@@ -2628,9 +2876,9 @@ class OptimizedLoadTest(fixtures.MappedTest):
             go,
             CompiledSQL(
                 "SELECT base.id AS base_id, sub.id AS sub_id, "
+                "base.data AS base_data, base.type AS base_type, "
                 "base.counter AS base_counter, "
                 "sub.subcounter AS sub_subcounter, "
-                "base.data AS base_data, base.type AS base_type, "
                 "sub.sub AS sub_sub, sub.subcounter2 AS sub_subcounter2 "
                 "FROM base LEFT OUTER JOIN sub ON base.id = sub.id "
                 "WHERE base.id = :pk_1",
@@ -2657,7 +2905,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
 
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
         class Sub(Base):
@@ -2695,7 +2943,6 @@ class OptimizedLoadTest(fixtures.MappedTest):
             "sqlalchemy.engine.result.ResultMetaData._key_fallback",
             _key_fallback,
         ):
-
             eq_(s1.sub, "s1sub")
 
     def test_optimized_get_blank_intermediary(self, registry, connection):
@@ -2706,9 +2953,11 @@ class OptimizedLoadTest(fixtures.MappedTest):
         class A(Base):
             __tablename__ = "a"
 
-            id = Column(Integer, primary_key=True)
+            id = Column(
+                Integer, primary_key=True, test_needs_autoincrement=True
+            )
             a = Column(String(20), nullable=False)
-            type_ = Column(String(20))
+            type_ = Column("type", String(20))
             __mapper_args__ = {
                 "polymorphic_on": type_,
                 "polymorphic_identity": "a",
@@ -2745,7 +2994,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             eq_(d.c, "z")
         asserter.assert_(
             CompiledSQL(
-                "SELECT a.id AS a_id, a.a AS a_a, a.type_ AS a_type_ FROM a",
+                "SELECT a.id AS a_id, a.a AS a_a, a.type AS a_type FROM a",
                 [],
             ),
             Or(
@@ -2763,12 +3012,12 @@ class OptimizedLoadTest(fixtures.MappedTest):
         )
 
     def test_optimized_passes(self):
-        """ "test that the 'optimized load' routine doesn't crash when
+        """test that the 'optimized load' routine doesn't crash when
         a column in the join condition is not available."""
 
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
         class Sub(Base):
@@ -2804,7 +3053,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
     def test_column_expression(self):
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
         class Sub(Base):
@@ -2833,7 +3082,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
     def test_column_expression_joined(self):
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.ComparableEntity):
+        class Base(ComparableEntity):
             pass
 
         class Sub(Base):
@@ -2874,13 +3123,13 @@ class OptimizedLoadTest(fixtures.MappedTest):
     def test_composite_column_joined(self):
         base, with_comp = self.tables.base, self.tables.with_comp
 
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class WithComp(Base):
             pass
 
-        class Comp(object):
+        class Comp:
             def __init__(self, a, b):
                 self.a = a
                 self.b = b
@@ -2913,17 +3162,27 @@ class OptimizedLoadTest(fixtures.MappedTest):
         eq_(s1test.comp, Comp("ham", "cheese"))
         eq_(s2test.comp, Comp("bacon", "eggs"))
 
-    def test_load_expired_on_pending(self):
+    @testing.variation("eager_defaults", [True, False])
+    def test_load_expired_on_pending(self, eager_defaults):
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.BasicEntity):
+        expected_eager_defaults = bool(eager_defaults)
+        expect_returning = (
+            expected_eager_defaults and testing.db.dialect.insert_returning
+        )
+
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
             pass
 
         self.mapper_registry.map_imperatively(
-            Base, base, polymorphic_on=base.c.type, polymorphic_identity="base"
+            Base,
+            base,
+            polymorphic_on=base.c.type,
+            polymorphic_identity="base",
+            eager_defaults=bool(eager_defaults),
         )
         self.mapper_registry.map_imperatively(
             Sub, sub, inherits=Base, polymorphic_identity="sub"
@@ -2934,13 +3193,46 @@ class OptimizedLoadTest(fixtures.MappedTest):
         self.assert_sql_execution(
             testing.db,
             sess.flush,
-            CompiledSQL(
-                "INSERT INTO base (data, type) VALUES (:data, :type)",
-                [{"data": "s1", "type": "sub"}],
-            ),
-            CompiledSQL(
-                "INSERT INTO sub (id, sub) VALUES (:id, :sub)",
-                lambda ctx: {"id": s1.id, "sub": None},
+            Conditional(
+                expect_returning,
+                [
+                    CompiledSQL(
+                        "INSERT INTO base (data, type) VALUES (:data, :type) "
+                        "RETURNING base.id, base.counter",
+                        [{"data": "s1", "type": "sub"}],
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO sub (id, sub) VALUES (:id, :sub) "
+                        "RETURNING sub.subcounter, sub.subcounter2",
+                        lambda ctx: {"id": s1.id, "sub": None},
+                    ),
+                ],
+                [
+                    CompiledSQL(
+                        "INSERT INTO base (data, type) VALUES (:data, :type)",
+                        [{"data": "s1", "type": "sub"}],
+                        enable_returning=False,
+                    ),
+                    CompiledSQL(
+                        "INSERT INTO sub (id, sub) VALUES (:id, :sub)",
+                        lambda ctx: {"id": s1.id, "sub": None},
+                        enable_returning=False,
+                    ),
+                    Conditional(
+                        bool(eager_defaults),
+                        [
+                            CompiledSQL(
+                                "SELECT base.counter AS base_counter, "
+                                "sub.subcounter AS sub_subcounter, "
+                                "sub.subcounter2 AS sub_subcounter2 "
+                                "FROM base JOIN sub ON base.id = sub.id "
+                                "WHERE base.id = :pk_1",
+                                lambda ctx: {"pk_1": s1.id},
+                            )
+                        ],
+                        [],
+                    ),
+                ],
             ),
         )
 
@@ -2950,19 +3242,25 @@ class OptimizedLoadTest(fixtures.MappedTest):
         self.assert_sql_execution(
             testing.db,
             go,
-            CompiledSQL(
-                "SELECT base.counter AS base_counter, "
-                "sub.subcounter AS sub_subcounter, "
-                "sub.subcounter2 AS sub_subcounter2 FROM base JOIN sub "
-                "ON base.id = sub.id WHERE base.id = :pk_1",
-                lambda ctx: {"pk_1": s1.id},
+            Conditional(
+                not eager_defaults and not expect_returning,
+                [
+                    CompiledSQL(
+                        "SELECT base.counter AS base_counter, "
+                        "sub.subcounter AS sub_subcounter, sub.subcounter2 "
+                        "AS sub_subcounter2 FROM base "
+                        "JOIN sub ON base.id = sub.id WHERE base.id = :pk_1",
+                        lambda ctx: {"pk_1": s1.id},
+                    )
+                ],
+                [],
             ),
         )
 
     def test_dont_generate_on_none(self):
         base, sub = self.tables.base, self.tables.sub
 
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
@@ -3010,7 +3308,7 @@ class OptimizedLoadTest(fixtures.MappedTest):
             self.tables.subsub,
         )
 
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class Sub(Base):
@@ -3088,7 +3386,7 @@ class NoPKOnSubTableWarningTest(fixtures.MappedTest):
     def test_warning_on_sub(self):
         parent, child = self._fixture()
 
-        class P(object):
+        class P:
             pass
 
         class C(P):
@@ -3108,7 +3406,7 @@ class NoPKOnSubTableWarningTest(fixtures.MappedTest):
     def test_no_warning_with_explicit(self):
         parent, child = self._fixture()
 
-        class P(object):
+        class P:
             pass
 
         class C(P):
@@ -3134,7 +3432,7 @@ class InhCondTest(fixtures.MappedTest):
             Column("owner_id", Integer, ForeignKey("owner.owner_id")),
         )
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3160,7 +3458,7 @@ class InhCondTest(fixtures.MappedTest):
         )
         Table("order", m, Column("id", Integer, primary_key=True))
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3185,7 +3483,7 @@ class InhCondTest(fixtures.MappedTest):
             "derived", metadata, Column("id", Integer, primary_key=True)
         )
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3220,7 +3518,7 @@ class InhCondTest(fixtures.MappedTest):
             Column("id", Integer, ForeignKey("base.id"), primary_key=True),
         )
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3249,7 +3547,7 @@ class InhCondTest(fixtures.MappedTest):
             Column("id", Integer, ForeignKey("base.id"), primary_key=True),
         )
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3282,7 +3580,7 @@ class InhCondTest(fixtures.MappedTest):
             Column("id", Integer, ForeignKey("base.q"), primary_key=True),
         )
 
-        class Base(object):
+        class Base:
             pass
 
         class Derived(Base):
@@ -3326,11 +3624,11 @@ class PKDiscriminatorTest(fixtures.MappedTest):
     def test_pk_as_discriminator(self):
         parents, children = self.tables.parents, self.tables.children
 
-        class Parent(object):
+        class Parent:
             def __init__(self, name=None):
                 self.name = name
 
-        class Child(object):
+        class Child:
             def __init__(self, name=None):
                 self.name = name
 
@@ -3417,8 +3715,8 @@ class NoPolyIdentInMiddleTest(fixtures.MappedTest):
         )
 
         with expect_warnings(
-            r"Mapper mapped class B->base does not indicate a "
-            "polymorphic_identity,"
+            r"Mapper\[B\(base\)\] does not indicate a "
+            "'polymorphic_identity',"
         ):
             cls.mapper_registry.map_imperatively(B, inherits=A)
         cls.mapper_registry.map_imperatively(
@@ -3446,8 +3744,7 @@ class NoPolyIdentInMiddleTest(fixtures.MappedTest):
             __mapper_args__ = {"polymorphic_identity": "b"}
 
         with expect_warnings(
-            r"Mapper mapped class C->a does not indicate a "
-            "polymorphic_identity,"
+            r"Mapper\[C\(a\)\] does not indicate a 'polymorphic_identity',"
         ):
 
             class C(A):
@@ -3526,13 +3823,13 @@ class DeleteOrphanTest(fixtures.MappedTest):
         )
 
     def test_orphan_message(self):
-        class Base(fixtures.BasicEntity):
+        class Base(BasicEntity):
             pass
 
         class SubClass(Base):
             pass
 
-        class Parent(fixtures.BasicEntity):
+        class Parent(BasicEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -3626,7 +3923,6 @@ class PolymorphicUnionTest(fixtures.TestBase, testing.AssertsCompiledSQL):
 
 
 class DiscriminatorOrPkNoneTest(fixtures.DeclarativeMappedTest):
-
     run_setup_mappers = "once"
     __dialect__ = "default"
 
@@ -3634,11 +3930,11 @@ class DiscriminatorOrPkNoneTest(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class Parent(fixtures.ComparableEntity, Base):
+        class Parent(ComparableEntity, Base):
             __tablename__ = "parent"
             id = Column(Integer, primary_key=True)
 
-        class A(fixtures.ComparableEntity, Base):
+        class A(ComparableEntity, Base):
             __tablename__ = "a"
             id = Column(Integer, primary_key=True)
             parent_id = Column(ForeignKey("parent.id"))
@@ -3726,7 +4022,7 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
     def setup_classes(cls):
         Base = cls.DeclarativeBasic
 
-        class AJoined(fixtures.ComparableEntity, Base):
+        class AJoined(ComparableEntity, Base):
             __tablename__ = "ajoined"
             id = Column(Integer, primary_key=True)
             type = Column(String(10), nullable=False)
@@ -3745,7 +4041,7 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
             id = Column(ForeignKey("ajoined.id"), primary_key=True)
             __mapper_args__ = {"polymorphic_identity": "subb"}
 
-        class ASingle(fixtures.ComparableEntity, Base):
+        class ASingle(ComparableEntity, Base):
             __tablename__ = "asingle"
             id = Column(Integer, primary_key=True)
             type = Column(String(10), nullable=False)
@@ -3766,7 +4062,6 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
             "ASingleSubA", "ASingleSubB", "AJoinedSubA", "AJoinedSubB"
         )
         with Session(connection) as s:
-
             s.add_all(
                 [ASingleSubA(), ASingleSubB(), AJoinedSubA(), AJoinedSubB()]
             )
@@ -3783,8 +4078,9 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
             sa_exc.InvalidRequestError,
             r"Row with identity key \(.*ASingle.*\) can't be loaded into an "
             r"object; the polymorphic discriminator column '.*.type' refers "
-            r"to mapped class ASingleSubB->asingle, which is not a "
-            r"sub-mapper of the requested mapped class ASingleSubA->asingle",
+            r"to Mapper\[ASingleSubB\(asingle\)\], which is not a "
+            r"sub-mapper of the requested "
+            r"Mapper\[ASingleSubA\(asingle\)\]",
             q.all,
         )
 
@@ -3799,11 +4095,67 @@ class UnexpectedPolymorphicIdentityTest(fixtures.DeclarativeMappedTest):
             sa_exc.InvalidRequestError,
             r"Row with identity key \(.*AJoined.*\) can't be loaded into an "
             r"object; the polymorphic discriminator column '.*.type' refers "
-            r"to mapped class AJoinedSubB->ajoinedsubb, which is not a "
-            r"sub-mapper of the requested mapped class "
-            r"AJoinedSubA->ajoinedsuba",
+            r"to Mapper\[AJoinedSubB\(ajoinedsubb\)\], which is "
+            "not a "
+            r"sub-mapper of the requested "
+            r"Mapper\[AJoinedSubA\(ajoinedsuba\)\]",
             q.all,
         )
+
+
+class CompositeJoinedInTest(fixtures.DeclarativeMappedTest):
+    """test #9164"""
+
+    run_setup_mappers = "once"
+    __dialect__ = "default"
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class A(ComparableEntity, Base):
+            __tablename__ = "table_a"
+
+            order_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+            _sku: Mapped[str] = mapped_column(String(50), primary_key=True)
+
+            __mapper_args__ = {
+                "polymorphic_identity": "a",
+                "polymorphic_on": "type",
+            }
+
+            type: Mapped[str]
+
+            def __init__(self, order_id: str, sku: str):
+                self.order_id = order_id
+                self._sku = sku
+
+        class B(A):
+            __tablename__ = "table_b"
+
+            _increment_id: Mapped[str] = mapped_column(
+                String(50), primary_key=True
+            )
+            _sku: Mapped[str] = mapped_column(String(50), primary_key=True)
+
+            __table_args__ = (
+                ForeignKeyConstraint(
+                    ["_increment_id", "_sku"],
+                    ["table_a.order_id", "table_a._sku"],
+                ),
+            )
+
+            __mapper_args__ = {"polymorphic_identity": "b"}
+
+    def test_round_trip(self):
+        B = self.classes.B
+
+        sess = fixture_session()
+        b1 = B(order_id="iid1", sku="sku1")
+        sess.add(b1)
+        sess.commit()
+
+        eq_(sess.scalar(select(B)), b1)
 
 
 class NameConflictTest(fixtures.MappedTest):
@@ -3825,7 +4177,7 @@ class NameConflictTest(fixtures.MappedTest):
         )
 
     def test_name_conflict(self):
-        class Content(object):
+        class Content:
             pass
 
         class Foo(Content):

@@ -2,12 +2,17 @@ import collections
 import random
 import threading
 import time
+from unittest.mock import ANY
+from unittest.mock import call
+from unittest.mock import Mock
+from unittest.mock import patch
 import weakref
 
 import sqlalchemy as tsa
 from sqlalchemy import create_engine
 from sqlalchemy import event
 from sqlalchemy import pool
+from sqlalchemy import PoolResetState
 from sqlalchemy import select
 from sqlalchemy import testing
 from sqlalchemy.engine import default
@@ -18,6 +23,7 @@ from sqlalchemy.testing import assert_raises_context_ok
 from sqlalchemy.testing import assert_warns_message
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import expect_raises
+from sqlalchemy.testing import expect_warnings
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_none
@@ -26,10 +32,6 @@ from sqlalchemy.testing import is_not_none
 from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.engines import testing_engine
-from sqlalchemy.testing.mock import ANY
-from sqlalchemy.testing.mock import call
-from sqlalchemy.testing.mock import Mock
-from sqlalchemy.testing.mock import patch
 from sqlalchemy.testing.util import gc_collect
 from sqlalchemy.testing.util import lazy_gc
 
@@ -69,7 +71,6 @@ def MockDBAPI():  # noqa
 
 class PoolTestBase(fixtures.TestBase):
     def setup_test(self):
-        pool.clear_managers()
         self._teardown_conns = []
 
     def teardown_test(self):
@@ -77,10 +78,6 @@ class PoolTestBase(fixtures.TestBase):
             conn = ref()
             if conn:
                 conn.close()
-
-    @classmethod
-    def teardown_test_class(cls):
-        pool.clear_managers()
 
     def _with_teardown(self, connection):
         self._teardown_conns.append(weakref.ref(connection))
@@ -207,7 +204,6 @@ class PoolTest(PoolTestBase):
         assert not r1.dbapi_connection
         c1 = r1.get_connection()
         is_(c1, r1.dbapi_connection)
-        is_(c1, r1.connection)
         is_(c1, r1.driver_connection)
 
     def test_rec_close_reopen(self):
@@ -328,13 +324,11 @@ class PoolTest(PoolTestBase):
 
         is_not_none(rec.dbapi_connection)
 
-        is_(rec.connection, rec.dbapi_connection)
         is_(rec.driver_connection, rec.dbapi_connection)
 
-        fairy = pool._ConnectionFairy(rec.dbapi_connection, rec, False)
+        fairy = pool._ConnectionFairy(p1, rec.dbapi_connection, rec, False)
 
         is_not_none(fairy.dbapi_connection)
-        is_(fairy.connection, fairy.dbapi_connection)
         is_(fairy.driver_connection, fairy.dbapi_connection)
 
         is_(fairy.dbapi_connection, rec.dbapi_connection)
@@ -355,40 +349,25 @@ class PoolTest(PoolTestBase):
 
         rec = pool._ConnectionRecord(p1)
 
+        assert rec.dbapi_connection is not None
         is_not_none(rec.dbapi_connection)
 
-        is_(rec.connection, rec.dbapi_connection)
         is_(rec.driver_connection, mock_dc)
 
-        fairy = pool._ConnectionFairy(rec.dbapi_connection, rec, False)
+        fairy = pool._ConnectionFairy(p1, rec.dbapi_connection, rec, False)
 
         is_not_none(fairy.dbapi_connection)
-        is_(fairy.connection, fairy.dbapi_connection)
         is_(fairy.driver_connection, mock_dc)
 
         is_(fairy.dbapi_connection, rec.dbapi_connection)
         is_(fairy.driver_connection, mock_dc)
-
-    def test_connection_setter(self):
-        dbapi = MockDBAPI()
-        p1 = pool.Pool(creator=lambda: dbapi.connect("foo.db"))
-
-        rec = pool._ConnectionRecord(p1)
-
-        is_not_none(rec.dbapi_connection)
-
-        is_(rec.connection, rec.dbapi_connection)
-        rec.connection = 42
-        is_(rec.connection, rec.dbapi_connection)
-        rec.dbapi_connection = 99
-        is_(rec.connection, rec.dbapi_connection)
 
 
 class PoolDialectTest(PoolTestBase):
     def _dialect(self):
         canary = []
 
-        class PoolDialect(object):
+        class PoolDialect:
             is_async = False
 
             def do_rollback(self, dbapi_connection):
@@ -477,6 +456,15 @@ class PoolEventsTest(PoolTestBase):
             _is_asyncio=_is_asyncio, _has_terminate=_has_terminate
         )
         canary = []
+
+        @event.listens_for(p, "reset")
+        def reset(conn, rec, state):
+            canary.append(
+                f"""reset_{
+                    'rollback_ok'
+                    if state.asyncio_safe else 'no_rollback'
+                }"""
+            )
 
         @event.listens_for(p, "checkin")
         def checkin(*arg, **kw):
@@ -690,7 +678,7 @@ class PoolEventsTest(PoolTestBase):
         c1 = p.connect()
         eq_(canary, [])
         c1.close()
-        eq_(canary, ["checkin"])
+        eq_(canary, ["reset_rollback_ok", "checkin"])
 
     def test_reset_event(self):
         p, canary = self._reset_event_fixture()
@@ -750,12 +738,16 @@ class PoolEventsTest(PoolTestBase):
         assert canary.call_args_list[0][0][0] is dbapi_con
         assert canary.call_args_list[0][0][2] is exc
 
-    @testing.combinations((True,), (False,), argnames="is_asyncio")
-    @testing.combinations((True,), (False,), argnames="has_terminate")
-    @testing.requires.python3
-    def test_checkin_event_gc(self, is_asyncio, has_terminate):
+    @testing.variation("is_asyncio", [(True, testing.requires.asyncio), False])
+    @testing.variation("has_terminate", [True, False])
+    @testing.variation("invalidate_conn_rec", [True, False])
+    def test_checkin_event_gc(
+        self, is_asyncio, has_terminate, invalidate_conn_rec
+    ):
+        """tests for #8419, which have been modified for 2.0 in #9237"""
+
         p, canary = self._checkin_event_fixture(
-            _is_asyncio=is_asyncio, _has_terminate=has_terminate
+            _is_asyncio=bool(is_asyncio), _has_terminate=bool(has_terminate)
         )
 
         c1 = p.connect()
@@ -763,21 +755,47 @@ class PoolEventsTest(PoolTestBase):
         dbapi_connection = weakref.ref(c1.dbapi_connection)
 
         eq_(canary, [])
-        del c1
-        lazy_gc()
 
-        detach_gced = is_asyncio and not has_terminate
+        if invalidate_conn_rec:
+            # test #10414
+            c1._connection_record.invalidate()
 
-        if detach_gced:
-            # "close_detached" is not called because for asyncio the
-            # connection is just lost.
-            eq_(canary, ["detach"])
+        if is_asyncio and not invalidate_conn_rec:
+            if has_terminate:
+                with expect_warnings(
+                    "The garbage collector is trying to clean up.*which will "
+                    "be terminated."
+                ):
+                    del c1
+                    lazy_gc()
+            else:
+                with expect_warnings(
+                    "The garbage collector is trying to clean up.*which will "
+                    "be dropped, as it cannot be safely terminated."
+                ):
+                    del c1
+                    lazy_gc()
+        else:
+            del c1
+            lazy_gc()
+
+        detach_gced = is_asyncio
+
+        if invalidate_conn_rec:
+            eq_(canary, ["checkin"])
+        elif detach_gced:
+            if has_terminate:
+                eq_(canary, ["reset_no_rollback", "detach", "close_detached"])
+            else:
+                # "close_detached" is not called because for asyncio without
+                # terminate the connection is just lost.
+                eq_(canary, ["reset_no_rollback", "detach"])
 
         else:
-            eq_(canary, ["checkin"])
+            eq_(canary, ["reset_rollback_ok", "checkin"])
 
         gc_collect()
-        if detach_gced:
+        if detach_gced or invalidate_conn_rec:
             is_none(dbapi_connection())
         else:
             is_not_none(dbapi_connection())
@@ -792,10 +810,13 @@ class PoolEventsTest(PoolTestBase):
         eq_(canary, [])
 
         c1.close()
-        eq_(canary, ["checkin"])
+        eq_(canary, ["reset_rollback_ok", "checkin"])
 
         c2.close()
-        eq_(canary, ["checkin", "checkin"])
+        eq_(
+            canary,
+            ["reset_rollback_ok", "checkin", "reset_rollback_ok", "checkin"],
+        )
 
     def test_listen_targets_scope(self):
         canary = []
@@ -1416,6 +1437,16 @@ class QueuePoolTest(PoolTestBase):
     def test_max_overflow(self):
         self._test_overflow(40, 5)
 
+    @testing.combinations(42, 0, -5, 1)
+    def test_unlimited(self, max_overflow):
+        p = self._queuepool_fixture(pool_size=0, max_overflow=max_overflow)
+        eq_(p.overflow(), 0)
+        c1 = p.connect()
+        c2 = p.connect()
+        eq_(p.overflow(), 0)
+        c1.close()
+        c2.close()
+
     def test_overflow_no_gc(self):
         p = self._queuepool_fixture(pool_size=2, max_overflow=2)
 
@@ -1441,8 +1472,8 @@ class QueuePoolTest(PoolTestBase):
         # two pooled connections unclosed.
 
         eq_(
-            set([c.close.call_count for c in strong_refs]),
-            set([1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0]),
+            {c.close.call_count for c in strong_refs},
+            {1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0},
         )
 
     def test_recycle(self):
@@ -1684,8 +1715,15 @@ class QueuePoolTest(PoolTestBase):
             exc_cls=TimeoutThing if exc_type.base_exception else Exception,
         )
 
-    @testing.combinations((True, testing.requires.python3), (False,))
-    def test_userspace_disconnectionerror_weakref_finalizer(self, detach_gced):
+    @testing.variation(
+        "detach_gced",
+        [("detached_gc", testing.requires.asyncio), "normal_gc"],
+    )
+    @testing.variation("invalidate_conn_rec", [True, False])
+    @testing.emits_warning("The garbage collector")
+    def test_userspace_disconnectionerror_weakref_finalizer(
+        self, detach_gced, invalidate_conn_rec
+    ):
         dbapi, pool = self._queuepool_dbapi_fixture(
             pool_size=1, max_overflow=2, _is_asyncio=detach_gced
         )
@@ -1699,28 +1737,44 @@ class QueuePoolTest(PoolTestBase):
                 raise tsa.exc.DisconnectionError()
 
         conn = pool.connect()
-        old_dbapi_conn = conn.dbapi_connection
+        normally_closed_dbapi_conn = conn.dbapi_connection
         conn.close()
 
-        eq_(old_dbapi_conn.mock_calls, [call.rollback()])
+        eq_(normally_closed_dbapi_conn.mock_calls, [call.rollback()])
 
-        old_dbapi_conn.boom = "yes"
+        normally_closed_dbapi_conn.boom = "yes"
 
         conn = pool.connect()
-        dbapi_conn = conn.dbapi_connection
+
+        # normally closed conn was checked out again but had a problem,
+        # so was replaced
+        eq_(
+            normally_closed_dbapi_conn.mock_calls,
+            [call.rollback(), call.close()],
+        )
+
+        not_closed_dbapi_conn = conn.dbapi_connection
+
+        if invalidate_conn_rec:
+            conn._connection_record.invalidate()
+
         del conn
+
         gc_collect()
 
         if detach_gced:
             # new connection was detached + abandoned on return
-            eq_(dbapi_conn.mock_calls, [])
+            eq_(not_closed_dbapi_conn.mock_calls, [])
         else:
             # new connection reset and returned to pool
-            eq_(dbapi_conn.mock_calls, [call.rollback()])
+            # this creates a gc-level warning that is not easy to pin down,
+            # hence we use the testing.emits_warning() decorator just to squash
+            # it
 
-        # old connection was just closed - did not get an
-        # erroneous reset on return
-        eq_(old_dbapi_conn.mock_calls, [call.rollback(), call.close()])
+            if invalidate_conn_rec:
+                eq_(not_closed_dbapi_conn.mock_calls, [call.close()])
+            else:
+                eq_(not_closed_dbapi_conn.mock_calls, [call.rollback()])
 
     @testing.requires.timing_intensive
     def test_recycle_pool_no_race(self):
@@ -1736,14 +1790,15 @@ class QueuePoolTest(PoolTestBase):
 
         dialect = Mock()
         dialect.is_disconnect = lambda *arg, **kw: True
-        dialect.dbapi.Error = Error
+        dialect.dispatch = Mock(handle_error=[])
+        dialect.dbapi.Error = dialect.loaded_dbapi.Error = Error
 
         pools = []
 
         class TrackQueuePool(pool.QueuePool):
             def __init__(self, *arg, **kw):
                 pools.append(self)
-                super(TrackQueuePool, self).__init__(*arg, **kw)
+                super().__init__(*arg, **kw)
 
         def creator():
             return slow_closing_connection.connect()
@@ -1971,17 +2026,37 @@ class ResetOnReturnTest(PoolTestBase):
             _initialize=False,
         )
 
-    def test_custom(self):
+    @testing.combinations("detach", "invalidate", "return")
+    def test_custom(self, extra_step):
         dbapi, p = self._fixture(reset_on_return=None)
 
         @event.listens_for(p, "reset")
-        def custom_reset(dbapi_conn, record):
-            dbapi_conn.special_reset_method()
+        def custom_reset(dbapi_conn, record, reset_state):
+            dbapi_conn.special_reset_method(reset_state)
 
         c1 = p.connect()
+
+        if extra_step == "detach":
+            c1.detach()
+        elif extra_step == "invalidate":
+            c1.invalidate()
         c1.close()
 
-        assert dbapi.connect().special_reset_method.called
+        special_event = mock.call.special_reset_method(
+            PoolResetState(
+                transaction_was_reset=False,
+                terminate_only=extra_step == "detach",
+                asyncio_safe=True,
+            )
+        )
+        if extra_step == "detach":
+            expected = [special_event, mock.call.close()]
+        elif extra_step == "invalidate":
+            expected = [mock.call.close()]
+        else:
+            expected = [special_event]
+        eq_(dbapi.connect().mock_calls, expected)
+
         assert not dbapi.connect().rollback.called
         assert not dbapi.connect().commit.called
 
@@ -1993,8 +2068,8 @@ class ResetOnReturnTest(PoolTestBase):
         if assert_w_event:
 
             @event.listens_for(engine, "reset")
-            def custom_reset(dbapi_conn, record):
-                dbapi_conn.special_reset_method()
+            def custom_reset(dbapi_conn, record, reset_state):
+                dbapi_conn.special_reset_method(reset_state)
 
         c1 = engine.connect()
         if use_engine_transaction:
@@ -2003,7 +2078,19 @@ class ResetOnReturnTest(PoolTestBase):
         assert dbapi.connect().rollback.called
 
         if assert_w_event:
-            assert dbapi.connect().special_reset_method.called
+            special_event = mock.call.special_reset_method(
+                PoolResetState(
+                    transaction_was_reset=use_engine_transaction,
+                    terminate_only=False,
+                    asyncio_safe=True,
+                )
+            )
+
+            if use_engine_transaction:
+                expected = [mock.call.rollback(), special_event]
+            else:
+                expected = [special_event, mock.call.rollback()]
+            eq_(dbapi.connect().mock_calls, expected)
 
     @testing.combinations(True, False, argnames="assert_w_event")
     def test_plain_rollback(self, assert_w_event):
@@ -2012,8 +2099,8 @@ class ResetOnReturnTest(PoolTestBase):
         if assert_w_event:
 
             @event.listens_for(p, "reset")
-            def custom_reset(dbapi_conn, record):
-                dbapi_conn.special_reset_method()
+            def custom_reset(dbapi_conn, record, reset_state):
+                dbapi_conn.special_reset_method(reset_state)
 
         c1 = p.connect()
         c1.close()
@@ -2021,7 +2108,16 @@ class ResetOnReturnTest(PoolTestBase):
         assert not dbapi.connect().commit.called
 
         if assert_w_event:
-            assert dbapi.connect().special_reset_method.called
+            special_event = mock.call.special_reset_method(
+                PoolResetState(
+                    transaction_was_reset=False,
+                    terminate_only=False,
+                    asyncio_safe=True,
+                )
+            )
+
+            expected = [special_event, mock.call.rollback()]
+            eq_(dbapi.connect().mock_calls, expected)
 
     @testing.combinations(True, False, argnames="assert_w_event")
     @testing.combinations(True, False, argnames="use_engine_transaction")
@@ -2033,8 +2129,8 @@ class ResetOnReturnTest(PoolTestBase):
         if assert_w_event:
 
             @event.listens_for(engine, "reset")
-            def custom_reset(dbapi_conn, record):
-                dbapi_conn.special_reset_method()
+            def custom_reset(dbapi_conn, record, reset_state):
+                dbapi_conn.special_reset_method(reset_state)
 
         c1 = engine.connect()
         if use_engine_transaction:
@@ -2043,7 +2139,19 @@ class ResetOnReturnTest(PoolTestBase):
         assert dbapi.connect().rollback.called
 
         if assert_w_event:
-            assert dbapi.connect().special_reset_method.called
+            special_event = mock.call.special_reset_method(
+                PoolResetState(
+                    transaction_was_reset=use_engine_transaction,
+                    terminate_only=False,
+                    asyncio_safe=True,
+                )
+            )
+
+            if use_engine_transaction:
+                expected = [mock.call.rollback(), special_event]
+            else:
+                expected = [special_event, mock.call.rollback()]
+            eq_(dbapi.connect().mock_calls, expected)
 
     def test_plain_commit(self):
         dbapi, p = self._fixture(reset_on_return="commit")

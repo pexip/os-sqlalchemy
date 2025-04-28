@@ -1,5 +1,7 @@
 """Attribute/instance expiration, deferral of attributes, etc."""
 
+import re
+
 import sqlalchemy as sa
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import FetchedValue
@@ -13,12 +15,15 @@ from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import defer
 from sqlalchemy.orm import deferred
 from sqlalchemy.orm import exc as orm_exc
+from sqlalchemy.orm import immediateload
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import make_transient_to_detached
 from sqlalchemy.orm import relationship
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import strategies
+from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm import undefer
 from sqlalchemy.sql import select
 from sqlalchemy.testing import assert_raises
@@ -125,7 +130,7 @@ class ExpireTest(_fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
 
         self.mapper_registry.map_imperatively(User, users)
-        s = fixture_session(autocommit=False)
+        s = fixture_session()
         u = s.get(User, 10)
         s.expire_all()
 
@@ -148,7 +153,7 @@ class ExpireTest(_fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
 
         self.mapper_registry.map_imperatively(User, users)
-        s = fixture_session(autocommit=False)
+        s = fixture_session()
         u = s.get(User, 10)
 
         s.expire_all()
@@ -163,7 +168,7 @@ class ExpireTest(_fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
 
         self.mapper_registry.map_imperatively(User, users)
-        s = fixture_session(autocommit=False)
+        s = fixture_session()
         u = s.get(User, 10)
         s.expire_all()
 
@@ -184,7 +189,7 @@ class ExpireTest(_fixtures.FixtureTest):
         users, User = self.tables.users, self.classes.User
 
         self.mapper_registry.map_imperatively(User, users)
-        s = fixture_session(autocommit=False)
+        s = fixture_session()
         u = s.get(User, 10)
         s.expire_all()
         s.execute(users.delete().where(User.id == 10))
@@ -241,7 +246,7 @@ class ExpireTest(_fixtures.FixtureTest):
         self.mapper_registry.map_imperatively(
             User, users, properties={"name": deferred(users.c.name)}
         )
-        s = fixture_session(autocommit=False)
+        s = fixture_session()
         u = s.get(User, 10)
 
         assert "name" not in u.__dict__
@@ -273,7 +278,9 @@ class ExpireTest(_fixtures.FixtureTest):
             },
         )
         self.mapper_registry.map_imperatively(Address, addresses)
-        s = fixture_session(autoflush=True, autocommit=False)
+        s = fixture_session(
+            autoflush=True,
+        )
         u = s.get(User, 8)
         adlist = u.addresses
         eq_(
@@ -294,37 +301,6 @@ class ExpireTest(_fixtures.FixtureTest):
                 Address(email_address="ed@bettyboop.com"),
                 Address(email_address="ed@lala.com"),
             ],
-        )
-
-    def test_refresh_collection_exception(self):
-        """test graceful failure for currently unsupported
-        immediate refresh of a collection"""
-
-        users, Address, addresses, User = (
-            self.tables.users,
-            self.classes.Address,
-            self.tables.addresses,
-            self.classes.User,
-        )
-
-        self.mapper_registry.map_imperatively(
-            User,
-            users,
-            properties={
-                "addresses": relationship(
-                    Address, order_by=addresses.c.email_address
-                )
-            },
-        )
-        self.mapper_registry.map_imperatively(Address, addresses)
-        s = fixture_session(autoflush=True, autocommit=False)
-        u = s.get(User, 8)
-        assert_raises_message(
-            sa_exc.InvalidRequestError,
-            "properties specified for refresh",
-            s.refresh,
-            u,
-            ["addresses"],
         )
 
     def test_refresh_cancels_expire(self):
@@ -530,7 +506,9 @@ class ExpireTest(_fixtures.FixtureTest):
             users,
             properties={
                 "addresses": relationship(
-                    Address, cascade="all, refresh-expire"
+                    Address,
+                    cascade="all, refresh-expire",
+                    order_by=addresses.c.id,
                 )
             },
         )
@@ -737,7 +715,6 @@ class ExpireTest(_fixtures.FixtureTest):
         sess = fixture_session(autoflush=False)
 
         with self.sql_execution_asserter(testing.db) as asserter:
-
             if case == "contains,joined":
                 a1 = (
                     sess.query(Address)
@@ -878,7 +855,7 @@ class ExpireTest(_fixtures.FixtureTest):
             # for up front
             with expect_raises_message(
                 sa.exc.ArgumentError,
-                'Mapped attribute "User.addresses" does not apply to '
+                r"Mapped class Mapper\[User\(users\)\] does not apply to "
                 "any of the root entities in this query",
             ):
                 row = sess.execute(
@@ -983,6 +960,235 @@ class ExpireTest(_fixtures.FixtureTest):
 
         self.assert_sql_count(testing.db, go, 1)
 
+    @testing.combinations(
+        "selectin",
+        "joined",
+        "subquery",
+        "immediate",
+        "select",
+        argnames="lazy",
+    )
+    @testing.variation(
+        "as_option",
+        [True, False],
+    )
+    @testing.variation(
+        "expire_first",
+        [
+            True,
+            False,
+            "not_pk",
+            (
+                "not_pk_plus_pending",
+                testing.requires.updateable_autoincrement_pks,
+            ),
+        ],
+    )
+    @testing.variation("include_column", [True, False, "no_attrs"])
+    @testing.variation("autoflush", [True, False])
+    def test_load_only_relationships(
+        self, lazy, expire_first, include_column, as_option, autoflush
+    ):
+        """test #8703, #8997, a regression for #8996, and new feature
+        for #9298."""
+
+        users, Address, addresses, User = (
+            self.tables.users,
+            self.classes.Address,
+            self.tables.addresses,
+            self.classes.User,
+        )
+
+        if expire_first.not_pk_plus_pending:
+            # if the test will be flushing a pk change, choose the user_id
+            # that has no address rows so that we dont get an FK violation.
+            # test only looks for the presence of "addresses" collection,
+            # not the contents
+            target_id = 10
+            target_name = "chuck"
+        else:
+            # for all the other cases use user_id 8 where the addresses
+            # collection has some elements.  this could theoretically catch
+            # any odd per-row issues with the collection load
+            target_id = 8
+            target_name = "ed"
+
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={
+                "addresses": relationship(
+                    Address,
+                    backref="user",
+                    lazy=lazy if not as_option else "select",
+                )
+            },
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
+        sess = fixture_session(autoflush=bool(autoflush))
+        if as_option:
+            fn = {
+                "joined": joinedload,
+                "selectin": selectinload,
+                "subquery": subqueryload,
+                "immediate": immediateload,
+                "select": lazyload,
+            }[lazy]
+
+        u = sess.get(
+            User,
+            target_id,
+            options=([fn(User.addresses)] if as_option else []),
+        )
+
+        if expire_first.not_pk_plus_pending:
+            u.id = 25
+            sess.expire(u, ["name", "addresses"])
+
+            assert "addresses" not in u.__dict__
+            assert "name" not in u.__dict__
+            name_is_expired = True
+        elif expire_first.not_pk:
+            sess.expire(u, ["name", "addresses"])
+            assert "id" in u.__dict__
+            assert "addresses" not in u.__dict__
+            assert "name" not in u.__dict__
+            name_is_expired = True
+        elif expire_first:
+            sess.expire(u)
+            assert "id" not in u.__dict__
+            assert "addresses" not in u.__dict__
+            assert "name" not in u.__dict__
+            name_is_expired = True
+        else:
+            name_is_expired = False
+
+        if (
+            expire_first.not_pk_plus_pending
+            and not autoflush
+            and not include_column.no_attrs
+        ):
+            with expect_raises_message(
+                sa_exc.InvalidRequestError,
+                re.escape(
+                    "Please flush pending primary key changes on attributes "
+                    "{'id'} for mapper Mapper[User(users)] before proceeding "
+                    "with a refresh"
+                ),
+            ):
+                if include_column:
+                    sess.refresh(u, ["name", "addresses"])
+                else:
+                    sess.refresh(u, ["addresses"])
+
+            return
+
+        with self.sql_execution_asserter(testing.db) as asserter:
+            if include_column.no_attrs:
+                sess.refresh(u)
+                name_is_expired = False
+                id_was_refreshed = True
+            elif include_column:
+                sess.refresh(u, ["name", "addresses"])
+                name_is_expired = False
+                id_was_refreshed = False
+            else:
+                sess.refresh(u, ["addresses"])
+                id_was_refreshed = False
+
+        expect_addresses = lazy != "select" or not include_column.no_attrs
+
+        expected_count = 2 if (lazy != "joined" and expect_addresses) else 1
+        if (
+            autoflush
+            and expire_first.not_pk_plus_pending
+            and not id_was_refreshed
+        ):
+            expected_count += 1
+
+        asserter.assert_(CountStatements(expected_count))
+
+        # pk there for all cases
+        assert "id" in u.__dict__
+
+        if name_is_expired:
+            assert "name" not in u.__dict__
+        else:
+            assert "name" in u.__dict__
+
+        if expect_addresses:
+            assert "addresses" in u.__dict__
+        else:
+            assert "addresses" not in u.__dict__
+
+        u.addresses
+        assert "addresses" in u.__dict__
+        if include_column:
+            eq_(u.__dict__["name"], target_name)
+
+        if expire_first.not_pk_plus_pending and not id_was_refreshed:
+            eq_(u.__dict__["id"], 25)
+        else:
+            eq_(u.__dict__["id"], target_id)
+
+    @testing.variation("expire_first", [True, False])
+    @testing.variation("autoflush", [True, False])
+    @testing.variation("ensure_name_cleared", [True, False])
+    @testing.requires.updateable_autoincrement_pks
+    def test_no_pending_pks_on_refresh(
+        self, expire_first, autoflush, ensure_name_cleared
+    ):
+        users = self.tables.users
+        User = self.classes.User
+
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+        )
+        sess = fixture_session(autoflush=bool(autoflush))
+
+        u = sess.get(User, 10)
+
+        u.id = 25
+
+        if ensure_name_cleared:
+            u.name = "newname"
+
+        if expire_first:
+            sess.expire(u, ["name"])
+
+        if ensure_name_cleared and not expire_first:
+            eq_(inspect(u).attrs.name.history, (["newname"], (), ["chuck"]))
+
+        if not autoflush:
+            with expect_raises_message(
+                sa_exc.InvalidRequestError,
+                re.escape(
+                    "Please flush pending primary key changes on attributes "
+                    "{'id'} for mapper Mapper[User(users)] before proceeding "
+                    "with a refresh"
+                ),
+            ):
+                sess.refresh(u, ["name"])
+
+            # id was not expired
+            eq_(inspect(u).attrs.id.history, ([25], (), [10]))
+
+            # name was expired
+            eq_(inspect(u).attrs.name.history, ((), (), ()))
+
+        else:
+            sess.refresh(u, ["name"])
+
+            # new id value stayed
+            eq_(u.__dict__["id"], 25)
+
+            # was autoflushed
+            eq_(inspect(u).attrs.id.history, ((), [25], ()))
+
+            # new value for "name" is lost, value was refreshed
+            eq_(inspect(u).attrs.name.history, ((), ["chuck"], ()))
+
     def test_expire_synonym(self):
         User, users = self.classes.User, self.tables.users
 
@@ -1003,7 +1209,7 @@ class ExpireTest(_fixtures.FixtureTest):
         assert u.uname == "jack2"
         assert "name" in u.__dict__
 
-        # this wont work unless we add API hooks through the attr. system to
+        # this won't work unless we add API hooks through the attr. system to
         # provide "expire" behavior on a synonym
         #    sess.expire(u, ['uname'])
         #    users.update(users.c.id==7).execute(name='jack3')
@@ -1822,7 +2028,9 @@ class LifecycleTest(fixtures.MappedTest):
     def setup_mappers(cls):
         cls.mapper_registry.map_imperatively(cls.classes.Data, cls.tables.data)
         cls.mapper_registry.map_imperatively(
-            cls.classes.DataFetched, cls.tables.data_fetched
+            cls.classes.DataFetched,
+            cls.tables.data_fetched,
+            eager_defaults=False,
         )
         cls.mapper_registry.map_imperatively(
             cls.classes.DataDefer,
@@ -1882,7 +2090,6 @@ class LifecycleTest(fixtures.MappedTest):
         def go():
             eq_(d1.data, None)
 
-        # this one is marked as "fetch" so we emit SQL
         self.assert_sql_count(testing.db, go, 1)
 
     def test_cols_missing_in_load(self):

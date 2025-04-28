@@ -1,10 +1,13 @@
 from decimal import Decimal
 
+from sqlalchemy import column
 from sqlalchemy import exc
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
+from sqlalchemy import insert
 from sqlalchemy import inspect
 from sqlalchemy import Integer
+from sqlalchemy import LABEL_STYLE_DISAMBIGUATE_ONLY
 from sqlalchemy import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy import literal_column
 from sqlalchemy import Numeric
@@ -13,10 +16,16 @@ from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy.ext import hybrid
 from sqlalchemy.orm import aliased
+from sqlalchemy.orm import column_property
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declared_attr
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import synonym
+from sqlalchemy.orm.context import ORMSelectCompileState
+from sqlalchemy.sql import coercions
+from sqlalchemy.sql import operators
+from sqlalchemy.sql import roles
 from sqlalchemy.sql import update
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
@@ -24,6 +33,7 @@ from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_not
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
@@ -31,7 +41,7 @@ from sqlalchemy.testing.schema import Column
 class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
-    def _fixture(self):
+    def _fixture(self, use_inplace=False, use_classmethod=False):
         Base = declarative_base()
 
         class UCComparator(hybrid.Comparator):
@@ -52,9 +62,33 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
                 "This is a docstring"
                 return self._value - 5
 
-            @value.comparator
-            def value(cls):
-                return UCComparator(cls._value)
+            if use_classmethod:
+                if use_inplace:
+
+                    @value.inplace.comparator
+                    @classmethod
+                    def _value_comparator(cls):
+                        return UCComparator(cls._value)
+
+                else:
+
+                    @value.comparator
+                    @classmethod
+                    def value(cls):
+                        return UCComparator(cls._value)
+
+            else:
+                if use_inplace:
+
+                    @value.inplace.comparator
+                    def _value_comparator(cls):
+                        return UCComparator(cls._value)
+
+                else:
+
+                    @value.comparator
+                    def value(cls):
+                        return UCComparator(cls._value)
 
             @value.setter
             def value(self, v):
@@ -68,35 +102,55 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
         eq_(a1._value, 10)
         eq_(a1.value, 5)
 
-    def test_value(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_value(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         eq_(str(A.value == 5), "upper(a.value) = upper(:upper_1)")
 
-    def test_aliased_value(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_aliased_value(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         eq_(str(aliased(A).value == 5), "upper(a_1.value) = upper(:upper_1)")
 
-    def test_query(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_query(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         sess = fixture_session()
         self.assert_compile(
             sess.query(A.value), "SELECT a.value AS a_value FROM a"
         )
 
-    def test_aliased_query(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_aliased_query(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A).value),
             "SELECT a_1.value AS a_1_value FROM a AS a_1",
         )
 
-    def test_aliased_filter(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_aliased_filter(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
-            "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
+            "SELECT a_1.id AS a_1_id, a_1.value AS a_1_value "
             "FROM a AS a_1 WHERE upper(a_1.value) = upper(:upper_1)",
         )
 
@@ -137,7 +191,7 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
         """test :ticket:`6215`"""
         Base = declarative_base()
 
-        class SomeMixin(object):
+        class SomeMixin:
             @hybrid.hybrid_property
             def same_name(self):
                 return self.id
@@ -162,11 +216,33 @@ class PropertyComparatorTest(fixtures.TestBase, AssertsCompiledSQL):
             ["same_name", "id", "name"],
         )
 
+    def test_custom_op(self, registry):
+        """test #3162"""
+
+        my_op = operators.custom_op(
+            "my_op", python_impl=lambda a, b: a + "_foo_" + b
+        )
+
+        @registry.mapped
+        class SomeClass:
+            __tablename__ = "sc"
+            id = Column(Integer, primary_key=True)
+            data = Column(String)
+
+            @hybrid.hybrid_property
+            def foo_data(self):
+                return my_op(self.data, "bar")
+
+        eq_(SomeClass(data="data").foo_data, "data_foo_bar")
+
+        self.assert_compile(SomeClass.foo_data, "sc.data my_op :data_1")
+
 
 class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
-    def _fixture(self):
+    def _fixture(self, use_inplace=False, use_classmethod=False):
+        use_inplace, use_classmethod = bool(use_inplace), bool(use_classmethod)
         Base = declarative_base()
 
         class A(Base):
@@ -179,14 +255,41 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
                 "This is an instance-level docstring"
                 return int(self._value) - 5
 
-            @value.expression
-            def value(cls):
-                "This is a class-level docstring"
-                return func.foo(cls._value) + cls.bar_value
-
             @value.setter
             def value(self, v):
                 self._value = v + 5
+
+            if use_classmethod:
+                if use_inplace:
+
+                    @value.inplace.expression
+                    @classmethod
+                    def _value_expr(cls):
+                        "This is a class-level docstring"
+                        return func.foo(cls._value) + cls.bar_value
+
+                else:
+
+                    @value.expression
+                    @classmethod
+                    def value(cls):
+                        "This is a class-level docstring"
+                        return func.foo(cls._value) + cls.bar_value
+
+            else:
+                if use_inplace:
+
+                    @value.inplace.expression
+                    def _value_expr(cls):
+                        "This is a class-level docstring"
+                        return func.foo(cls._value) + cls.bar_value
+
+                else:
+
+                    @value.expression
+                    def value(cls):
+                        "This is a class-level docstring"
+                        return func.foo(cls._value) + cls.bar_value
 
             @hybrid.hybrid_property
             def bar_value(cls):
@@ -322,6 +425,76 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
 
         return A
 
+    @testing.fixture
+    def _unnamed_expr_matches_col_fixture(self):
+        Base = declarative_base()
+
+        class A(Base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            foo = Column(String)
+
+            @hybrid.hybrid_property
+            def bar(self):
+                return self.foo
+
+        return A
+
+    def test_access_from_unmapped(self):
+        """test #9519"""
+
+        class DnsRecord:
+            name = Column("name", String)
+
+            @hybrid.hybrid_property
+            def ip_value(self):
+                return self.name[1:3]
+
+            @ip_value.expression
+            def ip_value(cls):
+                return func.substring(cls.name, 1, 3)
+
+        raw_attr = DnsRecord.ip_value
+        is_(raw_attr._parententity, None)
+
+        self.assert_compile(
+            raw_attr, "substring(name, :substring_1, :substring_2)"
+        )
+
+        self.assert_compile(
+            select(DnsRecord.ip_value),
+            "SELECT substring(name, :substring_2, :substring_3) "
+            "AS substring_1",
+        )
+
+    def test_access_from_not_yet_mapped(self, decl_base):
+        """test #9519"""
+
+        class DnsRecord(decl_base):
+            __tablename__ = "dnsrecord"
+            id = Column(Integer, primary_key=True)
+            name = Column(String, unique=False, nullable=False)
+
+            @declared_attr
+            def thing(cls):
+                return column_property(cls.ip_value)
+
+            name = Column("name", String)
+
+            @hybrid.hybrid_property
+            def ip_value(self):
+                return self.name[1:3]
+
+            @ip_value.expression
+            def ip_value(cls):
+                return func.substring(cls.name, 1, 3)
+
+        self.assert_compile(
+            select(DnsRecord.thing),
+            "SELECT substring(dnsrecord.name, :substring_2, :substring_3) "
+            "AS substring_1 FROM dnsrecord",
+        )
+
     def test_labeling_for_unnamed(self, _unnamed_expr_fixture):
         A = _unnamed_expr_fixture
 
@@ -339,6 +512,41 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
             "SELECT anon_1.id, anon_1.name "
             "FROM (SELECT a.id AS id, a.firstname || :firstname_1 || "
             "a.lastname AS name FROM a) AS anon_1",
+        )
+
+    @testing.variation("pre_populate_col_proxy", [True, False])
+    def test_labeling_for_unnamed_matches_col(
+        self, _unnamed_expr_matches_col_fixture, pre_populate_col_proxy
+    ):
+        """test #11728"""
+
+        A = _unnamed_expr_matches_col_fixture
+
+        if pre_populate_col_proxy:
+            pre_stmt = select(A.id, A.foo)
+            pre_stmt.subquery().c
+
+        stmt = select(A.id, A.bar)
+        self.assert_compile(
+            stmt,
+            "SELECT a.id, a.foo FROM a",
+        )
+
+        compile_state = ORMSelectCompileState._create_orm_context(
+            stmt, toplevel=True, compiler=None
+        )
+        eq_(
+            compile_state._column_naming_convention(
+                LABEL_STYLE_DISAMBIGUATE_ONLY, legacy=False
+            )(list(stmt.inner_columns)[1]),
+            "bar",
+        )
+        eq_(stmt.subquery().c.keys(), ["id", "bar"])
+
+        self.assert_compile(
+            select(stmt.subquery()),
+            "SELECT anon_1.id, anon_1.foo FROM "
+            "(SELECT a.id AS id, a.foo AS foo FROM a) AS anon_1",
         )
 
     def test_labeling_for_unnamed_tablename_plus_col(
@@ -389,30 +597,40 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
             "a.lastname AS name FROM a) AS anon_1",
         )
 
-    def test_info(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_info(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         inspect(A).all_orm_descriptors.value.info["some key"] = "some value"
         eq_(
             inspect(A).all_orm_descriptors.value.info,
             {"some key": "some value"},
         )
 
-    def test_set_get(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_set_get(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         a1 = A(value=5)
         eq_(a1._value, 10)
         eq_(a1.value, 5)
 
-    def test_expression(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_expression(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         self.assert_compile(
             A.value.__clause_element__(), "foo(a.value) + bar(a.value)"
         )
 
     def test_expression_isnt_clause_element(self):
         A = self._wrong_expr_fixture()
-
-        from sqlalchemy.sql import coercions, roles
 
         with testing.expect_raises_message(
             exc.InvalidRequestError,
@@ -432,33 +650,49 @@ class PropertyExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
             "AND foo(a.value) + bar(a.value) = :param_1)",
         )
 
-    def test_aliased_expression(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_aliased_expression(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         self.assert_compile(
             aliased(A).value.__clause_element__(),
             "foo(a_1.value) + bar(a_1.value)",
         )
 
-    def test_query(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_query(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter_by(value="foo"),
-            "SELECT a.value AS a_value, a.id AS a_id "
+            "SELECT a.id AS a_id, a.value AS a_value "
             "FROM a WHERE foo(a.value) + bar(a.value) = :param_1",
         )
 
-    def test_aliased_query(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_aliased_query(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         sess = fixture_session()
         self.assert_compile(
             sess.query(aliased(A)).filter_by(value="foo"),
-            "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
+            "SELECT a_1.id AS a_1_id, a_1.value AS a_1_value "
             "FROM a AS a_1 WHERE foo(a_1.value) + bar(a_1.value) = :param_1",
         )
 
-    def test_docstring(self):
-        A = self._fixture()
+    @testing.variation("use_inplace", [True, False])
+    @testing.variation("use_classmethod", [True, False])
+    def test_docstring(self, use_inplace, use_classmethod):
+        A = self._fixture(
+            use_inplace=use_inplace, use_classmethod=use_classmethod
+        )
         eq_(A.value.__doc__, "This is a class-level docstring")
 
         # no docstring here since we get a literal
@@ -831,6 +1065,84 @@ class SynonymOfPropertyTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
 
+class InplaceCreationTest(fixtures.TestBase, AssertsCompiledSQL):
+    """test 'inplace' definitions added for 2.0 to assist with typing
+    limitations.
+
+    """
+
+    __dialect__ = "default"
+
+    def test_property_integration(self, decl_base):
+        class Person(decl_base):
+            __tablename__ = "person"
+            id = Column(Integer, primary_key=True)
+            _name = Column(String)
+
+            @hybrid.hybrid_property
+            def name(self):
+                return self._name
+
+            @name.inplace.setter
+            def _name_setter(self, value):
+                self._name = value.title()
+
+            @name.inplace.expression
+            def _name_expression(self):
+                return func.concat("Hello", self._name)
+
+        p1 = Person(_name="name")
+        eq_(p1.name, "name")
+        p1.name = "new name"
+        eq_(p1.name, "New Name")
+
+        self.assert_compile(Person.name, "concat(:concat_1, person._name)")
+
+    def test_method_integration(self, decl_base):
+        class A(decl_base):
+            __tablename__ = "a"
+            id = Column(Integer, primary_key=True)
+            _value = Column("value", String)
+
+            @hybrid.hybrid_method
+            def value(self, x):
+                return int(self._value) + x
+
+            @value.inplace.expression
+            def _value_expression(cls, value):
+                return func.foo(cls._value, value) + value
+
+        a1 = A(_value="10")
+        eq_(a1.value(5), 15)
+
+        self.assert_compile(A.value(column("q")), "foo(a.value, q) + q")
+
+    def test_property_unit(self):
+        def one():
+            pass
+
+        def two():
+            pass
+
+        def three():
+            pass
+
+        prop = hybrid.hybrid_property(one)
+
+        prop2 = prop.inplace.expression(two)
+
+        prop3 = prop.inplace.setter(three)
+
+        is_(prop, prop2)
+        is_(prop, prop3)
+
+        def four():
+            pass
+
+        prop4 = prop.setter(four)
+        is_not(prop, prop4)
+
+
 class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
 
@@ -891,7 +1203,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
         sess = fixture_session()
         self.assert_compile(
             sess.query(A).filter(A.value(5) == "foo"),
-            "SELECT a.value AS a_value, a.id AS a_id "
+            "SELECT a.id AS a_id, a.value AS a_value "
             "FROM a WHERE foo(a.value, :foo_1) + :foo_2 = :param_1",
         )
 
@@ -901,7 +1213,7 @@ class MethodExpressionTest(fixtures.TestBase, AssertsCompiledSQL):
         a1 = aliased(A)
         self.assert_compile(
             sess.query(a1).filter(a1.value(5) == "foo"),
-            "SELECT a_1.value AS a_1_value, a_1.id AS a_1_id "
+            "SELECT a_1.id AS a_1_id, a_1.value AS a_1_value "
             "FROM a AS a_1 WHERE foo(a_1.value, :foo_1) + :foo_2 = :param_1",
         )
 
@@ -995,15 +1307,43 @@ class BulkUpdateTest(fixtures.DeclarativeMappedTest, AssertsCompiledSQL):
             params={"first_name": "Dr."},
         )
 
-    def test_update_expr(self):
+    @testing.combinations("attr", "str", "kwarg", argnames="keytype")
+    def test_update_expr(self, keytype):
         Person = self.classes.Person
 
-        statement = update(Person).values({Person.name: "Dr. No"})
+        if keytype == "attr":
+            statement = update(Person).values({Person.name: "Dr. No"})
+        elif keytype == "str":
+            statement = update(Person).values({"name": "Dr. No"})
+        elif keytype == "kwarg":
+            statement = update(Person).values(name="Dr. No")
+        else:
+            assert False
 
         self.assert_compile(
             statement,
             "UPDATE person SET first_name=:first_name, last_name=:last_name",
-            params={"first_name": "Dr.", "last_name": "No"},
+            checkparams={"first_name": "Dr.", "last_name": "No"},
+        )
+
+    @testing.combinations("attr", "str", "kwarg", argnames="keytype")
+    def test_insert_expr(self, keytype):
+        Person = self.classes.Person
+
+        if keytype == "attr":
+            statement = insert(Person).values({Person.name: "Dr. No"})
+        elif keytype == "str":
+            statement = insert(Person).values({"name": "Dr. No"})
+        elif keytype == "kwarg":
+            statement = insert(Person).values(name="Dr. No")
+        else:
+            assert False
+
+        self.assert_compile(
+            statement,
+            "INSERT INTO person (first_name, last_name) VALUES "
+            "(:first_name, :last_name)",
+            checkparams={"first_name": "Dr.", "last_name": "No"},
         )
 
     # these tests all run two UPDATES to assert that caching is not
@@ -1209,8 +1549,8 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
         from sqlalchemy import literal
 
         symbols = ("usd", "gbp", "cad", "eur", "aud")
-        currency_lookup = dict(
-            ((currency_from, currency_to), Decimal(str(rate)))
+        currency_lookup = {
+            (currency_from, currency_to): Decimal(str(rate))
             for currency_to, values in zip(
                 symbols,
                 [
@@ -1222,9 +1562,9 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
                 ],
             )
             for currency_from, rate in zip(symbols, values)
-        )
+        }
 
-        class Amount(object):
+        class Amount:
             def __init__(self, amount, currency):
                 self.currency = currency
                 self.amount = amount
@@ -1330,8 +1670,9 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
 
         self.assert_compile(
             query,
-            "SELECT bank_account.balance AS bank_account_balance, "
-            "bank_account.id AS bank_account_id FROM bank_account "
+            "SELECT bank_account.id AS bank_account_id, "
+            "bank_account.balance AS bank_account_balance "
+            "FROM bank_account "
             "WHERE bank_account.balance = :balance_1",
             checkparams={"balance_1": Decimal("9886.110000")},
         )
@@ -1352,8 +1693,8 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         self.assert_compile(
             query,
-            "SELECT bank_account.balance AS bank_account_balance, "
-            "bank_account.id AS bank_account_id "
+            "SELECT bank_account.id AS bank_account_id, "
+            "bank_account.balance AS bank_account_balance "
             "FROM bank_account "
             "WHERE :balance_1 * bank_account.balance > :param_1 "
             "AND :balance_2 * bank_account.balance < :param_2",
@@ -1375,8 +1716,9 @@ class SpecialObjectTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         self.assert_compile(
             query,
-            "SELECT bank_account.balance AS bank_account_balance, "
-            "bank_account.id AS bank_account_id FROM bank_account "
+            "SELECT bank_account.id AS bank_account_id, "
+            "bank_account.balance AS bank_account_balance "
+            "FROM bank_account "
             "WHERE :balance_1 * bank_account.balance > "
             ":param_1 * :balance_2 * bank_account.balance",
             checkparams={

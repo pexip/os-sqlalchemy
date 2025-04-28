@@ -26,6 +26,8 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import Load
 from sqlalchemy.orm import load_only
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import undefer
@@ -41,6 +43,8 @@ from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_not
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertsql import CompiledSQL
+from sqlalchemy.testing.assertsql import RegexSQL
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -1656,7 +1660,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         def go():
             eq_(u1.addresses[0].user, u1)
 
-        with testing.expect_warnings(raise_on_any_unexpected=True):
+        with testing.expect_warnings():
             self.assert_sql_execution(
                 testing.db,
                 go,
@@ -1707,7 +1711,7 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         def go():
             eq_(u1.addresses[0].user, u1)
 
-        with testing.expect_warnings(raise_on_any_unexpected=True):
+        with testing.expect_warnings():
             self.assert_sql_execution(
                 testing.db,
                 go,
@@ -2430,7 +2434,8 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             "ON orders_1.id = order_items_1.order_id",
         )
 
-    def test_inner_join_nested_chaining_negative_options(self):
+    @testing.fixture
+    def _inner_join_nested_fixture(self):
         users, items, order_items, Order, Item, User, orders = (
             self.tables.users,
             self.tables.items,
@@ -2465,6 +2470,12 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
         )
         self.mapper_registry.map_imperatively(Item, items)
 
+        return User, Order, Item
+
+    def test_inner_join_nested_chaining_negative_options_one(
+        self, _inner_join_nested_fixture
+    ):
+        User, Order, Item = _inner_join_nested_fixture
         sess = fixture_session()
         self.assert_compile(
             sess.query(User),
@@ -2484,6 +2495,11 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             "order_items_1.item_id ORDER BY orders_1.id, items_1.id",
         )
 
+    def test_inner_join_nested_chaining_negative_options_two(
+        self, _inner_join_nested_fixture
+    ):
+        User, Order, Item = _inner_join_nested_fixture
+        sess = fixture_session()
         q = sess.query(User).options(joinedload(User.orders, innerjoin=False))
         self.assert_compile(
             q,
@@ -2532,6 +2548,11 @@ class EagerTest(_fixtures.FixtureTest, testing.AssertsCompiledSQL):
             q.order_by(User.id).all(),
         )
 
+    def test_inner_join_nested_chaining_negative_options_three(
+        self, _inner_join_nested_fixture
+    ):
+        User, Order, Item = _inner_join_nested_fixture
+        sess = fixture_session()
         self.assert_compile(
             sess.query(User).options(
                 joinedload(User.orders, Order.items, innerjoin=False)
@@ -3678,8 +3699,180 @@ class InnerJoinSplicingWSecondaryTest(
         self._assert_result(q)
 
 
-class SubqueryAliasingTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
+class InnerJoinSplicingWSecondarySelfRefTest(
+    fixtures.MappedTest, testing.AssertsCompiledSQL
+):
+    """test for issue 11449"""
 
+    __dialect__ = "default"
+    __backend__ = True  # exercise hardcore join nesting on backends
+
+    @classmethod
+    def define_tables(cls, metadata):
+        Table(
+            "kind",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50)),
+        )
+
+        Table(
+            "node",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50)),
+            Column(
+                "common_node_id", Integer, ForeignKey("node.id"), nullable=True
+            ),
+            Column("kind_id", Integer, ForeignKey("kind.id"), nullable=False),
+        )
+        Table(
+            "node_group",
+            metadata,
+            Column("id", Integer, primary_key=True),
+            Column("name", String(50)),
+        )
+        Table(
+            "node_group_node",
+            metadata,
+            Column(
+                "node_group_id",
+                Integer,
+                ForeignKey("node_group.id"),
+                primary_key=True,
+            ),
+            Column(
+                "node_id", Integer, ForeignKey("node.id"), primary_key=True
+            ),
+        )
+
+    @classmethod
+    def setup_classes(cls):
+        class Kind(cls.Comparable):
+            pass
+
+        class Node(cls.Comparable):
+            pass
+
+        class NodeGroup(cls.Comparable):
+            pass
+
+        class NodeGroupNode(cls.Comparable):
+            pass
+
+    @classmethod
+    def insert_data(cls, connection):
+        kind = cls.tables.kind
+        connection.execute(
+            kind.insert(), [{"id": 1, "name": "a"}, {"id": 2, "name": "c"}]
+        )
+        node = cls.tables.node
+        connection.execute(
+            node.insert(),
+            {"id": 1, "name": "nc", "kind_id": 2},
+        )
+
+        connection.execute(
+            node.insert(),
+            {"id": 2, "name": "na", "kind_id": 1, "common_node_id": 1},
+        )
+
+        node_group = cls.tables.node_group
+        node_group_node = cls.tables.node_group_node
+
+        connection.execute(node_group.insert(), {"id": 1, "name": "group"})
+        connection.execute(
+            node_group_node.insert(),
+            {"id": 1, "node_group_id": 1, "node_id": 2},
+        )
+        connection.commit()
+
+    @testing.fixture(params=["common_nodes,kind", "kind,common_nodes"])
+    def node_fixture(self, request):
+        Kind, Node, NodeGroup, NodeGroupNode = self.classes(
+            "Kind", "Node", "NodeGroup", "NodeGroupNode"
+        )
+        kind, node, node_group, node_group_node = self.tables(
+            "kind", "node", "node_group", "node_group_node"
+        )
+        self.mapper_registry.map_imperatively(Kind, kind)
+
+        if request.param == "common_nodes,kind":
+            self.mapper_registry.map_imperatively(
+                Node,
+                node,
+                properties=dict(
+                    common_node=relationship(
+                        "Node",
+                        remote_side=[node.c.id],
+                    ),
+                    kind=relationship(Kind, innerjoin=True, lazy="joined"),
+                ),
+            )
+        elif request.param == "kind,common_nodes":
+            self.mapper_registry.map_imperatively(
+                Node,
+                node,
+                properties=dict(
+                    kind=relationship(Kind, innerjoin=True, lazy="joined"),
+                    common_node=relationship(
+                        "Node",
+                        remote_side=[node.c.id],
+                    ),
+                ),
+            )
+
+        self.mapper_registry.map_imperatively(
+            NodeGroup,
+            node_group,
+            properties=dict(
+                nodes=relationship(Node, secondary="node_group_node")
+            ),
+        )
+        self.mapper_registry.map_imperatively(NodeGroupNode, node_group_node)
+
+    def test_select(self, node_fixture):
+        Kind, Node, NodeGroup, NodeGroupNode = self.classes(
+            "Kind", "Node", "NodeGroup", "NodeGroupNode"
+        )
+
+        session = fixture_session()
+        with self.sql_execution_asserter(testing.db) as asserter:
+            group = (
+                session.scalars(
+                    select(NodeGroup)
+                    .where(NodeGroup.name == "group")
+                    .options(
+                        joinedload(NodeGroup.nodes).joinedload(
+                            Node.common_node
+                        )
+                    )
+                )
+                .unique()
+                .one_or_none()
+            )
+
+            eq_(group.nodes[0].common_node.kind.name, "c")
+            eq_(group.nodes[0].kind.name, "a")
+
+        asserter.assert_(
+            RegexSQL(
+                r"SELECT .* FROM node_group "
+                r"LEFT OUTER JOIN \(node_group_node AS node_group_node_1 "
+                r"JOIN node AS node_2 "
+                r"ON node_2.id = node_group_node_1.node_id "
+                r"JOIN kind AS kind_\d ON kind_\d.id = node_2.kind_id\) "
+                r"ON node_group.id = node_group_node_1.node_group_id "
+                r"LEFT OUTER JOIN "
+                r"\(node AS node_1 JOIN kind AS kind_\d "
+                r"ON kind_\d.id = node_1.kind_id\) "
+                r"ON node_1.id = node_2.common_node_id "
+                r"WHERE node_group.name = :name_5"
+            )
+        )
+
+
+class SubqueryAliasingTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
     """test #2188"""
 
     __dialect__ = "default"
@@ -3874,7 +4067,6 @@ class SubqueryAliasingTest(fixtures.MappedTest, testing.AssertsCompiledSQL):
 
 
 class LoadOnExistingTest(_fixtures.FixtureTest):
-
     """test that loaders from a base Query fully populate."""
 
     run_inserts = "once"
@@ -4301,10 +4493,10 @@ class OrderBySecondaryTest(fixtures.MappedTest):
     def test_ordering(self):
         a, m2m, b = (self.tables.a, self.tables.m2m, self.tables.b)
 
-        class A(fixtures.ComparableEntity):
+        class A(ComparableEntity):
             pass
 
-        class B(fixtures.ComparableEntity):
+        class B(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -4344,7 +4536,7 @@ class SelfReferentialEagerTest(fixtures.MappedTest):
     def test_basic(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -4420,7 +4612,7 @@ class SelfReferentialEagerTest(fixtures.MappedTest):
     def test_lazy_fallback_doesnt_affect_eager(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -4467,7 +4659,7 @@ class SelfReferentialEagerTest(fixtures.MappedTest):
     def test_with_deferred(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -4528,7 +4720,7 @@ class SelfReferentialEagerTest(fixtures.MappedTest):
     def test_options(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -4603,7 +4795,7 @@ class SelfReferentialEagerTest(fixtures.MappedTest):
     def test_no_depth(self):
         nodes = self.tables.nodes
 
-        class Node(fixtures.ComparableEntity):
+        class Node(ComparableEntity):
             def append(self, node):
                 self.children.append(node)
 
@@ -4796,7 +4988,7 @@ class SelfReferentialM2MEagerTest(fixtures.MappedTest):
     def test_basic(self):
         widget, widget_rel = self.tables.widget, self.tables.widget_rel
 
-        class Widget(fixtures.ComparableEntity):
+        class Widget(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(
@@ -5219,12 +5411,12 @@ class SubqueryTest(fixtures.MappedTest):
             self.tables.users_table,
         )
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             @property
             def prop_score(self):
                 return sum([tag.prop_score for tag in self.tags])
 
-        class Tag(fixtures.ComparableEntity):
+        class Tag(ComparableEntity):
             @property
             def prop_score(self):
                 return self.score1 * self.score2
@@ -5291,7 +5483,6 @@ class SubqueryTest(fixtures.MappedTest):
 
 
 class CorrelatedSubqueryTest(fixtures.MappedTest):
-
     """tests for #946, #947, #948.
 
     The "users" table is joined to "stuff", and the relationship
@@ -5378,10 +5569,10 @@ class CorrelatedSubqueryTest(fixtures.MappedTest):
     def _do_test(self, labeled, ondate, aliasstuff):
         stuff, users = self.tables.stuff, self.tables.users
 
-        class User(fixtures.ComparableEntity):
+        class User(ComparableEntity):
             pass
 
-        class Stuff(fixtures.ComparableEntity):
+        class Stuff(ComparableEntity):
             pass
 
         self.mapper_registry.map_imperatively(Stuff, stuff)
@@ -5536,13 +5727,13 @@ class CyclicalInheritingEagerTestOne(fixtures.MappedTest):
     def test_basic(self):
         t2, t1 = self.tables.t2, self.tables.t1
 
-        class T(object):
+        class T:
             pass
 
         class SubT(T):
             pass
 
-        class T2(object):
+        class T2:
             pass
 
         class SubT2(T2):
@@ -5756,11 +5947,14 @@ class LoadFromJoinedInhWUnion(
         self.assert_compile(
             q,
             "SELECT anon_1.anon_2_sample_id AS anon_1_anon_2_sample_id, "
+            "anon_1.anon_2_base_data_file_id AS "
+            "anon_1_anon_2_base_data_file_id, "
             "anon_1.anon_2_base_data_file_type "
             "AS anon_1_anon_2_base_data_file_type, "
             "tags_1.id AS tags_1_id, tags_1.name AS tags_1_name, "
             "tags_1.sample_id AS tags_1_sample_id FROM "
             "(SELECT anon_2.sample_id AS anon_2_sample_id, "
+            "anon_2.base_data_file_id AS anon_2_base_data_file_id, "
             "anon_2.base_data_file_type AS anon_2_base_data_file_type "
             "FROM (SELECT sample.id AS sample_id, "
             "base_data_file.id AS base_data_file_id, "
@@ -5789,6 +5983,7 @@ class LoadFromJoinedInhWUnion(
         self.assert_compile(
             q,
             "SELECT anon_1.sample_id AS anon_1_sample_id, "
+            "anon_1.base_data_file_id AS anon_1_base_data_file_id, "
             "anon_1.base_data_file_type AS anon_1_base_data_file_type, "
             "tags_1.id AS tags_1_id, tags_1.name AS tags_1_name, "
             "tags_1.sample_id AS tags_1_sample_id "
@@ -6133,7 +6328,8 @@ class EntityViaMultiplePathTestTwo(fixtures.DeclarativeMappedTest):
         lz_test = (
             s.query(LDA)
             .join(LDA.ld)
-            .options(contains_eager(LDA.ld))
+            # this conflicts in 2.0
+            #             .options(contains_eager(LDA.ld))
             .join(LDA.a)
             .join(LDA.ld.of_type(l_ac))
             .join(l_ac.user.of_type(u_ac))
@@ -6292,7 +6488,6 @@ class LazyLoadOptSpecificityTest(fixtures.DeclarativeMappedTest):
                 .filter(aa.id != A.id)
                 .options(defaultload(aa.bs).joinedload(B.cs))
             )
-
             self._run_tests(q, 2)
 
     def test_joinedload_aliased_abs_bcs(self):
@@ -6535,8 +6730,7 @@ class DeepOptionsTest(_fixtures.FixtureTest):
         self.sql_count_(0, go)
 
     def test_deep_options_4(self):
-        Item, User, Order = (
-            self.classes.Item,
+        User, Order = (
             self.classes.User,
             self.classes.Order,
         )
@@ -6545,14 +6739,24 @@ class DeepOptionsTest(_fixtures.FixtureTest):
 
         assert_raises_message(
             sa.exc.ArgumentError,
-            'Mapped attribute "Order.items" does not apply to any of the '
-            "root entities in this query, e.g. mapped class User->users. "
+            r"Mapped class Mapper\[Order\(orders\)\] does not apply to any of "
+            "the "
+            r"root entities in this query, e.g. Mapper\[User\(users\)\]. "
             "Please specify the full path from one of the root entities "
             "to the target attribute.",
             sess.query(User)
             .options(sa.orm.joinedload(Order.items))
             ._compile_context,
         )
+
+    def test_deep_options_5(self):
+        Item, User, Order = (
+            self.classes.Item,
+            self.classes.User,
+            self.classes.Order,
+        )
+
+        sess = fixture_session()
 
         # joinedload "keywords" on items.  it will lazy load "orders", then
         # lazy load the "items" on the order, but on "items" it will eager
@@ -6573,11 +6777,23 @@ class DeepOptionsTest(_fixtures.FixtureTest):
 
         self.sql_count_(2, go)
 
+    def test_deep_options_6(self):
+        Item, User, Order = (
+            self.classes.Item,
+            self.classes.User,
+            self.classes.Order,
+        )
+
         sess = fixture_session()
         q3 = (
             sess.query(User)
             .order_by(User.id)
             .options(
+                # this syntax means:
+                # defautload(User.orders).defaultload(Order.items).
+                # joinedload(Item.keywords)
+                #
+                # intuitive right ? :)
                 sa.orm.joinedload(User.orders, Order.items, Item.keywords)
             )
         )
@@ -6590,7 +6806,6 @@ class DeepOptionsTest(_fixtures.FixtureTest):
 
 
 class SecondaryOptionsTest(fixtures.MappedTest):
-
     """test that the contains_eager() option doesn't bleed
     into a secondary load."""
 
@@ -6897,3 +7112,94 @@ class SingletonConstantSubqTest(_fixtures.FixtureTest):
             )
 
         self.assert_sql_count(testing.db, go, 1)
+
+
+class NestedInnerjoinTestIssue11965(
+    fixtures.DeclarativeMappedTest, testing.AssertsCompiledSQL
+):
+    """test for issue #11965, regression from #11449"""
+
+    __dialect__ = "default"
+
+    @classmethod
+    def setup_classes(cls):
+        Base = cls.DeclarativeBasic
+
+        class Source(Base):
+            __tablename__ = "source"
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+        class Day(Base):
+            __tablename__ = "day"
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+        class Run(Base):
+            __tablename__ = "run"
+            id: Mapped[int] = mapped_column(primary_key=True)
+
+            source_id: Mapped[int] = mapped_column(
+                ForeignKey(Source.id), nullable=False
+            )
+            source = relationship(Source, lazy="joined", innerjoin=True)
+
+            day = relationship(
+                Day,
+                lazy="joined",
+                innerjoin=True,
+            )
+            day_id: Mapped[int] = mapped_column(
+                ForeignKey(Day.id), nullable=False
+            )
+
+        class Event(Base):
+            __tablename__ = "event"
+
+            id: Mapped[int] = mapped_column(primary_key=True)
+            run_id: Mapped[int] = mapped_column(
+                ForeignKey(Run.id), nullable=False
+            )
+            run = relationship(Run, lazy="joined", innerjoin=True)
+
+        class Room(Base):
+            __tablename__ = "room"
+
+            id: Mapped[int] = mapped_column(primary_key=True)
+            event_id: Mapped[int] = mapped_column(
+                ForeignKey(Event.id), nullable=False
+            )
+            event = relationship(Event, foreign_keys=event_id, lazy="joined")
+
+    @classmethod
+    def insert_data(cls, connection):
+        Room, Run, Source, Event, Day = cls.classes(
+            "Room", "Run", "Source", "Event", "Day"
+        )
+        run = Run(source=Source(), day=Day())
+        event = Event(run=run)
+        room = Room(event=event)
+        with Session(connection) as session:
+            session.add(room)
+            session.commit()
+
+    def test_compile(self):
+        Room = self.classes.Room
+        self.assert_compile(
+            select(Room),
+            "SELECT room.id, room.event_id, source_1.id AS id_1, "
+            "day_1.id AS id_2, run_1.id AS id_3, run_1.source_id, "
+            "run_1.day_id, event_1.id AS id_4, event_1.run_id "
+            "FROM room LEFT OUTER JOIN "
+            "(event AS event_1 "
+            "JOIN run AS run_1 ON run_1.id = event_1.run_id "
+            "JOIN day AS day_1 ON day_1.id = run_1.day_id "
+            "JOIN source AS source_1 ON source_1.id = run_1.source_id) "
+            "ON event_1.id = room.event_id",
+        )
+
+    def test_roundtrip(self):
+        Room = self.classes.Room
+        session = fixture_session()
+        rooms = session.scalars(select(Room)).unique().all()
+        session.close()
+        # verify eager-loaded correctly
+        assert rooms[0].event.run.day

@@ -31,13 +31,13 @@ from ._poly_fixtures import Paperwork
 from ._poly_fixtures import Person
 
 
-class _PolymorphicTestBase(object):
+class _PolymorphicTestBase:
     __backend__ = True
     __dialect__ = "default_enhanced"
 
     @classmethod
     def setup_mappers(cls):
-        super(_PolymorphicTestBase, cls).setup_mappers()
+        super().setup_mappers()
         global people, engineers, managers, boss
         global companies, paperwork, machines
         people, engineers, managers, boss, companies, paperwork, machines = (
@@ -52,7 +52,7 @@ class _PolymorphicTestBase(object):
 
     @classmethod
     def insert_data(cls, connection):
-        super(_PolymorphicTestBase, cls).insert_data(connection)
+        super().insert_data(connection)
 
         global all_employees, c1_employees, c2_employees
         global c1, c2, e1, e2, e3, b1, m1
@@ -940,7 +940,6 @@ class _PolymorphicTestBase(object):
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*", selectable=None)
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),
@@ -1549,44 +1548,6 @@ class _PolymorphicTestBase(object):
             expected,
         )
 
-    def test_self_referential_two(self):
-
-        sess = fixture_session()
-        palias = aliased(Person)
-        expected = [(m1, e1), (m1, e2), (m1, b1)]
-
-        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
-            eq_(
-                sess.query(Person, palias)
-                .filter(Person.company_id == palias.company_id)
-                .filter(Person.name == "dogbert")
-                .filter(Person.person_id > palias.person_id)
-                .from_self()
-                .order_by(Person.person_id, palias.person_id)
-                .all(),
-                expected,
-            )
-
-    def test_self_referential_two_point_five(self):
-        """Using two aliases, the above case works."""
-        sess = fixture_session()
-        palias = aliased(Person)
-        palias2 = aliased(Person)
-
-        expected = [(m1, e1), (m1, e2), (m1, b1)]
-
-        with testing.expect_deprecated(r"The Query.from_self\(\) method"):
-            eq_(
-                sess.query(palias, palias2)
-                .filter(palias.company_id == palias2.company_id)
-                .filter(palias.name == "dogbert")
-                .filter(palias.person_id > palias2.person_id)
-                .from_self()
-                .order_by(palias.person_id, palias2.person_id)
-                .all(),
-                expected,
-            )
-
     def test_self_referential_two_future(self):
         # TODO: this is the SECOND test *EVER* of an aliased class of
         # an aliased class.
@@ -1616,7 +1577,6 @@ class _PolymorphicTestBase(object):
         )
 
     def test_self_referential_two_point_five_future(self):
-
         # TODO: this is the first test *EVER* of an aliased class of
         # an aliased class.  we should add many more tests for this.
         # new case added in Id810f485c5f7ed971529489b84694e02a3356d6d
@@ -2100,6 +2060,14 @@ class _PolymorphicTestBase(object):
             [(e3.name,)],
         )
 
+    def test_with_polymorphic_named(self):
+        session = fixture_session()
+        poly = with_polymorphic(Person, "*", name="poly_name")
+
+        res = session.execute(select(poly)).mappings()
+        eq_(res.keys(), ["poly_name"])
+        eq_(len(res.all()), 5)
+
 
 class PolymorphicTest(_PolymorphicTestBase, _Polymorphic):
     def test_joined_aliasing_unrelated_subuqery(self):
@@ -2185,7 +2153,6 @@ class PolymorphicTest(_PolymorphicTestBase, _Polymorphic):
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*")
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),
@@ -2216,7 +2183,6 @@ class PolymorphicTest(_PolymorphicTestBase, _Polymorphic):
         )
 
     def test_correlation_w_polymorphic(self):
-
         sess = fixture_session()
 
         p_poly = with_polymorphic(Person, "*")
@@ -2235,7 +2201,6 @@ class PolymorphicTest(_PolymorphicTestBase, _Polymorphic):
         )
 
     def test_correlation_w_polymorphic_flat(self):
-
         sess = fixture_session()
 
         p_poly = with_polymorphic(Person, "*", flat=True)
@@ -2284,7 +2249,6 @@ class PolymorphicPolymorphicTest(
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*")
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),
@@ -2319,7 +2283,14 @@ class PolymorphicPolymorphicTest(
             "anon_1.boss_boss_id AS anon_1_boss_boss_id, "
             "anon_1.boss_golf_swing AS anon_1_boss_golf_swing, "
             "companies.name AS companies_name "
-            "FROM (SELECT people.person_id AS people_person_id, "
+            "FROM companies JOIN "
+            "(people LEFT OUTER JOIN engineers "
+            "ON people.person_id = engineers.person_id "
+            "LEFT OUTER JOIN managers "
+            "ON people.person_id = managers.person_id "
+            "LEFT OUTER JOIN boss ON managers.person_id = boss.boss_id) "
+            "ON companies.company_id = people.company_id, "
+            "(SELECT people.person_id AS people_person_id, "
             "people.company_id AS people_company_id, "
             "people.name AS people_name, people.type AS people_type, "
             "engineers.person_id AS engineers_person_id, "
@@ -2335,14 +2306,7 @@ class PolymorphicPolymorphicTest(
             "ON people.person_id = engineers.person_id "
             "LEFT OUTER JOIN managers "
             "ON people.person_id = managers.person_id LEFT OUTER JOIN boss "
-            "ON managers.person_id = boss.boss_id) AS anon_1, "
-            "companies JOIN "
-            "(people LEFT OUTER JOIN engineers "
-            "ON people.person_id = engineers.person_id "
-            "LEFT OUTER JOIN managers "
-            "ON people.person_id = managers.person_id "
-            "LEFT OUTER JOIN boss ON managers.person_id = boss.boss_id) "
-            "ON companies.company_id = people.company_id "
+            "ON managers.person_id = boss.boss_id) AS anon_1 "
             "WHERE anon_1.people_name = :people_name_1 "
             "ORDER BY anon_1.people_person_id",
         )
@@ -2403,7 +2367,6 @@ class PolymorphicUnionsTest(_PolymorphicTestBase, _PolymorphicUnions):
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*")
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),
@@ -2510,7 +2473,6 @@ class PolymorphicAliasedJoinsTest(
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*")
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),
@@ -2531,7 +2493,6 @@ class PolymorphicJoinsTest(_PolymorphicTestBase, _PolymorphicJoins):
         sess = fixture_session()
 
         def go():
-
             wp = with_polymorphic(Person, "*")
             eq_(
                 sess.query(wp).order_by(wp.person_id).all(),

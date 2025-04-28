@@ -35,14 +35,9 @@ directly to :func:`~sqlalchemy.create_engine` as keyword arguments:
 ``pool_size``, ``max_overflow``, ``pool_recycle`` and
 ``pool_timeout``.  For example::
 
-  engine = create_engine("postgresql://me@localhost/mydb", pool_size=20, max_overflow=0)
-
-In the case of SQLite, the :class:`.SingletonThreadPool` or
-:class:`.NullPool` are selected by the dialect to provide
-greater compatibility with SQLite's threading and locking
-model, as well as to provide a reasonable default behavior
-to SQLite "memory" databases, which maintain their entire
-dataset within the scope of a single connection.
+    engine = create_engine(
+        "postgresql+psycopg2://me@localhost/mydb", pool_size=20, max_overflow=0
+    )
 
 All SQLAlchemy pool implementations have in common
 that none of them "pre create" connections - all implementations wait
@@ -55,6 +50,13 @@ queued up - the pool would only grow to that size if the application
 actually used five connections concurrently, in which case the usage of a
 small pool is an entirely appropriate default behavior.
 
+.. note:: The :class:`.QueuePool` class is **not compatible with asyncio**.
+   When using :class:`_asyncio.create_async_engine` to create an instance of
+   :class:`.AsyncEngine`, the :class:`_pool.AsyncAdaptedQueuePool` class,
+   which makes use of an asyncio-compatible queue implementation, is used
+   instead.
+
+
 .. _pool_switching:
 
 Switching Pool Implementations
@@ -63,14 +65,9 @@ Switching Pool Implementations
 The usual way to use a different kind of pool with :func:`_sa.create_engine`
 is to use the ``poolclass`` argument.   This argument accepts a class
 imported from the ``sqlalchemy.pool`` module, and handles the details
-of building the pool for you.   Common options include specifying
-:class:`.QueuePool` with SQLite::
-
-    from sqlalchemy.pool import QueuePool
-
-    engine = create_engine("sqlite:///file.db", poolclass=QueuePool)
-
-Disabling pooling using :class:`.NullPool`::
+of building the pool for you.   A common use case here is when
+connection pooling is to be disabled, which can be achieved by using
+the :class:`.NullPool` implementation::
 
     from sqlalchemy.pool import NullPool
 
@@ -140,6 +137,7 @@ connection, which includes not just uncommitted data but table and row locks as
 well. For most DBAPIs, the call to ``rollback()`` is inexpensive, and if the
 DBAPI has already completed a transaction, the method should be a no-op.
 
+
 Disabling Reset on Return for non-transactional connections
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -153,7 +151,7 @@ performance reasons. This can be affected by using the
 is also available from :func:`_sa.create_engine` as
 :paramref:`_sa.create_engine.pool_reset_on_return`, passing a value of ``None``.
 This is illustrated in the example below, in conjunction with the
-:paramref:`_sa.create_engine.isolation_level` parameter setting of
+:paramref:`.create_engine.isolation_level` parameter setting of
 ``AUTOCOMMIT``::
 
     non_acid_engine = create_engine(
@@ -165,6 +163,7 @@ This is illustrated in the example below, in conjunction with the
 The above engine won't actually perform ROLLBACK when connections are returned
 to the pool; since AUTOCOMMIT is enabled, the driver will also not perform
 any BEGIN operation.
+
 
 Custom Reset-on-Return Schemes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -188,11 +187,11 @@ and PostgreSQL, which has a well-documented series of commands including
 
 The following example illustrates how to replace reset on return with the
 Microsoft SQL Server ``sp_reset_connection`` stored procedure, using the
-:meth:`.PoolEvents.reset` event hook (**requires SQLAlchemy 1.4.43 or greater**).
-The :paramref:`_sa.create_engine.pool_reset_on_return` parameter is set to
-``None`` so that the custom scheme can replace the default behavior completely.
-The custom hook implementation calls ``.rollback()`` in any case, as it's
-usually important that the DBAPI's own tracking of commit/rollback will remain
+:meth:`.PoolEvents.reset` event hook. The
+:paramref:`_sa.create_engine.pool_reset_on_return` parameter is set to ``None``
+so that the custom scheme can replace the default behavior completely. The
+custom hook implementation calls ``.rollback()`` in any case, as it's usually
+important that the DBAPI's own tracking of commit/rollback will remain
 consistent with the state of the transaction::
 
     from sqlalchemy import create_engine
@@ -207,20 +206,26 @@ consistent with the state of the transaction::
 
     @event.listens_for(mssql_engine, "reset")
     def _reset_mssql(dbapi_connection, connection_record, reset_state):
-        dbapi_connection.execute("{call sys.sp_reset_connection}")
+        if not reset_state.terminate_only:
+            dbapi_connection.execute("{call sys.sp_reset_connection}")
 
         # so that the DBAPI itself knows that the connection has been
         # reset
         dbapi_connection.rollback()
 
-.. versionchanged:: 1.4.43  Ensured the :meth:`.PoolEvents.reset` event
+.. versionchanged:: 2.0.0b3  Added additional state arguments to
+   the :meth:`.PoolEvents.reset` event and additionally ensured the event
    is invoked for all "reset" occurrences, so that it's appropriate
    as a place for custom "reset" handlers.   Previous schemes which
    use the :meth:`.PoolEvents.checkin` handler remain usable as well.
 
 .. seealso::
+
     * :ref:`mssql_reset_on_return` - in the :ref:`mssql_toplevel` documentation
     * :ref:`postgresql_reset_on_return` in the :ref:`postgresql_toplevel` documentation
+
+
+
 
 Logging reset-on-return events
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -269,15 +274,36 @@ Disconnect Handling - Pessimistic
 
 The pessimistic approach refers to emitting a test statement on the SQL
 connection at the start of each connection pool checkout, to test
-that the database connection is still viable.   Typically, this
-is a simple statement like "SELECT 1", but may also make use of some
-DBAPI-specific method to test the connection for liveness.
+that the database connection is still viable.   The implementation is
+dialect-specific, and makes use of either a DBAPI-specific ping method,
+or by using a simple SQL statement like "SELECT 1", in order to test the
+connection for liveness.
 
 The approach adds a small bit of overhead to the connection checkout process,
 however is otherwise the most simple and reliable approach to completely
 eliminating database errors due to stale pooled connections.   The calling
 application does not need to be concerned about organizing operations
 to be able to recover from stale connections checked out from the pool.
+
+Pessimistic testing of connections upon checkout is achievable by
+using the :paramref:`_pool.Pool.pre_ping` argument, available from :func:`_sa.create_engine`
+via the :paramref:`_sa.create_engine.pool_pre_ping` argument::
+
+    engine = create_engine("mysql+pymysql://user:pw@host/db", pool_pre_ping=True)
+
+The "pre ping" feature operates on a per-dialect basis either by invoking a
+DBAPI-specific "ping" method, or if not available will emit SQL equivalent to
+"SELECT 1", catching any errors and detecting the error as a "disconnect"
+situation. If the ping / error check determines that the connection is not
+usable, the connection will be immediately recycled, and all other pooled
+connections older than the current time are invalidated, so that the next time
+they are checked out, they will also be recycled before use.
+
+If the database is still not available when "pre ping" runs, then the initial
+connect will fail and the error for failure to connect will be propagated
+normally.  In the uncommon situation that the database is available for
+connections, but is not able to respond to a "ping", the "pre_ping" will try up
+to three times before giving up, propagating the database error last received.
 
 It is critical to note that the pre-ping approach **does not accommodate for
 connections dropped in the middle of transactions or other SQL operations**. If
@@ -293,33 +319,9 @@ configured using DBAPI-level autocommit connections, as described at
 mid-operation using events.  See the section :ref:`faq_execute_retry` for
 an example.
 
-Pessimistic testing of connections upon checkout is achievable by
-using the :paramref:`_pool.Pool.pre_ping` argument, available from :func:`_sa.create_engine`
-via the :paramref:`_sa.create_engine.pool_pre_ping` argument::
-
-    engine = create_engine("mysql+pymysql://user:pw@host/db", pool_pre_ping=True)
-
-The "pre ping" feature will normally emit SQL equivalent to "SELECT 1" each time a
-connection is checked out from the pool; if an error is raised that is detected
-as a "disconnect" situation, the connection will be immediately recycled, and
-all other pooled connections older than the current time are invalidated, so
-that the next time they are checked out, they will also be recycled before use.
-
-If the database is still not available when "pre ping" runs, then the initial
-connect will fail and the error for failure to connect will be propagated
-normally.  In the uncommon situation that the database is available for
-connections, but is not able to respond to a "ping", the "pre_ping" will try up
-to three times before giving up, propagating the database error last received.
-
-.. note::
-
-    the "SELECT 1" emitted by "pre-ping" is invoked within the scope
-    of the connection pool / dialect, using a very short codepath for minimal
-    Python latency.   As such, this statement is **not logged in the SQL
-    echo output**, and will not show up in SQLAlchemy's engine logging.
-
-.. versionadded:: 1.2 Added "pre-ping" capability to the :class:`_pool.Pool`
-   class.
+For dialects that make use of "SELECT 1" and catch errors in order to detect
+disconnects, the disconnection test may be augmented for new backend-specific
+error messages using the :meth:`_events.DialectEvents.handle_error` hook.
 
 .. _pool_disconnects_pessimistic_custom:
 
@@ -343,14 +345,10 @@ behaviors are needed::
     @event.listens_for(some_engine, "engine_connect")
     def ping_connection(connection, branch):
         if branch:
-            # "branch" refers to a sub-connection of a connection,
-            # we don't want to bother pinging on these.
+            # this parameter is always False as of SQLAlchemy 2.0,
+            # but is still accepted by the event hook.  In 1.x versions
+            # of SQLAlchemy, "branched" connections should be skipped.
             return
-
-        # turn off "close with result".  This flag is only used with
-        # "connectionless" execution, otherwise will be False in any case
-        save_should_close_with_result = connection.should_close_with_result
-        connection.should_close_with_result = False
 
         try:
             # run a SELECT 1.   use a core select() so that
@@ -371,9 +369,6 @@ behaviors are needed::
                 connection.scalar(select(1))
             else:
                 raise
-        finally:
-            # restore "close with result"
-            connection.should_close_with_result = save_should_close_with_result
 
 The above recipe has the advantage that we are making use of SQLAlchemy's
 facilities for detecting those DBAPI exceptions that are known to indicate
@@ -431,6 +426,7 @@ correspond to a single request failing with a 500 error, then the web applicatio
 continuing normally beyond that.   Hence the approach is "optimistic" in that frequent
 database restarts are not anticipated.
 
+
 .. _pool_setting_recycle:
 
 Setting Pool Recycle
@@ -444,7 +440,7 @@ period of time::
 
     from sqlalchemy import create_engine
 
-    e = create_engine("mysql://scott:tiger@localhost/test", pool_recycle=3600)
+    e = create_engine("mysql+mysqldb://scott:tiger@localhost/test", pool_recycle=3600)
 
 Above, any DBAPI connection that has been open for more than one hour will be invalidated and replaced,
 upon next checkout.   Note that the invalidation **only** occurs during checkout - not on
@@ -494,6 +490,56 @@ a DBAPI connection might be invalidated include:
 All invalidations which occur will invoke the :meth:`_events.PoolEvents.invalidate`
 event.
 
+.. _pool_new_disconnect_codes:
+
+Supporting new database error codes for disconnect scenarios
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+SQLAlchemy dialects each include a routine called ``is_disconnect()`` that is
+invoked whenever a DBAPI exception is encountered. The DBAPI exception object
+is passed to this method, where dialect-specific heuristics will then determine
+if the error code received indicates that the database connection has been
+"disconnected", or is in an otherwise unusable state which indicates it should
+be recycled. The heuristics applied here may be customized using the
+:meth:`_events.DialectEvents.handle_error` event hook, which is typically
+established via the owning :class:`_engine.Engine` object. Using this hook, all
+errors which occur are delivered passing along a contextual object known as
+:class:`.ExceptionContext`. Custom event hooks may control whether or not a
+particular error should be considered a "disconnect" situation or not, as well
+as if this disconnect should cause the entire connection pool to be invalidated
+or not.
+
+For example, to add support to consider the Oracle Database driver error codes
+``DPY-1001`` and ``DPY-4011`` to be handled as disconnect codes, apply an event
+handler to the engine after creation::
+
+    import re
+
+    from sqlalchemy import create_engine
+
+    engine = create_engine(
+        "oracle+oracledb://scott:tiger@localhost:1521?service_name=freepdb1"
+    )
+
+
+    @event.listens_for(engine, "handle_error")
+    def handle_exception(context: ExceptionContext) -> None:
+        if not context.is_disconnect and re.match(
+            r"^(?:DPY-1001|DPY-4011)", str(context.original_exception)
+        ):
+            context.is_disconnect = True
+
+        return None
+
+The above error processing function will be invoked for all Oracle Database
+errors raised, including those caught when using the :ref:`pool pre ping
+<pool_disconnects_pessimistic>` feature for those backends that rely upon
+disconnect error handling (new in 2.0).
+
+.. seealso::
+
+    :meth:`_events.DialectEvents.handle_error`
+
 .. _pool_use_lifo:
 
 Using FIFO vs. LIFO
@@ -512,7 +558,7 @@ close these connections out.   The difference between FIFO and LIFO is
 basically whether or not its desirable for the pool to keep a full set of
 connections ready to go even during idle periods::
 
-    engine = create_engine("postgreql://", pool_use_lifo=True, pool_pre_ping=True)
+    engine = create_engine("postgresql://", pool_use_lifo=True, pool_pre_ping=True)
 
 Above, we also make use of the :paramref:`_sa.create_engine.pool_pre_ping` flag
 so that connections which are closed from the server side are gracefully
@@ -547,7 +593,7 @@ typically the most common).
 The SQLAlchemy :class:`_engine.Engine` object refers to a connection pool of existing
 database connections.  So when this object is replicated to a child process,
 the goal is to ensure that no database connections are carried over.  There
-are three general approaches to this:
+are four general approaches to this:
 
 1. Disable pooling using :class:`.NullPool`.  This is the most simplistic,
    one shot system that prevents the :class:`_engine.Engine` from using any connection
@@ -555,7 +601,7 @@ are three general approaches to this:
 
     from sqlalchemy.pool import NullPool
 
-    engine = create_engine("mysql://user:pass@host/dbname", poolclass=NullPool)
+    engine = create_engine("mysql+mysqldb://user:pass@host/dbname", poolclass=NullPool)
 
 2. Call :meth:`_engine.Engine.dispose` on any given :class:`_engine.Engine`,
    passing the :paramref:`.Engine.dispose.close` parameter with a value of
@@ -587,18 +633,6 @@ are three general approaches to this:
       parameter to allow the replacement of a connection pool in a child
       process without interfering with the connections used by the parent
       process.
-
-      To achieve the same "dispose without close" behavior prior to version
-      1.4.33 (all SQLAlchemy versions), instead of calling
-      :meth:`.Engine.dispose`, replace the :class:`.Pool` directly using
-      :meth:`.Pool.recreate`::
-
-          engine.pool = engine.pool.recreate()
-
-      The above code is equivalent to ``engine.dispose(close=False)`` with the
-      exception that the :meth:`.ConnectionEvents.engine_disposed` end-user
-      event hook is not invoked; assuming end-user code is not making use of
-      this hook, this workaround has no other negative effects.
 
 3. Call :meth:`.Engine.dispose` **directly before** the child process is
    created.  This will also cause the child process to start with a new
@@ -658,6 +692,37 @@ ORM :class:`_orm.Session` object that's begun a transaction and references
 active :class:`_orm.Connection` instances; again prefer to create new
 :class:`_orm.Session` objects in new processes.
 
+Using a pool instance directly
+------------------------------
+
+A pool implementation can be used directly without an engine. This could be used
+in applications that just wish to use the pool behavior without all other
+SQLAlchemy features.
+In the example below the default pool for the ``MySQLdb`` dialect is obtained using
+:func:`_sa.create_pool_from_url`::
+
+    from sqlalchemy import create_pool_from_url
+
+    my_pool = create_pool_from_url(
+        "mysql+mysqldb://", max_overflow=5, pool_size=5, pre_ping=True
+    )
+
+    con = my_pool.connect()
+    # use the connection
+    ...
+    # then close it
+    con.close()
+
+If the type of pool to create is not specified, the default one for the dialect
+will be used. To specify it directly the ``poolclass`` argument can be used,
+like in the following example::
+
+    from sqlalchemy import create_pool_from_url
+    from sqlalchemy import NullPool
+
+    my_pool = create_pool_from_url("mysql+mysqldb://", poolclass=NullPool)
+
+.. _pool_api:
 
 API Documentation - Available Pool Implementations
 --------------------------------------------------
@@ -666,6 +731,9 @@ API Documentation - Available Pool Implementations
     :members:
 
 .. autoclass:: sqlalchemy.pool.QueuePool
+    :members:
+
+.. autoclass:: sqlalchemy.pool.AsyncAdaptedQueuePool
     :members:
 
 .. autoclass:: SingletonThreadPool
@@ -680,11 +748,17 @@ API Documentation - Available Pool Implementations
 .. autoclass:: StaticPool
     :members:
 
-.. autoclass:: _ConnectionFairy
+.. autoclass:: ManagesConnection
     :members:
 
-    .. autoattribute:: _connection_record
+.. autoclass:: ConnectionPoolEntry
+    :members:
+    :inherited-members:
+
+.. autoclass:: PoolProxiedConnection
+    :members:
+    :inherited-members:
+
+.. autoclass:: _ConnectionFairy
 
 .. autoclass:: _ConnectionRecord
-    :members:
-

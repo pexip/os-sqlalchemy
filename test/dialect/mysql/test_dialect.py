@@ -1,5 +1,3 @@
-# coding: utf-8
-
 import datetime
 
 from sqlalchemy import bindparam
@@ -25,7 +23,6 @@ from sqlalchemy.testing import is_
 from sqlalchemy.testing import mock
 from sqlalchemy.testing.assertions import AssertsCompiledSQL
 from .test_compiler import ReservedWordFixture
-from ...engine import test_deprecations
 
 
 class BackendDialectTest(
@@ -85,7 +82,6 @@ class BackendDialectTest(
         )
 
     def test_no_show_variables(self):
-
         engine = engines.testing_engine()
 
         def my_execute(self, statement, *args, **kw):
@@ -104,7 +100,6 @@ class BackendDialectTest(
                 engine.connect()
 
     def test_no_default_isolation_level(self):
-
         engine = engines.testing_engine()
 
         real_isolation_level = testing.db.dialect.get_isolation_level
@@ -170,6 +165,7 @@ class BackendDialectTest(
             isolation_level="AUTOCOMMIT"
         )
         assert c.exec_driver_sql("SELECT @@autocommit;").scalar()
+        c.rollback()
 
         c = c.execution_options(isolation_level="READ COMMITTED")
         assert not c.exec_driver_sql("SELECT @@autocommit;").scalar()
@@ -223,11 +219,7 @@ class DialectTest(fixtures.TestBase):
         eq_(dialect.is_disconnect(error, None, None), is_disconnect)
 
     @testing.combinations(
-        ("mysqldb"),
-        ("pymysql"),
-        ("oursql"),
-        id_="s",
-        argnames="driver_name",
+        ("mysqldb"), ("pymysql"), id_="s", argnames="driver_name"
     )
     def test_ssl_arguments(self, driver_name):
         url = (
@@ -255,7 +247,6 @@ class DialectTest(fixtures.TestBase):
             expected["ssl"]["check_hostname"] = False
 
         kwarg = dialect.create_connect_args(make_url(url))[1]
-        # args that differ between oursql and others
         for k in ("use_unicode", "found_rows", "client_flag"):
             kwarg.pop(k, None)
         eq_(kwarg, expected)
@@ -266,21 +257,40 @@ class DialectTest(fixtures.TestBase):
         ("read_timeout", 30),
         ("write_timeout", 30),
         ("client_flag", 1234),
-        ("local_infile", 1234),
+        ("local_infile", 1),
+        ("local_infile", True),
+        ("local_infile", False),
         ("use_unicode", False),
         ("charset", "hello"),
+        ("unix_socket", "somesocket"),
+        argnames="kwarg, value",
     )
-    def test_normal_arguments_mysqldb(self, kwarg, value):
-        from sqlalchemy.dialects.mysql import mysqldb
+    @testing.combinations(
+        ("mysql+mysqldb", ()),
+        ("mysql+mariadbconnector", {"use_unicode", "charset"}),
+        ("mariadb+mariadbconnector", {"use_unicode", "charset"}),
+        ("mysql+pymysql", ()),
+        (
+            "mysql+mysqlconnector",
+            {"read_timeout", "write_timeout", "local_infile"},
+        ),
+        argnames="dialect_name,skip",
+    )
+    def test_query_arguments(self, kwarg, value, dialect_name, skip):
 
-        dialect = mysqldb.dialect()
-        connect_args = dialect.create_connect_args(
-            make_url(
-                "mysql://scott:tiger@localhost:3306/test"
-                "?%s=%s" % (kwarg, value)
-            )
+        if kwarg in skip:
+            return
+
+        url_value = {True: "true", False: "false"}.get(value, value)
+
+        url = make_url(
+            f"{dialect_name}://scott:tiger@"
+            f"localhost:3306/test?{kwarg}={url_value}"
         )
 
+        dialect = url.get_dialect()()
+
+        connect_args = dialect.create_connect_args(url)
         eq_(connect_args[1][kwarg], value)
 
     def test_mysqlconnector_buffered_arg(self):
@@ -292,15 +302,19 @@ class DialectTest(fixtures.TestBase):
         )[1]
         eq_(kw["buffered"], True)
 
-        kw = dialect.create_connect_args(
-            make_url("mysql+mysqlconnector://u:p@host/db?buffered=false")
-        )[1]
-        eq_(kw["buffered"], False)
+        # this is turned off for now due to
+        # https://bugs.mysql.com/bug.php?id=117548
+        if dialect.supports_server_side_cursors:
+            kw = dialect.create_connect_args(
+                make_url("mysql+mysqlconnector://u:p@host/db?buffered=false")
+            )[1]
+            eq_(kw["buffered"], False)
 
-        kw = dialect.create_connect_args(
-            make_url("mysql+mysqlconnector://u:p@host/db")
-        )[1]
-        eq_(kw["buffered"], True)
+            kw = dialect.create_connect_args(
+                make_url("mysql+mysqlconnector://u:p@host/db")
+            )[1]
+            # defaults to False as of 2.0.39
+            eq_(kw.get("buffered"), None)
 
     def test_mysqlconnector_raise_on_warnings_arg(self):
         from sqlalchemy.dialects.mysql import mysqlconnector
@@ -329,14 +343,16 @@ class DialectTest(fixtures.TestBase):
         [
             "mysql+mysqldb",
             "mysql+pymysql",
+            "mysql+mariadbconnector",
             "mariadb+mysqldb",
             "mariadb+pymysql",
+            "mariadb+mariadbconnector",
         ]
     )
     def test_random_arg(self):
         dialect = testing.db.dialect
         kw = dialect.create_connect_args(
-            make_url("mysql://u:p@host/db?foo=true")
+            make_url("mysql+mysqldb://u:p@host/db?foo=true")
         )[1]
         eq_(kw["foo"], "true")
 
@@ -353,7 +369,6 @@ class DialectTest(fixtures.TestBase):
         ("utf8",),
     )
     def test_special_encodings(self, enc):
-
         eng = engines.testing_engine(
             options={"connect_args": {"charset": enc, "use_unicode": 0}}
         )
@@ -367,7 +382,6 @@ class DialectTest(fixtures.TestBase):
 
     @testing.only_on("mariadb+mariadbconnector")
     def test_mariadb_connector_special_encodings(self):
-
         eng = engines.testing_engine()
         conn = eng.connect()
 
@@ -377,7 +391,7 @@ class DialectTest(fixtures.TestBase):
 
 class ParseVersionTest(fixtures.TestBase):
     def test_mariadb_madness(self):
-        mysql_dialect = make_url("mysql://").get_dialect()()
+        mysql_dialect = make_url("mysql+mysqldb://").get_dialect()()
 
         is_(mysql_dialect.is_mariadb, False)
 
@@ -617,15 +631,3 @@ class ExecutionTest(fixtures.TestBase):
     def test_sysdate(self, connection):
         d = connection.execute(func.sysdate()).scalar()
         assert isinstance(d, datetime.datetime)
-
-
-class AutocommitTextTest(
-    test_deprecations.AutocommitKeywordFixture, fixtures.TestBase
-):
-    __only_on__ = "mysql", "mariadb"
-
-    def test_load_data(self):
-        self._test_keyword("LOAD DATA STUFF")
-
-    def test_replace(self):
-        self._test_keyword("REPLACE THING")

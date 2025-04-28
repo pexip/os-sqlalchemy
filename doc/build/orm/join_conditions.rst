@@ -20,19 +20,21 @@ Consider a ``Customer`` class that contains two foreign keys to an ``Address``
 class::
 
     from sqlalchemy import Integer, ForeignKey, String, Column
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
     from sqlalchemy.orm import relationship
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Customer(Base):
         __tablename__ = "customer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String)
 
-        billing_address_id = Column(Integer, ForeignKey("address.id"))
-        shipping_address_id = Column(Integer, ForeignKey("address.id"))
+        billing_address_id = mapped_column(Integer, ForeignKey("address.id"))
+        shipping_address_id = mapped_column(Integer, ForeignKey("address.id"))
 
         billing_address = relationship("Address")
         shipping_address = relationship("Address")
@@ -40,13 +42,15 @@ class::
 
     class Address(Base):
         __tablename__ = "address"
-        id = Column(Integer, primary_key=True)
-        street = Column(String)
-        city = Column(String)
-        state = Column(String)
-        zip = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        street = mapped_column(String)
+        city = mapped_column(String)
+        state = mapped_column(String)
+        zip = mapped_column(String)
 
-The above mapping, when we attempt to use it, will produce the error::
+The above mapping, when we attempt to use it, will produce the error:
+
+.. sourcecode:: text
 
     sqlalchemy.exc.AmbiguousForeignKeysError: Could not determine join
     condition between parent/child tables on relationship
@@ -67,11 +71,11 @@ the appropriate form is as follows::
 
     class Customer(Base):
         __tablename__ = "customer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String)
 
-        billing_address_id = Column(Integer, ForeignKey("address.id"))
-        shipping_address_id = Column(Integer, ForeignKey("address.id"))
+        billing_address_id = mapped_column(Integer, ForeignKey("address.id"))
+        shipping_address_id = mapped_column(Integer, ForeignKey("address.id"))
 
         billing_address = relationship("Address", foreign_keys=[billing_address_id])
         shipping_address = relationship("Address", foreign_keys=[shipping_address_id])
@@ -124,31 +128,33 @@ create a relationship ``boston_addresses`` which will only
 load those ``Address`` objects which specify a city of "Boston"::
 
     from sqlalchemy import Integer, ForeignKey, String, Column
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
     from sqlalchemy.orm import relationship
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
-        name = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String)
         boston_addresses = relationship(
             "Address",
-            primaryjoin="and_(User.id==Address.user_id, " "Address.city=='Boston')",
+            primaryjoin="and_(User.id==Address.user_id, Address.city=='Boston')",
         )
 
 
     class Address(Base):
         __tablename__ = "address"
-        id = Column(Integer, primary_key=True)
-        user_id = Column(Integer, ForeignKey("user.id"))
+        id = mapped_column(Integer, primary_key=True)
+        user_id = mapped_column(Integer, ForeignKey("user.id"))
 
-        street = Column(String)
-        city = Column(String)
-        state = Column(String)
-        zip = Column(String)
+        street = mapped_column(String)
+        city = mapped_column(String)
+        state = mapped_column(String)
+        zip = mapped_column(String)
 
 Within this string SQL expression, we made use of the :func:`.and_` conjunction
 construct to establish two distinct predicates for the join condition - joining
@@ -171,7 +177,7 @@ is generally only significant when SQLAlchemy is rendering SQL in
 order to load or represent this relationship. That is, it's used in
 the SQL statement that's emitted in order to perform a per-attribute
 lazy load, or when a join is constructed at query time, such as via
-:meth:`_query.Query.join`, or via the eager "joined" or "subquery" styles of
+:meth:`Select.join`, or via the eager "joined" or "subquery" styles of
 loading.   When in-memory objects are being manipulated, we can place
 any ``Address`` object we'd like into the ``boston_addresses``
 collection, regardless of what the value of the ``.city`` attribute
@@ -209,17 +215,19 @@ type of the other::
     from sqlalchemy.orm import relationship
     from sqlalchemy.dialects.postgresql import INET
 
-    from sqlalchemy.ext.declarative import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class HostEntry(Base):
         __tablename__ = "host_entry"
 
-        id = Column(Integer, primary_key=True)
-        ip_address = Column(INET)
-        content = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        ip_address = mapped_column(INET)
+        content = mapped_column(String(50))
 
         # relationship() using explicit foreign_keys, remote_side
         parent_host = relationship(
@@ -229,7 +237,9 @@ type of the other::
             remote_side=ip_address,
         )
 
-The above relationship will produce a join like::
+The above relationship will produce a join like:
+
+.. sourcecode:: sql
 
     SELECT host_entry.id, host_entry.ip_address, host_entry.content
     FROM host_entry JOIN host_entry AS host_entry_1
@@ -252,9 +262,9 @@ SQL expressions::
     class HostEntry(Base):
         __tablename__ = "host_entry"
 
-        id = Column(Integer, primary_key=True)
-        ip_address = Column(INET)
-        content = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        ip_address = mapped_column(INET)
+        content = mapped_column(String(50))
 
         # relationship() using explicit foreign() and remote() annotations
         # in lieu of separate arguments
@@ -282,12 +292,12 @@ a :func:`_orm.relationship`::
     class IPA(Base):
         __tablename__ = "ip_address"
 
-        id = Column(Integer, primary_key=True)
-        v4address = Column(INET)
+        id = mapped_column(Integer, primary_key=True)
+        v4address = mapped_column(INET)
 
         network = relationship(
             "Network",
-            primaryjoin="IPA.v4address.bool_op('<<')" "(foreign(Network.v4representation))",
+            primaryjoin="IPA.v4address.bool_op('<<')(foreign(Network.v4representation))",
             viewonly=True,
         )
 
@@ -295,14 +305,16 @@ a :func:`_orm.relationship`::
     class Network(Base):
         __tablename__ = "network"
 
-        id = Column(Integer, primary_key=True)
-        v4representation = Column(CIDR)
+        id = mapped_column(Integer, primary_key=True)
+        v4representation = mapped_column(CIDR)
 
 Above, a query such as::
 
-    session.query(IPA).join(IPA.network)
+    select(IPA).join(IPA.network)
 
-Will render as::
+Will render as:
+
+.. sourcecode:: sql
 
     SELECT ip_address.id AS ip_address_id, ip_address.v4address AS ip_address_v4address
     FROM ip_address JOIN network ON ip_address.v4address << network.v4representation
@@ -329,8 +341,8 @@ two expressions.  The below example illustrates this with the
 
     class Polygon(Base):
         __tablename__ = "polygon"
-        id = Column(Integer, primary_key=True)
-        geom = Column(Geometry("POLYGON", srid=4326))
+        id = mapped_column(Integer, primary_key=True)
+        geom = mapped_column(Geometry("POLYGON", srid=4326))
         points = relationship(
             "Point",
             primaryjoin="func.ST_Contains(foreign(Polygon.geom), Point.geom).as_comparison(1, 2)",
@@ -340,8 +352,8 @@ two expressions.  The below example illustrates this with the
 
     class Point(Base):
         __tablename__ = "point"
-        id = Column(Integer, primary_key=True)
-        geom = Column(Geometry("POINT", srid=4326))
+        id = mapped_column(Integer, primary_key=True)
+        geom = mapped_column(Geometry("POINT", srid=4326))
 
 Above, the :meth:`.FunctionElement.as_comparison` indicates that the
 ``func.ST_Contains()`` SQL function is comparing the ``Polygon.geom`` and
@@ -369,15 +381,15 @@ for both; then to make ``Article`` refer to ``Writer`` as well,
     class Magazine(Base):
         __tablename__ = "magazine"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 
     class Article(Base):
         __tablename__ = "article"
 
-        article_id = Column(Integer)
-        magazine_id = Column(ForeignKey("magazine.id"))
-        writer_id = Column()
+        article_id = mapped_column(Integer)
+        magazine_id = mapped_column(ForeignKey("magazine.id"))
+        writer_id = mapped_column()
 
         magazine = relationship("Magazine")
         writer = relationship("Writer")
@@ -393,11 +405,13 @@ for both; then to make ``Article`` refer to ``Writer`` as well,
     class Writer(Base):
         __tablename__ = "writer"
 
-        id = Column(Integer, primary_key=True)
-        magazine_id = Column(ForeignKey("magazine.id"), primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
+        magazine_id = mapped_column(ForeignKey("magazine.id"), primary_key=True)
         magazine = relationship("Magazine")
 
-When the above mapping is configured, we will see this warning emitted::
+When the above mapping is configured, we will see this warning emitted:
+
+.. sourcecode:: text
 
     SAWarning: relationship 'Article.writer' will copy column
     writer.magazine_id to column article.magazine_id,
@@ -414,7 +428,7 @@ composite key to ``Writer``.   If we associate an ``Article`` with a
 particular ``Magazine``, but then associate the ``Article`` with a
 ``Writer`` that's  associated  with a *different* ``Magazine``, the ORM
 will overwrite ``Article.magazine_id`` non-deterministically, silently
-changing which magazine we refer towards; it may
+changing which magazine to which we refer; it may
 also attempt to place NULL into this column if we de-associate a
 ``Writer`` from an ``Article``.  The warning lets us know this is the case.
 
@@ -469,11 +483,6 @@ annotating with :func:`_orm.foreign`::
             "Writer.magazine_id == Article.magazine_id)",
         )
 
-.. versionchanged:: 1.0.0 the ORM will attempt to warn when a column is used
-   as the synchronization target from more than one relationship
-   simultaneously.
-
-
 Non-relational Comparisons / Materialized Path
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -495,7 +504,7 @@ we'll be dealing with collections so we keep things configured as "one to many":
     class Element(Base):
         __tablename__ = "element"
 
-        path = Column(String, primary_key=True)
+        path = mapped_column(String, primary_key=True)
 
         descendants = relationship(
             "Element",
@@ -505,16 +514,13 @@ we'll be dealing with collections so we keep things configured as "one to many":
         )
 
 Above, if given an ``Element`` object with a path attribute of ``"/foo/bar2"``,
-we seek for a load of ``Element.descendants`` to look like::
+we seek for a load of ``Element.descendants`` to look like:
+
+.. sourcecode:: sql
 
     SELECT element.path AS element_path
     FROM element
     WHERE element.path LIKE ('/foo/bar2' || '/%') ORDER BY element.path
-
-.. versionadded:: 0.9.5 Support has been added to allow a single-column
-   comparison to itself within a primaryjoin condition, as well as for
-   primaryjoin conditions that use :meth:`.ColumnOperators.like` as the comparison
-   operator.
 
 .. _self_referential_many_to_many:
 
@@ -535,11 +541,16 @@ specifies a many-to-many reference using the :paramref:`_orm.relationship.second
 A common situation which involves the usage of :paramref:`_orm.relationship.primaryjoin` and :paramref:`_orm.relationship.secondaryjoin`
 is when establishing a many-to-many relationship from a class to itself, as shown below::
 
-    from sqlalchemy import Integer, ForeignKey, String, Column, Table
-    from sqlalchemy.ext.declarative import declarative_base
-    from sqlalchemy.orm import relationship
+    from typing import List
 
-    Base = declarative_base()
+    from sqlalchemy import Integer, ForeignKey, Column, Table
+    from sqlalchemy.orm import DeclarativeBase, Mapped
+    from sqlalchemy.orm import mapped_column, relationship
+
+
+    class Base(DeclarativeBase):
+        pass
+
 
     node_to_node = Table(
         "node_to_node",
@@ -551,14 +562,21 @@ is when establishing a many-to-many relationship from a class to itself, as show
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        label = Column(String)
-        right_nodes = relationship(
+        id: Mapped[int] = mapped_column(primary_key=True)
+        label: Mapped[str]
+        right_nodes: Mapped[List["Node"]] = relationship(
             "Node",
             secondary=node_to_node,
             primaryjoin=id == node_to_node.c.left_node_id,
             secondaryjoin=id == node_to_node.c.right_node_id,
-            backref="left_nodes",
+            back_populates="left_nodes",
+        )
+        left_nodes: Mapped[List["Node"]] = relationship(
+            "Node",
+            secondary=node_to_node,
+            primaryjoin=id == node_to_node.c.right_node_id,
+            secondaryjoin=id == node_to_node.c.left_node_id,
+            back_populates="right_nodes",
         )
 
 Where above, SQLAlchemy can't know automatically which columns should connect
@@ -577,8 +595,8 @@ use the string name of the table as it is present in the :class:`_schema.MetaDat
 
     class Node(Base):
         __tablename__ = "node"
-        id = Column(Integer, primary_key=True)
-        label = Column(String)
+        id = mapped_column(Integer, primary_key=True)
+        label = mapped_column(String)
         right_nodes = relationship(
             "Node",
             secondary="node_to_node",
@@ -619,7 +637,7 @@ to ``node.c.id``::
     )
 
 
-    class Node(object):
+    class Node:
         pass
 
 
@@ -679,12 +697,12 @@ join condition (requires version 0.9.2 at least to function as is)::
     class A(Base):
         __tablename__ = "a"
 
-        id = Column(Integer, primary_key=True)
-        b_id = Column(ForeignKey("b.id"))
+        id = mapped_column(Integer, primary_key=True)
+        b_id = mapped_column(ForeignKey("b.id"))
 
         d = relationship(
             "D",
-            secondary="join(B, D, B.d_id == D.id)." "join(C, C.d_id == D.id)",
+            secondary="join(B, D, B.d_id == D.id).join(C, C.d_id == D.id)",
             primaryjoin="and_(A.b_id == B.id, A.id == C.a_id)",
             secondaryjoin="D.id == B.d_id",
             uselist=False,
@@ -695,22 +713,22 @@ join condition (requires version 0.9.2 at least to function as is)::
     class B(Base):
         __tablename__ = "b"
 
-        id = Column(Integer, primary_key=True)
-        d_id = Column(ForeignKey("d.id"))
+        id = mapped_column(Integer, primary_key=True)
+        d_id = mapped_column(ForeignKey("d.id"))
 
 
     class C(Base):
         __tablename__ = "c"
 
-        id = Column(Integer, primary_key=True)
-        a_id = Column(ForeignKey("a.id"))
-        d_id = Column(ForeignKey("d.id"))
+        id = mapped_column(Integer, primary_key=True)
+        a_id = mapped_column(ForeignKey("a.id"))
+        d_id = mapped_column(ForeignKey("d.id"))
 
 
     class D(Base):
         __tablename__ = "d"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 In the above example, we provide all three of :paramref:`_orm.relationship.secondary`,
 :paramref:`_orm.relationship.primaryjoin`, and :paramref:`_orm.relationship.secondaryjoin`,
@@ -719,9 +737,9 @@ directly.  A query from ``A`` to ``D`` looks like:
 
 .. sourcecode:: python+sql
 
-    sess.query(A).join(A.d).all()
+    sess.scalars(select(A).join(A.d)).all()
 
-    {opensql}SELECT a.id AS a_id, a.b_id AS a_b_id
+    {execsql}SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a JOIN (
         b AS b_1 JOIN d AS d_1 ON b_1.d_id = d_1.id
             JOIN c AS c_1 ON c_1.d_id = d_1.id)
@@ -734,9 +752,16 @@ there's just "one" table on both the "left" and the "right" side; the
 complexity is kept within the middle.
 
 .. warning:: A relationship like the above is typically marked as
-   ``viewonly=True`` and should be considered as read-only.  While there are
+   ``viewonly=True``, using :paramref:`_orm.relationship.viewonly`,
+   and should be considered as read-only.  While there are
    sometimes ways to make relationships like the above writable, this is
    generally complicated and error prone.
+
+.. seealso::
+
+    :ref:`relationship_viewonly_notes`
+
+
 
 .. _relationship_non_primary_mapper:
 
@@ -744,14 +769,6 @@ complexity is kept within the middle.
 
 Relationship to Aliased Class
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. versionadded:: 1.3
-    The :class:`.AliasedClass` construct can now be specified as the
-    target of a :func:`_orm.relationship`, replacing the previous approach
-    of using non-primary mappers, which had limitations such that they did
-    not inherit sub-relationships of the mapped entity as well as that they
-    required complex configuration against an alternate selectable.  The
-    recipes in this section are now updated to use :class:`.AliasedClass`.
 
 In the previous section, we illustrated a technique where we used
 :paramref:`_orm.relationship.secondary` in order to place additional
@@ -782,33 +799,33 @@ the rows in both ``A`` and ``B`` simultaneously::
     class A(Base):
         __tablename__ = "a"
 
-        id = Column(Integer, primary_key=True)
-        b_id = Column(ForeignKey("b.id"))
+        id = mapped_column(Integer, primary_key=True)
+        b_id = mapped_column(ForeignKey("b.id"))
 
 
     class B(Base):
         __tablename__ = "b"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 
     class C(Base):
         __tablename__ = "c"
 
-        id = Column(Integer, primary_key=True)
-        a_id = Column(ForeignKey("a.id"))
+        id = mapped_column(Integer, primary_key=True)
+        a_id = mapped_column(ForeignKey("a.id"))
 
-        some_c_value = Column(String)
+        some_c_value = mapped_column(String)
 
 
     class D(Base):
         __tablename__ = "d"
 
-        id = Column(Integer, primary_key=True)
-        c_id = Column(ForeignKey("c.id"))
-        b_id = Column(ForeignKey("b.id"))
+        id = mapped_column(Integer, primary_key=True)
+        c_id = mapped_column(ForeignKey("c.id"))
+        b_id = mapped_column(ForeignKey("b.id"))
 
-        some_d_value = Column(String)
+        some_d_value = mapped_column(String)
 
 
     # 1. set up the join() as a variable, so we can refer
@@ -824,10 +841,85 @@ With the above mapping, a simple join looks like:
 
 .. sourcecode:: python+sql
 
-    sess.query(A).join(A.b).all()
+    sess.scalars(select(A).join(A.b)).all()
 
-    {opensql}SELECT a.id AS a_id, a.b_id AS a_b_id
+    {execsql}SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a JOIN (b JOIN d ON d.b_id = b.id JOIN c ON c.id = d.c_id) ON a.b_id = b.id
+
+Integrating AliasedClass Mappings with Typing and Avoiding Early Mapper Configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The creation of the :func:`_orm.aliased` construct against a mapped class
+forces the :func:`_orm.configure_mappers` step to proceed, which will resolve
+all current classes and their relationships.  This may be problematic if
+unrelated mapped classes needed by the current mappings have not yet been
+declared, or if the configuration of the relationship itself needs access
+to as-yet undeclared classes.  Additionally, SQLAlchemy's Declarative pattern
+works with Python typing most effectively when relationships are declared
+up front.
+
+To organize the construction of the relationship to work with these issues, a
+configure level event hook like :meth:`.MapperEvents.before_mapper_configured`
+may be used, which will invoke the configuration code only when all mappings
+are ready for configuration::
+
+    from sqlalchemy import event
+
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id = mapped_column(Integer, primary_key=True)
+        b_id = mapped_column(ForeignKey("b.id"))
+
+
+    @event.listens_for(A, "before_mapper_configured")
+    def _configure_ab_relationship(mapper, cls):
+        # do the above configuration in a configuration hook
+
+        j = join(B, D, D.b_id == B.id).join(C, C.id == D.c_id)
+        B_viacd = aliased(B, j, flat=True)
+        A.b = relationship(B_viacd, primaryjoin=A.b_id == j.c.b_id)
+
+Above, the function ``_configure_ab_relationship()`` will be invoked only
+when a fully configured version of ``A`` is requested, at which point the
+classes ``B``, ``D`` and ``C`` would be available.
+
+For an approach that integrates with inline typing, a similar technique can be
+used to effectively generate a "singleton" creation pattern for the aliased
+class where it is late-initialized as a global variable, which can then be used
+in the relationship inline::
+
+    from typing import Any
+
+    B_viacd: Any = None
+    b_viacd_join: Any = None
+
+
+    class A(Base):
+        __tablename__ = "a"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        b_id: Mapped[int] = mapped_column(ForeignKey("b.id"))
+
+        # 1. the relationship can be declared using lambdas, allowing it to resolve
+        #    to targets that are late-configured
+        b: Mapped[B] = relationship(
+            lambda: B_viacd, primaryjoin=lambda: A.b_id == b_viacd_join.c.b_id
+        )
+
+
+    # 2. configure the targets of the relationship using a before_mapper_configured
+    #    hook.
+    @event.listens_for(A, "before_mapper_configured")
+    def _configure_ab_relationship(mapper, cls):
+        # 3. set up the join() and AliasedClass as globals from within
+        #    the configuration hook.
+
+        global B_viacd, b_viacd_join
+
+        b_viacd_join = join(B, D, D.b_id == B.id).join(C, C.id == D.c_id)
+        B_viacd = aliased(B, b_viacd_join, flat=True)
 
 Using the AliasedClass target in Queries
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -850,9 +942,9 @@ A query using the above ``A.b`` relationship will render a subquery:
 
 .. sourcecode:: python+sql
 
-    sess.query(A).join(A.b).all()
+    sess.scalars(select(A).join(A.b)).all()
 
-    {opensql}SELECT a.id AS a_id, a.b_id AS a_b_id
+    {execsql}SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a JOIN (SELECT b.id AS id, b.some_b_column AS some_b_column
     FROM b JOIN d ON d.b_id = b.id JOIN c ON c.id = d.c_id) AS anon_1 ON a.b_id = anon_1.id
 
@@ -861,14 +953,14 @@ so in terms of ``B_viacd_subquery`` rather than ``B`` directly:
 
 .. sourcecode:: python+sql
 
-    (
-        sess.query(A)
+    sess.scalars(
+        select(A)
         .join(A.b)
-        .filter(B_viacd_subquery.some_b_column == "some b")
+        .where(B_viacd_subquery.some_b_column == "some b")
         .order_by(B_viacd_subquery.id)
     ).all()
 
-    {opensql}SELECT a.id AS a_id, a.b_id AS a_b_id
+    {execsql}SELECT a.id AS a_id, a.b_id AS a_b_id
     FROM a JOIN (SELECT b.id AS id, b.some_b_column AS some_b_column
     FROM b JOIN d ON d.b_id = b.id JOIN c ON c.id = d.c_id) AS anon_1 ON a.b_id = anon_1.id
     WHERE anon_1.some_b_column = ? ORDER BY anon_1.id
@@ -889,13 +981,13 @@ ten items for each collection::
     class A(Base):
         __tablename__ = "a"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
 
     class B(Base):
         __tablename__ = "b"
-        id = Column(Integer, primary_key=True)
-        a_id = Column(ForeignKey("a.id"))
+        id = mapped_column(Integer, primary_key=True)
+        a_id = mapped_column(ForeignKey("a.id"))
 
 
     partition = select(
@@ -911,7 +1003,7 @@ ten items for each collection::
 We can use the above ``partitioned_bs`` relationship with most of the loader
 strategies, such as :func:`.selectinload`::
 
-    for a1 in s.query(A).options(selectinload(A.partitioned_bs)):
+    for a1 in session.scalars(select(A).options(selectinload(A.partitioned_bs))):
         print(a1.partitioned_bs)  # <-- will be no more than ten objects
 
 Where above, the "selectinload" query looks like:
@@ -955,7 +1047,7 @@ conjunction with :class:`_query.Query` as follows:
 
     class User(Base):
         __tablename__ = "user"
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
         @property
         def addresses(self):
@@ -968,3 +1060,247 @@ of special Python attributes.
 .. seealso::
 
     :ref:`mapper_hybrids`
+
+.. _relationship_viewonly_notes:
+
+Notes on using the viewonly relationship parameter
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The :paramref:`_orm.relationship.viewonly` parameter when applied to a
+:func:`_orm.relationship` construct indicates that this :func:`_orm.relationship`
+will not take part in any ORM :term:`unit of work` operations, and additionally
+that the attribute does not expect to participate within in-Python mutations
+of its represented collection.  This means
+that while the viewonly relationship may refer to a mutable Python collection
+like a list or set, making changes to that list or set as present on a
+mapped instance will have **no effect** on the ORM flush process.
+
+To explore this scenario consider this mapping::
+
+    from __future__ import annotations
+
+    import datetime
+
+    from sqlalchemy import and_
+    from sqlalchemy import ForeignKey
+    from sqlalchemy import func
+    from sqlalchemy.orm import DeclarativeBase
+    from sqlalchemy.orm import Mapped
+    from sqlalchemy.orm import mapped_column
+    from sqlalchemy.orm import relationship
+
+
+    class Base(DeclarativeBase):
+        pass
+
+
+    class User(Base):
+        __tablename__ = "user_account"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str | None]
+
+        all_tasks: Mapped[list[Task]] = relationship()
+
+        current_week_tasks: Mapped[list[Task]] = relationship(
+            primaryjoin=lambda: and_(
+                User.id == Task.user_account_id,
+                # this expression works on PostgreSQL but may not be supported
+                # by other database engines
+                Task.task_date >= func.now() - datetime.timedelta(days=7),
+            ),
+            viewonly=True,
+        )
+
+
+    class Task(Base):
+        __tablename__ = "task"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        user_account_id: Mapped[int] = mapped_column(ForeignKey("user_account.id"))
+        description: Mapped[str | None]
+        task_date: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+
+        user: Mapped[User] = relationship(back_populates="current_week_tasks")
+
+The following sections will note different aspects of this configuration.
+
+In-Python mutations including backrefs are not appropriate with viewonly=True
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The above mapping targets the ``User.current_week_tasks`` viewonly relationship
+as the :term:`backref` target of the ``Task.user`` attribute.  This is not
+currently flagged by SQLAlchemy's ORM configuration process, however is a
+configuration error.   Changing the ``.user`` attribute on a ``Task`` will not
+affect the ``.current_week_tasks`` attribute::
+
+    >>> u1 = User()
+    >>> t1 = Task(task_date=datetime.datetime.now())
+    >>> t1.user = u1
+    >>> u1.current_week_tasks
+    []
+
+There is another parameter called :paramref:`_orm.relationship.sync_backrefs`
+which can be turned on here to allow ``.current_week_tasks`` to be mutated in this
+case, however this is not considered to be a best practice with a viewonly
+relationship, which instead should not be relied upon for in-Python mutations.
+
+In this mapping, backrefs can be configured between ``User.all_tasks`` and
+``Task.user``, as these are both not viewonly and will synchronize normally.
+
+Beyond the issue of backref mutations being disabled for viewonly relationships,
+plain changes to the ``User.all_tasks`` collection in Python
+are also not reflected in the ``User.current_week_tasks`` collection until
+changes have been flushed to the database.
+
+Overall, for a use case where a custom collection should respond immediately to
+in-Python mutations, the viewonly relationship is generally not appropriate.  A
+better approach is to use the :ref:`hybrids_toplevel` feature of SQLAlchemy, or
+for instance-only cases to use a Python ``@property``, where a user-defined
+collection that is generated in terms of the current Python instance can be
+implemented.  To change our example to work this way, we repair the
+:paramref:`_orm.relationship.back_populates` parameter on ``Task.user`` to
+reference ``User.all_tasks``, and
+then illustrate a simple ``@property`` that will deliver results in terms of
+the immediate ``User.all_tasks`` collection::
+
+    class User(Base):
+        __tablename__ = "user_account"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str | None]
+
+        all_tasks: Mapped[list[Task]] = relationship(back_populates="user")
+
+        @property
+        def current_week_tasks(self) -> list[Task]:
+            past_seven_days = datetime.datetime.now() - datetime.timedelta(days=7)
+            return [t for t in self.all_tasks if t.task_date >= past_seven_days]
+
+
+    class Task(Base):
+        __tablename__ = "task"
+
+        id: Mapped[int] = mapped_column(primary_key=True)
+        user_account_id: Mapped[int] = mapped_column(ForeignKey("user_account.id"))
+        description: Mapped[str | None]
+        task_date: Mapped[datetime.datetime] = mapped_column(server_default=func.now())
+
+        user: Mapped[User] = relationship(back_populates="all_tasks")
+
+Using an in-Python collection calculated on the fly each time, we are guaranteed
+to have the correct answer at all times, without the need to use a database
+at all::
+
+    >>> u1 = User()
+    >>> t1 = Task(task_date=datetime.datetime.now())
+    >>> t1.user = u1
+    >>> u1.current_week_tasks
+    [<__main__.Task object at 0x7f3d699523c0>]
+
+
+viewonly=True collections / attributes do not get re-queried until expired
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Continuing with the original viewonly attribute, if we do in fact make changes
+to the ``User.all_tasks`` collection on a :term:`persistent` object, the
+viewonly collection can only show the net result of this change after **two**
+things occur.  The first is that the change to ``User.all_tasks`` is
+:term:`flushed`, so that the new data is available in the database, at least
+within the scope of the local transaction.  The second is that the ``User.current_week_tasks``
+attribute is :term:`expired` and reloaded via a new SQL query to the database.
+
+To support this requirement, the simplest flow to use is one where the
+**viewonly relationship is consumed only in operations that are primarily read
+only to start with**.   Such as below, if we retrieve a ``User`` fresh from
+the database, the collection will be current::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     print(u1.current_week_tasks)
+    [<__main__.Task object at 0x7f8711b906b0>]
+
+
+When we make modifications to ``u1.all_tasks``, if we want to see these changes
+reflected in the ``u1.current_week_tasks`` viewonly relationship, these changes need to be flushed
+and the ``u1.current_week_tasks`` attribute needs to be expired, so that
+it will :term:`lazy load` on next access.  The simplest approach to this is
+to use :meth:`_orm.Session.commit`, keeping the :paramref:`_orm.Session.expire_on_commit`
+parameter set at its default of ``True``::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     u1.all_tasks.append(Task(task_date=datetime.datetime.now()))
+    ...     sess.commit()
+    ...     print(u1.current_week_tasks)
+    [<__main__.Task object at 0x7f8711b90ec0>, <__main__.Task object at 0x7f8711b90a10>]
+
+Above, the call to :meth:`_orm.Session.commit` flushed the changes to ``u1.all_tasks``
+to the database, then expired all objects, so that when we accessed ``u1.current_week_tasks``,
+a :term:` lazy load` occurred which fetched the contents for this attribute
+freshly from the database.
+
+To intercept operations without actually committing the transaction,
+the attribute needs to be explicitly :term:`expired`
+first.   A simplistic way to do this is to just call it directly.  In
+the example below, :meth:`_orm.Session.flush` sends pending changes to the
+database, then :meth:`_orm.Session.expire` is used to expire the ``u1.current_week_tasks``
+collection so that it re-fetches on next access::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     u1.all_tasks.append(Task(task_date=datetime.datetime.now()))
+    ...     sess.flush()
+    ...     sess.expire(u1, ["current_week_tasks"])
+    ...     print(u1.current_week_tasks)
+    [<__main__.Task object at 0x7fd95a4c8c50>, <__main__.Task object at 0x7fd95a4c8c80>]
+
+We can in fact skip the call to :meth:`_orm.Session.flush`, assuming a
+:class:`_orm.Session` that keeps :paramref:`_orm.Session.autoflush` at its
+default value of ``True``, as the expired ``current_week_tasks`` attribute will
+trigger autoflush when accessed after expiration::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     u1.all_tasks.append(Task(task_date=datetime.datetime.now()))
+    ...     sess.expire(u1, ["current_week_tasks"])
+    ...     print(u1.current_week_tasks)  # triggers autoflush before querying
+    [<__main__.Task object at 0x7fd95a4c8c50>, <__main__.Task object at 0x7fd95a4c8c80>]
+
+Continuing with the above approach to something more elaborate, we can apply
+the expiration programmatically when the related ``User.all_tasks`` collection
+changes, using :ref:`event hooks <event_toplevel>`.   This an **advanced
+technique**, where simpler architectures like ``@property`` or sticking to
+read-only use cases should be examined first.  In our simple example, this
+would be configured as::
+
+    from sqlalchemy import event, inspect
+
+
+    @event.listens_for(User.all_tasks, "append")
+    @event.listens_for(User.all_tasks, "remove")
+    @event.listens_for(User.all_tasks, "bulk_replace")
+    def _expire_User_current_week_tasks(target, value, initiator):
+        inspect(target).session.expire(target, ["current_week_tasks"])
+
+With the above hooks, mutation operations are intercepted and result in
+the ``User.current_week_tasks`` collection to be expired automatically::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     u1.all_tasks.append(Task(task_date=datetime.datetime.now()))
+    ...     print(u1.current_week_tasks)
+    [<__main__.Task object at 0x7f66d093ccb0>, <__main__.Task object at 0x7f66d093cce0>]
+
+The :class:`_orm.AttributeEvents` event hooks used above are also triggered
+by backref mutations, so with the above hooks a change to ``Task.user`` is
+also intercepted::
+
+    >>> with Session(e) as sess:
+    ...     u1 = sess.scalar(select(User).where(User.id == 1))
+    ...     t1 = Task(task_date=datetime.datetime.now())
+    ...     t1.user = u1
+    ...     sess.add(t1)
+    ...     print(u1.current_week_tasks)
+    [<__main__.Task object at 0x7f3b0c070d10>, <__main__.Task object at 0x7f3b0c057d10>]
+

@@ -31,7 +31,7 @@ Below, assume the table ``shopping_cart_items`` references a table named
 effect such that the ``shopping_carts`` table will also be loaded::
 
     >>> shopping_cart_items = Table("shopping_cart_items", metadata_obj, autoload_with=engine)
-    >>> 'shopping_carts' in metadata_obj.tables:
+    >>> "shopping_carts" in metadata_obj.tables
     True
 
 The :class:`~sqlalchemy.schema.MetaData` has an interesting "singleton-like"
@@ -123,8 +123,9 @@ object's dictionary of tables::
 
     metadata_obj = MetaData()
     metadata_obj.reflect(bind=someengine)
-    for table in reversed(metadata_obj.sorted_tables):
-        someengine.execute(table.delete())
+    with someengine.begin() as conn:
+        for table in reversed(metadata_obj.sorted_tables):
+            conn.execute(table.delete())
 
 .. _metadata_reflection_schemas:
 
@@ -215,7 +216,7 @@ schemas will not require that the schema name be present (while at the same time
 it's also perfectly fine if the schema name *is* present).
 
 Since most relational databases therefore have the concept of a particular
-table object which can be referred towards both in a schema-qualified way, as
+table object which can be referenced both in a schema-qualified way, as
 well as an "implicit" way where no schema is present, this presents a
 complexity for SQLAlchemy's reflection
 feature.  Reflecting a table in
@@ -234,7 +235,9 @@ To illustrate the ramifications of this issue, consider tables from the
 schema is the default schema of our database connection, or if using a database
 such as PostgreSQL suppose the "project" schema is set up in the PostgreSQL
 ``search_path``.  This would mean that the database accepts the following
-two SQL statements as equivalent::
+two SQL statements as equivalent:
+
+.. sourcecode:: sql
 
     -- schema qualified
     SELECT message_id FROM project.messages
@@ -310,12 +313,12 @@ fashion, there are now two projects tables that are not the same:
     >>> messages_table_1.c.project_id.references(projects_table_1.c.project_id)
     False
 
-    >>> it refers to this one
+    >>> # it refers to this one
     >>> projects_table_2 = metadata_obj.tables["project.projects"]
     >>> messages_table_1.c.project_id.references(projects_table_2.c.project_id)
     True
 
-    >>> they're different, as one non-schema qualified and the other one is
+    >>> # they're different, as one non-schema qualified and the other one is
     >>> projects_table_1 is projects_table_2
     False
 
@@ -363,6 +366,43 @@ database is also available. This is known as the "Inspector"::
     :members:
     :undoc-members:
 
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedColumn
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedComputed
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedCheckConstraint
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedForeignKeyConstraint
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedIdentity
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedIndex
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedPrimaryKeyConstraint
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedUniqueConstraint
+    :members:
+    :inherited-members: dict
+
+.. autoclass:: sqlalchemy.engine.interfaces.ReflectedTableComment
+    :members:
+    :inherited-members: dict
+
+
 .. _metadata_reflection_dbagnostic_types:
 
 Reflecting with Database-Agnostic Types
@@ -389,7 +429,9 @@ column reflection using the :meth:`_events.DDLEvents.column_reflect` event
 in conjunction with the :meth:`_types.TypeEngine.as_generic` method.
 
 Given a table in MySQL (chosen because MySQL has a lot of vendor-specific
-datatypes and options)::
+datatypes and options):
+
+.. sourcecode:: sql
 
     CREATE TABLE IF NOT EXISTS my_table (
         id INTEGER PRIMARY KEY AUTO_INCREMENT,
@@ -407,7 +449,7 @@ and options:
 .. sourcecode:: pycon+sql
 
     >>> from sqlalchemy import MetaData, Table, create_engine
-    >>> mysql_engine = create_engine("mysql://scott:tiger@localhost/test")
+    >>> mysql_engine = create_engine("mysql+mysqldb://scott:tiger@localhost/test")
     >>> metadata_obj = MetaData()
     >>> my_mysql_table = Table("my_table", metadata_obj, autoload_with=mysql_engine)
 
@@ -419,7 +461,7 @@ object.  We can then, for demonstration purposes, print out the MySQL-specific
 
     >>> from sqlalchemy.schema import CreateTable
     >>> print(CreateTable(my_mysql_table).compile(mysql_engine))
-    {opensql}CREATE TABLE my_table (
+    {printsql}CREATE TABLE my_table (
     id INTEGER(11) NOT NULL AUTO_INCREMENT,
     data1 VARCHAR(50) CHARACTER SET latin1,
     data2 MEDIUMINT(4),
@@ -447,7 +489,7 @@ The format of this dictionary is described at :meth:`_reflection.Inspector.get_c
     >>> metadata_obj = MetaData()
 
     >>> @event.listens_for(metadata_obj, "column_reflect")
-    >>> def genericize_datatypes(inspector, tablename, column_dict):
+    ... def genericize_datatypes(inspector, tablename, column_dict):
     ...     column_dict["type"] = column_dict["type"].as_generic()
 
     >>> my_generic_table = Table("my_table", metadata_obj, autoload_with=mysql_engine)
@@ -458,9 +500,9 @@ We now get a new :class:`_schema.Table` that is generic and uses
 
 .. sourcecode:: pycon+sql
 
-    >>> pg_engine = create_engine("postgresql://scott:tiger@localhost/test", echo=True)
+    >>> pg_engine = create_engine("postgresql+psycopg2://scott:tiger@localhost/test", echo=True)
     >>> my_generic_table.create(pg_engine)
-    {opensql}CREATE TABLE my_table (
+    {execsql}CREATE TABLE my_table (
         id SERIAL NOT NULL,
         data1 VARCHAR(50),
         data2 INTEGER,

@@ -9,12 +9,12 @@
 
 .. rst-class:: core-header, orm-dependency
 
-Selecting Rows with Core or ORM
---------------------------------
+Using SELECT Statements
+-----------------------
 
 For both Core and ORM, the :func:`_sql.select` function generates a
 :class:`_sql.Select` construct which is used for all SELECT queries.
-Passed to methods like :meth:`_future.Connection.execute` in Core and
+Passed to methods like :meth:`_engine.Connection.execute` in Core and
 :meth:`_orm.Session.execute` in ORM, a SELECT statement is emitted in the
 current transaction and the result rows available via the returned
 :class:`_engine.Result` object.
@@ -38,7 +38,7 @@ it can be stringified in place::
     >>> from sqlalchemy import select
     >>> stmt = select(user_table).where(user_table.c.name == "spongebob")
     >>> print(stmt)
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = :name_1
 
@@ -53,13 +53,13 @@ objects back:
     >>> with engine.connect() as conn:
     ...     for row in conn.execute(stmt):
     ...         print(row)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = ?
     [...] ('spongebob',){stop}
     (1, 'spongebob', 'Spongebob Squarepants')
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 When using the ORM, particularly with a :func:`_sql.select` construct that's
 composed against ORM entities, we will want to execute it using the
@@ -75,13 +75,13 @@ elements within each row:
     >>> with Session(engine) as session:
     ...     for row in session.execute(stmt):
     ...         print(row)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = ?
     [...] ('spongebob',){stop}
     (User(id=1, name='spongebob', fullname='Spongebob Squarepants'),)
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. topic:: select() from a Table vs. ORM class
 
@@ -95,6 +95,7 @@ elements within each row:
 
 The following sections will discuss the SELECT construct in more detail.
 
+.. _tutorial_selecting_columns:
 
 Setting the COLUMNS and FROM clause
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -107,7 +108,7 @@ set.  These elements also serve in simpler cases to create the FROM clause,
 which is inferred from the columns and table-like expressions passed::
 
     >>> print(select(user_table))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
 
 To SELECT from individual columns using a Core approach,
@@ -117,8 +118,20 @@ of all :class:`_schema.Table` and other :class:`_sql.FromClause` objects that
 are represented by those columns::
 
     >>> print(select(user_table.c.name, user_table.c.fullname))
-    {opensql}SELECT user_account.name, user_account.fullname
+    {printsql}SELECT user_account.name, user_account.fullname
     FROM user_account
+
+Alternatively, when using the :attr:`.FromClause.c` collection of any
+:class:`.FromClause` such as :class:`.Table`, multiple columns may be specified
+for a :func:`_sql.select` by using a tuple of string names::
+
+    >>> print(select(user_table.c["name", "fullname"]))
+    {printsql}SELECT user_account.name, user_account.fullname
+    FROM user_account
+
+.. versionadded:: 2.0 Added tuple-accessor capability to the
+   :attr:`.FromClause.c` collection
+
 
 .. _tutorial_selecting_orm_entities:
 
@@ -132,7 +145,7 @@ example of SELECTing from the ``User`` entity, which ultimately renders
 in the same way as if we had used ``user_table`` directly::
 
     >>> print(select(User))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
 
 When executing a statement like the above using the ORM :meth:`_orm.Session.execute`
@@ -144,7 +157,7 @@ things to fetch, we get back :class:`_engine.Row` objects that have only one ele
 instances of the ``User`` class::
 
     >>> row = session.execute(select(User)).first()
-    {opensql}BEGIN...
+    {execsql}BEGIN...
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     [...] (){stop}
@@ -163,7 +176,7 @@ that delivers the first "column" of each row at once, in this case,
 instances of the ``User`` class::
 
     >>> user = session.scalars(select(User)).first()
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {execsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     [...] (){stop}
     >>> user
@@ -177,7 +190,7 @@ the :class:`_schema.Column` or other SQL expression represented by each
 attribute::
 
     >>> print(select(User.name, User.fullname))
-    {opensql}SELECT user_account.name, user_account.fullname
+    {printsql}SELECT user_account.name, user_account.fullname
     FROM user_account
 
 When we invoke *this* statement using :meth:`_orm.Session.execute`, we now
@@ -185,7 +198,7 @@ receive rows that have individual elements per value, each corresponding
 to a separate column or other SQL expression::
 
     >>> row = session.execute(select(User.name, User.fullname)).first()
-    {opensql}SELECT user_account.name, user_account.fullname
+    {execsql}SELECT user_account.name, user_account.fullname
     FROM user_account
     [...] (){stop}
     >>> row
@@ -198,7 +211,7 @@ it with full ``Address`` entities in the second element::
     >>> session.execute(
     ...     select(User.name, Address).where(User.id == Address.user_id).order_by(Address.id)
     ... ).all()
-    {opensql}SELECT user_account.name, address.id, address.email_address, address.user_id
+    {execsql}SELECT user_account.name, address.id, address.email_address, address.user_id
     FROM user_account, address
     WHERE user_account.id = address.user_id ORDER BY address.id
     [...] (){stop}
@@ -230,19 +243,19 @@ when referring to arbitrary SQL expressions in a result row by name:
     >>> with engine.connect() as conn:
     ...     for row in conn.execute(stmt):
     ...         print(f"{row.username}")
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT ? || user_account.name AS username
     FROM user_account ORDER BY user_account.name
     [...] ('Username: ',){stop}
     Username: patrick
     Username: sandy
     Username: spongebob
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. seealso::
 
     :ref:`tutorial_order_by_label` - the label names we create may also be
-    referred towards in the ORDER BY or GROUP BY clause of the :class:`_sql.Select`.
+    referenced in the ORDER BY or GROUP BY clause of the :class:`_sql.Select`.
 
 .. _tutorial_select_arbitrary_text:
 
@@ -261,19 +274,19 @@ SQL that's quicker to write literally.
 The :func:`_sql.text` construct introduced at
 :ref:`tutorial_working_with_transactions` can in fact be embedded into a
 :class:`_sql.Select` construct directly, such as below where we manufacture
-a hardcoded string literal ``'some label'`` and embed it within the
+a hardcoded string literal ``'some phrase'`` and embed it within the
 SELECT statement::
 
   >>> from sqlalchemy import text
   >>> stmt = select(text("'some phrase'"), user_table.c.name).order_by(user_table.c.name)
   >>> with engine.connect() as conn:
   ...     print(conn.execute(stmt).all())
-  {opensql}BEGIN (implicit)
+  {execsql}BEGIN (implicit)
   SELECT 'some phrase', user_account.name
   FROM user_account ORDER BY user_account.name
   [generated in ...] ()
   {stop}[('some phrase', 'patrick'), ('some phrase', 'sandy'), ('some phrase', 'spongebob')]
-  {opensql}ROLLBACK{stop}
+  {execsql}ROLLBACK{stop}
 
 While the :func:`_sql.text` construct can be used in most places to inject
 literal SQL phrases, more often than not we are actually dealing with textual
@@ -293,14 +306,14 @@ towards in subqueries and other expressions::
   >>> with engine.connect() as conn:
   ...     for row in conn.execute(stmt):
   ...         print(f"{row.p}, {row.name}")
-  {opensql}BEGIN (implicit)
+  {execsql}BEGIN (implicit)
   SELECT 'some phrase' AS p, user_account.name
   FROM user_account ORDER BY user_account.name
   [generated in ...] ()
   {stop}some phrase, patrick
   some phrase, sandy
   some phrase, spongebob
-  {opensql}ROLLBACK{stop}
+  {execsql}ROLLBACK{stop}
 
 
 Note that in both cases, when using :func:`_sql.text` or
@@ -331,7 +344,7 @@ We can use expressions like these to generate the WHERE clause by passing
 the resulting objects to the :meth:`_sql.Select.where` method::
 
     >>> print(select(user_table).where(user_table.c.name == "squidward"))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = :name_1
 
@@ -344,7 +357,7 @@ method may be invoked any number of times::
     ...     .where(user_table.c.name == "squidward")
     ...     .where(address_table.c.user_id == user_table.c.id)
     ... )
-    {opensql}SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE user_account.name = :name_1 AND address.user_id = user_account.id
 
@@ -353,10 +366,11 @@ with the same effect::
 
     >>> print(
     ...     select(address_table.c.email_address).where(
-    ...         user_table.c.name == "squidward", address_table.c.user_id == user_table.c.id
+    ...         user_table.c.name == "squidward",
+    ...         address_table.c.user_id == user_table.c.id,
     ...     )
     ... )
-    {opensql}SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE user_account.name = :name_1 AND address.user_id = user_account.id
 
@@ -373,7 +387,7 @@ of ORM entities::
     ...         )
     ...     )
     ... )
-    {opensql}SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM address, user_account
     WHERE (user_account.name = :name_1 OR user_account.name = :name_2)
     AND address.user_id = user_account.id
@@ -384,7 +398,7 @@ arguments that match to column keys or ORM attribute names.  It will filter
 against the leftmost FROM clause or the last entity joined::
 
     >>> print(select(User).filter_by(name="spongebob", fullname="Spongebob Squarepants"))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = :name_1 AND user_account.fullname = :fullname_1
 
@@ -409,14 +423,14 @@ in the COLUMNS clause, it puts that :class:`_schema.Table` in the FROM
 clause as well::
 
     >>> print(select(user_table.c.name))
-    {opensql}SELECT user_account.name
+    {printsql}SELECT user_account.name
     FROM user_account
 
 If we were to put columns from two tables, then we get a comma-separated FROM
 clause::
 
     >>> print(select(user_table.c.name, address_table.c.email_address))
-    {opensql}SELECT user_account.name, address.email_address
+    {printsql}SELECT user_account.name, address.email_address
     FROM user_account, address
 
 In order to JOIN these two tables together, we typically use one of two methods
@@ -429,15 +443,15 @@ explicitly::
     ...         user_table, address_table
     ...     )
     ... )
-    {opensql}SELECT user_account.name, address.email_address
+    {printsql}SELECT user_account.name, address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
 
 
-The other is the the :meth:`_sql.Select.join` method, which indicates only the
+The other is the :meth:`_sql.Select.join` method, which indicates only the
 right side of the JOIN, the left hand-side is inferred::
 
     >>> print(select(user_table.c.name, address_table.c.email_address).join(address_table))
-    {opensql}SELECT user_account.name, address.email_address
+    {printsql}SELECT user_account.name, address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
 
 .. sidebar::  The ON Clause is inferred
@@ -454,7 +468,7 @@ clause and :meth:`_sql.Select.join` to establish ``address_table`` as
 the second::
 
     >>> print(select(address_table.c.email_address).select_from(user_table).join(address_table))
-    {opensql}SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
 
 Another example where we might want to use :meth:`_sql.Select.select_from`
@@ -465,7 +479,7 @@ produce the SQL ``count()`` function::
 
     >>> from sqlalchemy import func
     >>> print(select(func.count("*")).select_from(user_table))
-    {opensql}SELECT count(:count_2) AS count_1
+    {printsql}SELECT count(:count_2) AS count_1
     FROM user_account
 
 .. seealso::
@@ -497,7 +511,7 @@ same SQL Expression mechanics as we saw about in :ref:`tutorial_select_where_cla
     ...     .select_from(user_table)
     ...     .join(address_table, user_table.c.id == address_table.c.user_id)
     ... )
-    {opensql}SELECT address.email_address
+    {printsql}SELECT address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
 
 .. container:: orm-header
@@ -518,11 +532,11 @@ accept keyword arguments :paramref:`_sql.Select.join.isouter` and
 and FULL OUTER JOIN, respectively::
 
     >>> print(select(user_table).join(address_table, isouter=True))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account LEFT OUTER JOIN address ON user_account.id = address.user_id{stop}
 
     >>> print(select(user_table).join(address_table, full=True))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account FULL OUTER JOIN address ON user_account.id = address.user_id{stop}
 
 There is also a method :meth:`_sql.Select.outerjoin` that is equivalent to
@@ -558,16 +572,15 @@ similar objects.  The :meth:`_sql.Select.order_by` method accepts one or
 more of these expressions positionally::
 
     >>> print(select(user_table).order_by(user_table.c.name))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account ORDER BY user_account.name
 
 Ascending / descending is available from the :meth:`_sql.ColumnElement.asc`
 and :meth:`_sql.ColumnElement.desc` modifiers, which are present
 from ORM-bound attributes as well::
 
-
     >>> print(select(User).order_by(User.fullname.desc()))
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account ORDER BY user_account.fullname DESC
 
 The above statement will yield rows that are sorted by the
@@ -595,7 +608,7 @@ we call upon the ``count()`` name::
     >>> from sqlalchemy import func
     >>> count_fn = func.count(user_table.c.id)
     >>> print(count_fn)
-    {opensql}count(user_account.id)
+    {printsql}count(user_account.id)
 
 SQL functions are described in more detail later in this tutorial at
 :ref:`tutorial_functions`.
@@ -614,7 +627,7 @@ and :meth:`_sql.Select.having` methods.   Below we illustrate selecting
 user name fields as well as count of addresses, for those users that have more
 than one address:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
     >>> with engine.connect() as conn:
     ...     result = conn.execute(
@@ -624,13 +637,13 @@ than one address:
     ...         .having(func.count(Address.id) > 1)
     ...     )
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.name, count(address.id) AS count
     FROM user_account JOIN address ON user_account.id = address.user_id GROUP BY user_account.name
     HAVING count(address.id) > ?
     [...] (1,){stop}
     [('sandy', 2)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. _tutorial_order_by_label:
 
@@ -657,7 +670,7 @@ error if no match is found.   The unary modifiers
     ...     .order_by("user_id", desc("num_addresses"))
     ... )
     >>> print(stmt)
-    {opensql}SELECT address.user_id, count(address.id) AS num_addresses
+    {printsql}SELECT address.user_id, count(address.id) AS num_addresses
     FROM address GROUP BY address.user_id ORDER BY address.user_id, num_addresses DESC
 
 .. _tutorial_using_aliases:
@@ -669,7 +682,7 @@ Now that we are selecting from multiple tables and using joins, we quickly
 run into the case where we need to refer to the same table multiple times
 in the FROM clause of a statement.  We accomplish this using SQL **aliases**,
 which are a syntax that supplies an alternative name to a table or subquery
-from which it can be referred towards in the statement.
+from which it can be referenced in the statement.
 
 In the SQLAlchemy Expression Language, these "names" are instead represented by
 :class:`_sql.FromClause` objects known as the :class:`_sql.Alias` construct,
@@ -686,7 +699,7 @@ below for example returns all unique pairs of user names::
     ...         user_alias_1, user_alias_2, user_alias_1.c.id > user_alias_2.c.id
     ...     )
     ... )
-    {opensql}SELECT user_account_1.name, user_account_2.name AS name_1
+    {printsql}SELECT user_account_1.name, user_account_2.name AS name_1
     FROM user_account AS user_account_1
     JOIN user_account AS user_account_2 ON user_account_1.id > user_account_2.id
 
@@ -712,7 +725,7 @@ while maintaining ORM functionality.  The SELECT below selects from the
     ...     .join_from(User, address_alias_2)
     ...     .where(address_alias_2.email_address == "patrick@gmail.com")
     ... )
-    {opensql}SELECT user_account.id, user_account.name, user_account.fullname
+    {printsql}SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     JOIN address AS address_1 ON user_account.id = address_1.user_id
     JOIN address AS address_2 ON user_account.id = address_2.user_id
@@ -762,7 +775,7 @@ Stringifying the subquery by itself without it being embedded inside of another
 without any enclosing parenthesis::
 
     >>> print(subq)
-    {opensql}SELECT count(address.id) AS count, address.user_id
+    {printsql}SELECT count(address.id) AS count, address.user_id
     FROM address GROUP BY address.user_id
 
 
@@ -773,7 +786,7 @@ refer to both the ``user_id`` column as well as our custom labeled
 ``count`` expression::
 
     >>> print(select(subq.c.user_id, subq.c.count))
-    {opensql}SELECT anon_1.user_id, anon_1.count
+    {printsql}SELECT anon_1.user_id, anon_1.count
     FROM (SELECT count(address.id) AS count, address.user_id AS user_id
     FROM address GROUP BY address.user_id) AS anon_1
 
@@ -786,7 +799,7 @@ the ``user_account`` table::
     ... )
 
     >>> print(stmt)
-    {opensql}SELECT user_account.name, user_account.fullname, anon_1.count
+    {printsql}SELECT user_account.name, user_account.fullname, anon_1.count
     FROM user_account JOIN (SELECT count(address.id) AS count, address.user_id AS user_id
     FROM address GROUP BY address.user_id) AS anon_1 ON user_account.id = anon_1.user_id
 
@@ -820,7 +833,7 @@ table expression syntax::
     ... )
 
     >>> print(stmt)
-    {opensql}WITH anon_1 AS
+    {printsql}WITH anon_1 AS
     (SELECT count(address.id) AS count, address.user_id AS user_id
     FROM address GROUP BY address.user_id)
      SELECT user_account.name, user_account.fullname, anon_1.count
@@ -866,7 +879,7 @@ shows a series of ``User`` and ``Address`` objects, where the data for
 each ``Address`` object ultimately came from a subquery against the
 ``address`` table rather than that table directly:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
     >>> subq = select(Address).where(~Address.email_address.like("%@aol.com")).subquery()
     >>> address_subq = aliased(Address, subq)
@@ -878,7 +891,7 @@ each ``Address`` object ultimately came from a subquery against the
     >>> with Session(engine) as session:
     ...     for user, address in session.execute(stmt):
     ...         print(f"{user} {address}")
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname,
     anon_1.id AS id_1, anon_1.email_address, anon_1.user_id
     FROM user_account JOIN
@@ -890,12 +903,12 @@ each ``Address`` object ultimately came from a subquery against the
     User(id=1, name='spongebob', fullname='Spongebob Squarepants') Address(id=1, email_address='spongebob@sqlalchemy.org')
     User(id=2, name='sandy', fullname='Sandy Cheeks') Address(id=2, email_address='sandy@sqlalchemy.org')
     User(id=2, name='sandy', fullname='Sandy Cheeks') Address(id=3, email_address='sandy@squirrelpower.org')
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 Another example follows, which is exactly the same except it makes use of the
 :class:`_sql.CTE` construct instead:
 
-.. sourcecode:: python+sql
+.. sourcecode:: pycon+sql
 
     >>> cte_obj = select(Address).where(~Address.email_address.like("%@aol.com")).cte()
     >>> address_cte = aliased(Address, cte_obj)
@@ -907,7 +920,7 @@ Another example follows, which is exactly the same except it makes use of the
     >>> with Session(engine) as session:
     ...     for user, address in session.execute(stmt):
     ...         print(f"{user} {address}")
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     WITH anon_1 AS
     (SELECT address.id AS id, address.email_address AS email_address, address.user_id AS user_id
     FROM address
@@ -921,7 +934,7 @@ Another example follows, which is exactly the same except it makes use of the
     User(id=1, name='spongebob', fullname='Spongebob Squarepants') Address(id=1, email_address='spongebob@sqlalchemy.org')
     User(id=2, name='sandy', fullname='Sandy Cheeks') Address(id=2, email_address='sandy@sqlalchemy.org')
     User(id=2, name='sandy', fullname='Sandy Cheeks') Address(id=3, email_address='sandy@squirrelpower.org')
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. seealso::
 
@@ -956,7 +969,7 @@ renders as an ordinary SELECT statement that is selecting from two tables::
     ...     .scalar_subquery()
     ... )
     >>> print(subq)
-    {opensql}(SELECT count(address.id) AS count_1
+    {printsql}(SELECT count(address.id) AS count_1
     FROM address, user_account
     WHERE user_account.id = address.user_id)
 
@@ -965,7 +978,7 @@ SQL expression hierarchy, in that it may be used like any other column
 expression::
 
     >>> print(subq == 5)
-    {opensql}(SELECT count(address.id) AS count_1
+    {printsql}(SELECT count(address.id) AS count_1
     FROM address, user_account
     WHERE user_account.id = address.user_id) = :param_1
 
@@ -978,7 +991,7 @@ into an enclosing :func:`_sql.select` construct that deals with the
 
     >>> stmt = select(user_table.c.name, subq.label("address_count"))
     >>> print(stmt)
-    {opensql}SELECT user_account.name, (SELECT count(address.id) AS count_1
+    {printsql}SELECT user_account.name, (SELECT count(address.id) AS count_1
     FROM address
     WHERE user_account.id = address.user_id) AS address_count
     FROM user_account
@@ -989,7 +1002,9 @@ us know that more clarity is needed::
 
     >>> stmt = (
     ...     select(
-    ...         user_table.c.name, address_table.c.email_address, subq.label("address_count")
+    ...         user_table.c.name,
+    ...         address_table.c.email_address,
+    ...         subq.label("address_count"),
     ...     )
     ...     .join_from(user_table, address_table)
     ...     .order_by(user_table.c.id, address_table.c.id)
@@ -1027,7 +1042,7 @@ The statement then can return the data for this column like any other:
     ...         .order_by(user_table.c.id, address_table.c.id)
     ...     )
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.name, address.email_address, (SELECT count(address.id) AS count_1
     FROM address
     WHERE user_account.id = address.user_id) AS address_count
@@ -1035,7 +1050,7 @@ The statement then can return the data for this column like any other:
     [...] (){stop}
     [('spongebob', 'spongebob@sqlalchemy.org', 1), ('sandy', 'sandy@sqlalchemy.org', 2),
      ('sandy', 'sandy@squirrelpower.org', 2)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 
 .. _tutorial_lateral_correlation:
@@ -1079,7 +1094,7 @@ was discussed in the previous section::
     ...     .order_by(user_table.c.id, subq.c.email_address)
     ... )
     >>> print(stmt)
-    {opensql}SELECT user_account.name, anon_1.address_count, anon_1.email_address
+    {printsql}SELECT user_account.name, anon_1.address_count, anon_1.email_address
     FROM user_account
     JOIN LATERAL (SELECT count(address.id) AS address_count,
     address.email_address AS email_address, address.user_id AS user_id
@@ -1109,7 +1124,7 @@ When using :meth:`_expression.Select.lateral`, the behavior of
 UNION, UNION ALL and other set operations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-In SQL,SELECT statements can be merged together using the UNION or UNION ALL
+In SQL, SELECT statements can be merged together using the UNION or UNION ALL
 SQL operation, which produces the set of all rows produced by one or more
 statements together.  Other set operations such as INTERSECT [ALL] and
 EXCEPT [ALL] are also possible.
@@ -1134,7 +1149,7 @@ that it has fewer methods.   The :class:`_sql.CompoundSelect` produced by
     >>> with engine.connect() as conn:
     ...     result = conn.execute(u)
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = ?
@@ -1143,12 +1158,12 @@ that it has fewer methods.   The :class:`_sql.CompoundSelect` produced by
     WHERE user_account.name = ?
     [generated in ...] ('sandy', 'spongebob')
     {stop}[(2, 'sandy', 'Sandy Cheeks'), (1, 'spongebob', 'Spongebob Squarepants')]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 To use a :class:`_sql.CompoundSelect` as a subquery, just like :class:`_sql.Select`
 it provides a :meth:`_sql.SelectBase.subquery` method which will produce a
 :class:`_sql.Subquery` object with a :attr:`_sql.FromClause.c`
-collection that may be referred towards in an enclosing :func:`_sql.select`::
+collection that may be referenced in an enclosing :func:`_sql.select`::
 
     >>> u_subq = u.subquery()
     >>> stmt = (
@@ -1159,7 +1174,7 @@ collection that may be referred towards in an enclosing :func:`_sql.select`::
     >>> with engine.connect() as conn:
     ...     result = conn.execute(stmt)
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT anon_1.name, address.email_address
     FROM address JOIN
       (SELECT user_account.id AS id, user_account.name AS name, user_account.fullname AS fullname
@@ -1173,7 +1188,7 @@ collection that may be referred towards in an enclosing :func:`_sql.select`::
     ORDER BY anon_1.name, address.email_address
     [generated in ...] ('sandy', 'spongebob')
     {stop}[('sandy', 'sandy@sqlalchemy.org'), ('sandy', 'sandy@squirrelpower.org'), ('spongebob', 'spongebob@sqlalchemy.org')]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. _tutorial_orm_union:
 
@@ -1204,7 +1219,7 @@ criteria can be added after :meth:`_sql.Select.from_statement` is used::
     >>> with Session(engine) as session:
     ...     for obj in session.execute(orm_stmt).scalars():
     ...         print(obj)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.id, user_account.name, user_account.fullname
     FROM user_account
     WHERE user_account.name = ? UNION ALL SELECT user_account.id, user_account.name, user_account.fullname
@@ -1213,7 +1228,7 @@ criteria can be added after :meth:`_sql.Select.from_statement` is used::
     [generated in ...] ('sandy', 'spongebob')
     {stop}User(id=2, name='sandy', fullname='Sandy Cheeks')
     User(id=1, name='spongebob', fullname='Spongebob Squarepants')
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 To use a UNION or other set-related construct as an entity-related component in
 in a more flexible manner, the :class:`_sql.CompoundSelect` construct may be
@@ -1221,7 +1236,7 @@ organized into a subquery using :meth:`_sql.CompoundSelect.subquery`, which
 then links to ORM objects using the :func:`_orm.aliased` function. This works
 in the same way introduced at :ref:`tutorial_subqueries_orm_aliased`, to first
 create an ad-hoc "mapping" of our desired entity to the subquery, then
-selecting from that that new entity as though it were any other mapped class.
+selecting from that new entity as though it were any other mapped class.
 In the example below, we are able to add additional criteria such as ORDER BY
 outside of the UNION itself, as we can filter or order by the columns exported
 by the subquery::
@@ -1231,7 +1246,7 @@ by the subquery::
     >>> with Session(engine) as session:
     ...     for obj in session.execute(orm_stmt).scalars():
     ...         print(obj)
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT anon_1.id, anon_1.name, anon_1.fullname
     FROM (SELECT user_account.id AS id, user_account.name AS name, user_account.fullname AS fullname
     FROM user_account
@@ -1241,7 +1256,7 @@ by the subquery::
     [generated in ...] ('sandy', 'spongebob')
     {stop}User(id=1, name='spongebob', fullname='Spongebob Squarepants')
     User(id=2, name='sandy', fullname='Sandy Cheeks')
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 .. seealso::
 
@@ -1272,7 +1287,7 @@ can return ``user_account`` rows that have more than one related row in
     >>> with engine.connect() as conn:
     ...     result = conn.execute(select(user_table.c.name).where(subq))
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.name
     FROM user_account
     WHERE EXISTS (SELECT count(address.id) AS count_1
@@ -1281,7 +1296,7 @@ can return ``user_account`` rows that have more than one related row in
     HAVING count(address.id) > ?)
     [...] (1,){stop}
     [('sandy',)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 The EXISTS construct is more often than not used as a negation, e.g. NOT EXISTS,
 as it provides a SQL-efficient form of locating rows for which a related
@@ -1297,7 +1312,7 @@ clause:
     >>> with engine.connect() as conn:
     ...     result = conn.execute(select(user_table.c.name).where(~subq))
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT user_account.name
     FROM user_account
     WHERE NOT (EXISTS (SELECT address.id
@@ -1305,7 +1320,7 @@ clause:
     WHERE user_account.id = address.user_id))
     [...] (){stop}
     [('patrick',)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 
 .. _tutorial_functions:
@@ -1326,7 +1341,7 @@ possibly some arguments. Examples of typical SQL functions include:
   .. sourcecode:: pycon+sql
 
       >>> print(select(func.count()).select_from(user_table))
-      SELECT count(*) AS count_1
+      {printsql}SELECT count(*) AS count_1
       FROM user_account
 
   ..
@@ -1337,7 +1352,7 @@ possibly some arguments. Examples of typical SQL functions include:
   .. sourcecode:: pycon+sql
 
       >>> print(select(func.lower("A String With Much UPPERCASE")))
-      SELECT lower(:lower_2) AS lower_1
+      {printsql}SELECT lower(:lower_2) AS lower_1
 
   ..
 
@@ -1351,7 +1366,7 @@ possibly some arguments. Examples of typical SQL functions include:
       >>> with engine.connect() as conn:
       ...     result = conn.execute(stmt)
       ...     print(result.all())
-      {opensql}BEGIN (implicit)
+      {execsql}BEGIN (implicit)
       SELECT CURRENT_TIMESTAMP AS now_1
       [...] ()
       [(datetime.datetime(...),)]
@@ -1365,24 +1380,23 @@ accepts. Any name that is accessed from this namespace is automatically
 considered to be a SQL function that will render in a generic way::
 
     >>> print(select(func.some_crazy_function(user_table.c.name, 17)))
-    SELECT some_crazy_function(user_account.name, :some_crazy_function_2) AS some_crazy_function_1
+    {printsql}SELECT some_crazy_function(user_account.name, :some_crazy_function_2) AS some_crazy_function_1
     FROM user_account
 
 At the same time, a relatively small set of extremely common SQL functions such
 as :class:`_functions.count`, :class:`_functions.now`, :class:`_functions.max`,
 :class:`_functions.concat` include pre-packaged versions of themselves which
 provide for proper typing information as well as backend-specific SQL
-generation in some cases.  The example below contrasts the SQL generation
-that occurs for the PostgreSQL dialect compared to the Oracle dialect for
+generation in some cases.  The example below contrasts the SQL generation that
+occurs for the PostgreSQL dialect compared to the Oracle Database dialect for
 the :class:`_functions.now` function::
 
     >>> from sqlalchemy.dialects import postgresql
     >>> print(select(func.now()).compile(dialect=postgresql.dialect()))
-    SELECT now() AS now_1
-
+    {printsql}SELECT now() AS now_1{stop}
     >>> from sqlalchemy.dialects import oracle
     >>> print(select(func.now()).compile(dialect=oracle.dialect()))
-    SELECT CURRENT_TIMESTAMP AS now_1 FROM DUAL
+    {printsql}SELECT CURRENT_TIMESTAMP AS now_1 FROM DUAL{stop}
 
 Functions Have Return Types
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1396,10 +1410,17 @@ as opposed to the "return type" of a Python function.
 
 The SQL return type of any SQL function may be accessed, typically for
 debugging purposes, by referring to the :attr:`_functions.Function.type`
-attribute::
+attribute; this will be pre-configured for a **select few** of extremely
+common SQL functions, but for most SQL functions is the "null" datatype
+if not otherwise specified::
 
+    >>> # pre-configured SQL function (only a few dozen of these)
     >>> func.now().type
     DateTime()
+
+    >>> # arbitrary SQL function (all other SQL functions)
+    >>> func.run_some_calculation().type
+    NullType()
 
 These SQL return types are significant when making
 use of the function expression in the context of a larger expression; that is,
@@ -1408,7 +1429,7 @@ something like :class:`_types.Integer` or :class:`_types.Numeric`, JSON
 accessors in order to work need to be using a type such as
 :class:`_types.JSON`.  Certain classes of functions return entire rows
 instead of column values, where there is a need to refer to specific columns;
-such functions are referred towards
+such functions are known
 as :ref:`table valued functions <tutorial_functions_table_valued>`.
 
 The SQL return type of the function may also be significant when executing a
@@ -1434,7 +1455,7 @@ elements::
 
     >>> stmt = select(function_expr["def"])
     >>> print(stmt)
-    SELECT json_object(:json_object_1)[:json_object_2] AS anon_1
+    {printsql}SELECT json_object(:json_object_1)[:json_object_2] AS anon_1
 
 Built-in Functions Have Pre-Configured Return Types
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1486,7 +1507,7 @@ operator for example will be correctly interpreted as the string concatenation
 operator based on looking at both sides of the expression::
 
     >>> print(select(func.upper("lowercase") + " suffix"))
-    SELECT upper(:upper_1) || :upper_2 AS anon_1
+    {printsql}SELECT upper(:upper_1) || :upper_2 AS anon_1
 
 Overall, the scenario where the
 :paramref:`_functions.Function.type_` parameter is likely necessary is:
@@ -1563,13 +1584,13 @@ number the email addresses of individual users:
     >>> with engine.connect() as conn:  # doctest:+SKIP
     ...     result = conn.execute(stmt)
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT row_number() OVER (PARTITION BY user_account.name) AS anon_1,
     user_account.name, address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
     [...] ()
-    [(1, 'sandy', 'sandy@sqlalchemy.org'), (2, 'sandy', 'sandy@squirrelpower.org'), (1, 'spongebob', 'spongebob@sqlalchemy.org')]
-    ROLLBACK
+    {stop}[(1, 'sandy', 'sandy@sqlalchemy.org'), (2, 'sandy', 'sandy@squirrelpower.org'), (1, 'spongebob', 'spongebob@sqlalchemy.org')]
+    {printsql}ROLLBACK{stop}
 
 Above, the :paramref:`_functions.FunctionElement.over.partition_by` parameter
 is used so that the ``PARTITION BY`` clause is rendered within the OVER clause.
@@ -1589,13 +1610,13 @@ We also may make use of the ``ORDER BY`` clause using :paramref:`_functions.Func
     >>> with engine.connect() as conn:  # doctest:+SKIP
     ...     result = conn.execute(stmt)
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT count(*) OVER (ORDER BY user_account.name) AS anon_1,
     user_account.name, address.email_address
     FROM user_account JOIN address ON user_account.id = address.user_id
     [...] ()
-    [(2, 'sandy', 'sandy@sqlalchemy.org'), (2, 'sandy', 'sandy@squirrelpower.org'), (3, 'spongebob', 'spongebob@sqlalchemy.org')]
-    ROLLBACK
+    {stop}[(2, 'sandy', 'sandy@sqlalchemy.org'), (2, 'sandy', 'sandy@squirrelpower.org'), (3, 'spongebob', 'spongebob@sqlalchemy.org')]
+    {printsql}ROLLBACK{stop}
 
 Further options for window functions include usage of ranges; see
 :func:`_expression.over` for more examples.
@@ -1627,7 +1648,7 @@ method::
     ...         func.percentile_disc([0.25, 0.5, 0.75, 1]).within_group(user_table.c.name)
     ...     )
     ... )
-    unnest(percentile_disc(:percentile_disc_1) WITHIN GROUP (ORDER BY user_account.name))
+    {printsql}unnest(percentile_disc(:percentile_disc_1) WITHIN GROUP (ORDER BY user_account.name))
 
 "FILTER" is supported by some backends to limit the range of an aggregate function to a
 particular subset of rows compared to the total range of rows returned, available
@@ -1646,13 +1667,13 @@ using the :meth:`_functions.FunctionElement.filter` method::
     >>> with engine.connect() as conn:  # doctest:+SKIP
     ...     result = conn.execute(stmt)
     ...     print(result.all())
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT count(address.email_address) FILTER (WHERE user_account.name = ?) AS anon_1,
     count(address.email_address) FILTER (WHERE user_account.name = ?) AS anon_2
     FROM user_account JOIN address ON user_account.id = address.user_id
     [...] ('sandy', 'spongebob')
     {stop}[(2, 1)]
-    {opensql}ROLLBACK
+    {execsql}ROLLBACK
 
 .. _tutorial_functions_table_valued:
 
@@ -1662,10 +1683,10 @@ Table-Valued Functions
 Table-valued SQL functions support a scalar representation that contains named
 sub-elements. Often used for JSON and ARRAY-oriented functions as well as
 functions like ``generate_series()``, the table-valued function is specified in
-the FROM clause, and is then referred towards as a table, or sometimes even as
-a column. Functions of this form are prominent within the PostgreSQL database,
+the FROM clause, and is then referenced as a table, or sometimes even as a
+column. Functions of this form are prominent within the PostgreSQL database,
 however some forms of table valued functions are also supported by SQLite,
-Oracle, and SQL Server.
+Oracle Database, and SQL Server.
 
 .. seealso::
 
@@ -1691,13 +1712,13 @@ modern versions of SQLite::
     >>> with engine.connect() as conn:
     ...     result = conn.execute(stmt)
     ...     result.all()
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT anon_1.value
     FROM json_each(?) AS anon_1
     WHERE anon_1.value IN (?, ?)
     [...] ('["one", "two", "three"]', 'two', 'three')
     {stop}[('two',), ('three',)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 Above, we used the ``json_each()`` JSON function supported by SQLite and
 PostgreSQL to generate a table valued expression with a single column referred
@@ -1714,9 +1735,9 @@ towards as ``value``, and then selected two of its three rows.
 Column Valued Functions - Table Valued Function as a Scalar Column
 ##################################################################
 
-A special syntax supported by PostgreSQL and Oracle is that of referring
-towards a function in the FROM clause, which then delivers itself as a
-single column in the columns clause of a SELECT statement or other column
+A special syntax supported by PostgreSQL and Oracle Database is that of
+referring towards a function in the FROM clause, which then delivers itself as
+a single column in the columns clause of a SELECT statement or other column
 expression context.  PostgreSQL makes great use of this syntax for such
 functions as ``json_array_elements()``, ``json_object_keys()``,
 ``json_each_text()``, ``json_each()``, etc.
@@ -1728,16 +1749,16 @@ to a :class:`_functions.Function` construct::
     >>> from sqlalchemy import select, func
     >>> stmt = select(func.json_array_elements('["one", "two"]').column_valued("x"))
     >>> print(stmt)
-    SELECT x
+    {printsql}SELECT x
     FROM json_array_elements(:json_array_elements_1) AS x
 
-The "column valued" form is also supported by the Oracle dialect, where
-it is usable for custom SQL functions::
+The "column valued" form is also supported by the Oracle Database dialects,
+where it is usable for custom SQL functions::
 
     >>> from sqlalchemy.dialects import oracle
     >>> stmt = select(func.scalar_strings(5).column_valued("s"))
     >>> print(stmt.compile(dialect=oracle.dialect()))
-    SELECT s.COLUMN_VALUE
+    {printsql}SELECT s.COLUMN_VALUE
     FROM TABLE (scalar_strings(:scalar_strings_1)) s
 
 
@@ -1765,22 +1786,21 @@ object::
     >>> with engine.connect() as conn:
     ...     result = conn.execute(stmt)
     ...     result.all()
-    {opensql}BEGIN (implicit)
+    {execsql}BEGIN (implicit)
     SELECT CAST(user_account.id AS VARCHAR) AS id
     FROM user_account
     [...] ()
     {stop}[('1',), ('2',), ('3',)]
-    {opensql}ROLLBACK{stop}
+    {execsql}ROLLBACK{stop}
 
 The :func:`.cast` function not only renders the SQL CAST syntax, it also
 produces a SQLAlchemy column expression that will act as the given datatype on
 the Python side as well. A string expression that is :func:`.cast` to
-:class:`_sqltypes.JSON` will gain JSON subscript and comparison operators,
-for example::
+:class:`_sqltypes.JSON` will gain JSON subscript and comparison operators, for example::
 
     >>> from sqlalchemy import JSON
     >>> print(cast("{'a': 'b'}", JSON)["a"])
-    CAST(:param_1 AS JSON)[:param_2]
+    {printsql}CAST(:param_1 AS JSON)[:param_2]
 
 
 type_coerce() - a Python-only "cast"
@@ -1808,7 +1828,7 @@ string into one of MySQL's JSON functions:
     >>> from sqlalchemy.dialects import mysql
     >>> s = select(type_coerce({"some_key": {"foo": "bar"}}, JSON)["some_key"])
     >>> print(s.compile(dialect=mysql.dialect()))
-    SELECT JSON_EXTRACT(%s, %s) AS anon_1
+    {printsql}SELECT JSON_EXTRACT(%s, %s) AS anon_1
 
 Above, MySQL's ``JSON_EXTRACT`` SQL function was invoked
 because we used :func:`.type_coerce` to indicate that our Python dictionary

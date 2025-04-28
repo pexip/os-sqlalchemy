@@ -10,7 +10,6 @@ a single Python interpreter::
 
     tox
 
-
 Advanced Tox Options
 ====================
 
@@ -50,7 +49,7 @@ database options and test selection.
 
 A generic pytest run looks like::
 
-    pytest -n4
+    pytest - n4
 
 Above, the full test suite will run against SQLite, using four processes.
 If the "-n" flag is not used, the pytest-xdist is skipped and the tests will
@@ -83,18 +82,32 @@ a pre-set URL.  These can be seen using --dbs::
 
     $ pytest --dbs
     Available --db options (use --dburi to override)
+                aiomysql    mysql+aiomysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
+       aiomysql_fallback    mysql+aiomysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4&async_fallback=true
+               aiosqlite    sqlite+aiosqlite:///:memory:
+          aiosqlite_file    sqlite+aiosqlite:///async_querytest.db
+                 asyncmy    mysql+asyncmy://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
+        asyncmy_fallback    mysql+asyncmy://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4&async_fallback=true
+                 asyncpg    postgresql+asyncpg://scott:tiger@127.0.0.1:5432/test
+        asyncpg_fallback    postgresql+asyncpg://scott:tiger@127.0.0.1:5432/test?async_fallback=true
                  default    sqlite:///:memory:
-                firebird    firebird://sysdba:masterkey@localhost//Users/classic/foo.fdb
-                 mariadb    mariadb://scott:tiger@192.168.0.199:3307/test
+            docker_mssql    mssql+pymssql://scott:tiger^5HHH@127.0.0.1:1433/test
+                 mariadb    mariadb+mysqldb://scott:tiger@127.0.0.1:3306/test
+       mariadb_connector    mariadb+mariadbconnector://scott:tiger@127.0.0.1:3306/test
                    mssql    mssql+pyodbc://scott:tiger^5HHH@mssql2017:1433/test?driver=ODBC+Driver+13+for+SQL+Server
            mssql_pymssql    mssql+pymssql://scott:tiger@ms_2008
-                   mysql    mysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
-                  oracle    oracle://scott:tiger@127.0.0.1:1521
-                 oracle8    oracle://scott:tiger@127.0.0.1:1521/?use_ansi=0
+                   mysql    mysql+mysqldb://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
+                  oracle    oracle+cx_oracle://scott:tiger@oracle18c
+         oracle_oracledb    oracle+oracledb://scott:tiger@oracle18c
                   pg8000    postgresql+pg8000://scott:tiger@127.0.0.1:5432/test
-              postgresql    postgresql://scott:tiger@127.0.0.1:5432/test
+              postgresql    postgresql+psycopg2://scott:tiger@127.0.0.1:5432/test
     postgresql_psycopg2cffi postgresql+psycopg2cffi://scott:tiger@127.0.0.1:5432/test
+                 psycopg    postgresql+psycopg://scott:tiger@127.0.0.1:5432/test
+                psycopg2    postgresql+psycopg2://scott:tiger@127.0.0.1:5432/test
+           psycopg_async    postgresql+psycopg_async://scott:tiger@127.0.0.1:5432/test
+    psycopg_async_fallback  postgresql+psycopg_async://scott:tiger@127.0.0.1:5432/test?async_fallback=true
                  pymysql    mysql+pymysql://scott:tiger@127.0.0.1:3306/test?charset=utf8mb4
+        pysqlcipher_file    sqlite+pysqlcipher://:test@/querytest.db.enc
                   sqlite    sqlite:///:memory:
              sqlite_file    sqlite:///querytest.db
 
@@ -111,7 +124,7 @@ creating a new file called ``test.cfg`` and adding your own ``[db]`` section::
 
     # test.cfg file
     [db]
-    my_postgresql=postgresql://username:pass@hostname/dbname
+    my_postgresql=postgresql+psycopg2://username:pass@hostname/dbname
 
 Above, we can now run the tests with ``my_postgresql``::
 
@@ -122,9 +135,9 @@ with the tox runner also::
 
     # test.cfg file
     [db]
-    postgresql=postgresql://username:pass@hostname/dbname
+    postgresql=postgresql+psycopg2://username:pass@hostname/dbname
 
-Now when we run ``tox -e py27-postgresql``, it will use our custom URL instead
+Now when we run ``tox -e py38-postgresql``, it will use our custom URL instead
 of the fixed one in setup.cfg.
 
 Database Configuration
@@ -178,11 +191,16 @@ Additional steps specific to individual databases are as follows::
 
         postgres=# create database test with owner=scott encoding='utf8' template=template0;
 
-    To include tests for HSTORE, create the HSTORE type engine::
+    To include tests for HSTORE and CITEXT for PostgreSQL versions lower than 13,
+    create the extensions; for PostgreSQL 13 and above, these
+    extensions are created automatically as part of the test suite if not
+    already present::
 
         postgres=# \c test;
         You are now connected to database "test" as user "postgresql".
         test=# create extension hstore;
+        CREATE EXTENSION
+        test=# create extension citext;
         CREATE EXTENSION
 
     Full-text search configuration should be set to English, else
@@ -236,7 +254,7 @@ intended for production use!
 
     # configure the database
     sleep 10
-    docker exec -ti postgres psql -U scott -c 'CREATE SCHEMA test_schema; CREATE SCHEMA test_schema_2;' test
+    docker exec -ti postgres psql -U scott -c 'CREATE SCHEMA test_schema; CREATE SCHEMA test_schema_2;CREATE EXTENSION hstore;CREATE EXTENSION citext;' test
     # this last command is optional
     docker exec -ti postgres sed -i 's/#max_prepared_transactions = 0/max_prepared_transactions = 10/g' /var/lib/postgresql/data/postgresql.conf
 
@@ -262,7 +280,7 @@ intended for production use!
 
     # configure the database
     sleep 20
-    docker exec -ti mariadb mysql -u root -ppassword -w -e "CREATE DATABASE test_schema CHARSET utf8mb4; GRANT ALL ON test_schema.* TO scott;"
+    docker exec -ti mariadb mariadb -u root -ppassword -w -e "CREATE DATABASE test_schema CHARSET utf8mb4; GRANT ALL ON test_schema.* TO scott;"
 
     # To stop the container. It will also remove it.
     docker stop mariadb
@@ -285,6 +303,32 @@ intended for production use!
 NOTE: with this configuration the url to use is not the default one configured
 in setup, but ``mssql+pymssql://scott:tiger^5HHH@127.0.0.1:1433/test``.  It can
 be used with pytest by using ``--db docker_mssql``.
+
+**Oracle configuration**::
+
+    # create the container with the proper configuration for sqlalchemy
+    docker run --rm --name oracle -p 127.0.0.1:1521:1521 -d -e ORACLE_PASSWORD=tiger -e ORACLE_DATABASE=test -e APP_USER=scott -e APP_USER_PASSWORD=tiger gvenzl/oracle-free:23-slim
+
+    # enter the database container and run the command
+    docker exec -ti oracle bash
+    >> sqlplus system/tiger@//localhost/FREEPDB1 <<EOF
+    CREATE USER test_schema IDENTIFIED BY tiger;
+    GRANT DBA TO SCOTT;
+    GRANT CREATE TABLE TO scott;
+    GRANT CREATE TABLE TO test_schema;
+    GRANT UNLIMITED TABLESPACE TO scott;
+    GRANT UNLIMITED TABLESPACE TO test_schema;
+    GRANT CREATE SESSION TO test_schema;
+    CREATE PUBLIC DATABASE LINK test_link CONNECT TO scott IDENTIFIED BY tiger USING 'FREEPDB1';
+    CREATE PUBLIC DATABASE LINK test_link2 CONNECT TO test_schema IDENTIFIED BY tiger USING 'FREEPDB1';
+    EOF
+
+    # To stop the container. It will also remove it.
+    docker stop oracle
+
+NOTE: with this configuration the url to use is
+``oracle+cx_oracle://scott:tiger@127.0.0.1:1521/?service_name=FREEPDB1``.  It can
+be used with pytest by using ``--dburi oracle+cx_oracle://scott:tiger@127.0.0.1:1521/?service_name=FREEPDB1``.
 
 CONFIGURING LOGGING
 -------------------

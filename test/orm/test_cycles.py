@@ -5,6 +5,7 @@ T1<->T2, with o2m or m2o between them, and a third T3 with o2m/m2o to one/both
 T1/T2.
 
 """
+
 from itertools import count
 
 from sqlalchemy import bindparam
@@ -1122,7 +1123,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                 [
                     CompiledSQL(
                         "INSERT INTO ball (person_id, data) "
-                        "VALUES (:person_id, :data)",
+                        "VALUES (:person_id, :data) RETURNING ball.id",
                         [
                             {"person_id": None, "data": "some data"},
                             {"person_id": None, "data": "some data"},
@@ -1187,7 +1188,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
                 ],
             ),
             CompiledSQL(
-                "DELETE FROM person " "WHERE person.id = :id",
+                "DELETE FROM person WHERE person.id = :id",
                 lambda ctx: [{"id": p.id}],
             ),
             CompiledSQL(
@@ -1225,7 +1226,7 @@ class OneToManyManyToOneTest(fixtures.MappedTest):
         )
         self.mapper_registry.map_imperatively(Person, person)
 
-        sess = fixture_session(autocommit=False, expire_on_commit=True)
+        sess = fixture_session(expire_on_commit=True)
         p1 = Person()
         sess.add(Ball(person=p1))
         sess.commit()

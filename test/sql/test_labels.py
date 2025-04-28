@@ -19,11 +19,11 @@ from sqlalchemy.sql import column
 from sqlalchemy.sql import LABEL_STYLE_TABLENAME_PLUS_COL
 from sqlalchemy.sql import roles
 from sqlalchemy.sql import table
-from sqlalchemy.sql.base import prefix_anon_map
 from sqlalchemy.sql.elements import _truncated_label
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.elements import WrapsColumnExpression
 from sqlalchemy.sql.selectable import LABEL_STYLE_NONE
+from sqlalchemy.sql.visitors import prefix_anon_map
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
@@ -795,7 +795,7 @@ class LabelLengthTest(fixtures.TestBase, AssertsCompiledSQL):
         compiled = stmt.compile(dialect=dialect)
         eq_(
             set(compiled._create_result_map()),
-            set(["tablename_columnn_1", "tablename_columnn_2"]),
+            {"tablename_columnn_1", "tablename_columnn_2"},
         )
 
 
@@ -805,7 +805,7 @@ class ColExprLabelTest(fixtures.TestBase, AssertsCompiledSQL):
 
     """
 
-    __dialect__ = "default_enhanced"
+    __dialect__ = "default"
 
     table1 = table("some_table", column("name"), column("value"))
 
@@ -917,12 +917,11 @@ class ColExprLabelTest(fixtures.TestBase, AssertsCompiledSQL):
             table1.c.name, table1.c.value, table1.c.value
         )
 
-        # 1.4 behavior only; limited support for labels in RETURNING
         self.assert_compile(
             stmt,
             "INSERT INTO some_table (name, value) VALUES (:name, :value) "
             "RETURNING some_table.name, lower(some_table.value) AS value, "
-            "lower(some_table.value) AS value",
+            "lower(some_table.value) AS value__1",
         )
 
     def test_column_auto_label_dupes_label_style_none(self):
@@ -1089,7 +1088,6 @@ class ColExprLabelTest(fixtures.TestBase, AssertsCompiledSQL):
             # not sure if this SQL is right but this is what it was
             # before the new labeling, just different label name
             "SELECT value = 0 AS value, value",
-            dialect="default",
         )
 
     def test_label_auto_label_use_labels(self):

@@ -111,9 +111,9 @@ underlying :class:`.Session` being maintained by the registry::
     # equivalent to:
     #
     # session = Session()
-    # print(session.query(MyClass).all())
+    # print(session.scalars(select(MyClass)).all())
     #
-    print(Session.query(MyClass).all())
+    print(Session.scalars(select(MyClass)).all())
 
 The above code accomplishes the same task as that of acquiring the current
 :class:`.Session` by calling upon the registry, then using that :class:`.Session`.
@@ -178,7 +178,9 @@ running within that thread, and vice versa, provided that the :class:`.Session` 
 created only after the web request begins and torn down just before the web request ends.
 So it is a common practice to use :class:`.scoped_session` as a quick way
 to integrate the :class:`.Session` with a web application.  The sequence
-diagram below illustrates this flow::
+diagram below illustrates this flow:
+
+.. sourcecode:: text
 
     Web Server          Web Framework        SQLAlchemy ORM Code
     --------------      --------------       ------------------------------
@@ -195,7 +197,7 @@ diagram below illustrates this flow::
                                              # be used at any time, creating the
                                              # request-local Session() if not present,
                                              # or returning the existing one
-                                             Session.query(MyClass) # ...
+                                             Session.execute(select(MyClass)) # ...
 
                                              Session.add(some_object) # ...
 
@@ -269,7 +271,7 @@ otherwise self-managed.
 Contextual Session API
 ----------------------
 
-.. autoclass:: sqlalchemy.orm.scoping.scoped_session
+.. autoclass:: sqlalchemy.orm.scoped_session
     :members:
     :inherited-members:
 
@@ -277,3 +279,5 @@ Contextual Session API
     :members:
 
 .. autoclass:: sqlalchemy.util.ThreadLocalRegistry
+
+.. autoclass:: sqlalchemy.orm.QueryPropertyDescriptor

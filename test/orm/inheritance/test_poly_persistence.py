@@ -13,11 +13,12 @@ from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 
 
-class Person(fixtures.ComparableEntity):
+class Person(ComparableEntity):
     pass
 
 
@@ -33,7 +34,7 @@ class Boss(Manager):
     pass
 
 
-class Company(fixtures.ComparableEntity):
+class Company(ComparableEntity):
     pass
 
 
@@ -334,13 +335,13 @@ class RoundTripTest(PolymorphTest):
             Manager(
                 status="AAB",
                 manager_name="manager1",
-                **{person_attribute_name: "pointy haired boss"}
+                **{person_attribute_name: "pointy haired boss"},
             ),
             Engineer(
                 status="BBA",
                 engineer_name="engineer1",
                 primary_language="java",
-                **{person_attribute_name: "dilbert"}
+                **{person_attribute_name: "dilbert"},
             ),
         ]
         if include_base:
@@ -350,12 +351,12 @@ class RoundTripTest(PolymorphTest):
                 status="CGG",
                 engineer_name="engineer2",
                 primary_language="python",
-                **{person_attribute_name: "wally"}
+                **{person_attribute_name: "wally"},
             ),
             Manager(
                 status="ABA",
                 manager_name="manager2",
-                **{person_attribute_name: "jsmith"}
+                **{person_attribute_name: "jsmith"},
             ),
         ]
 
@@ -530,7 +531,6 @@ class RoundTripTest(PolymorphTest):
         )
 
     def test_primary_table_only_for_requery(self):
-
         session = fixture_session()
 
         if self.redefine_colprop:
@@ -567,7 +567,7 @@ class RoundTripTest(PolymorphTest):
             status="BBB",
             manager_name="boss",
             golf_swing="fore",
-            **{person_attribute_name: "daboss"}
+            **{person_attribute_name: "daboss"},
         )
         session.add(daboss)
         assert_raises(sa_exc.DBAPIError, session.flush)

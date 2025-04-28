@@ -16,8 +16,9 @@ How do I pool database connections?   Are my connections pooled?
 ----------------------------------------------------------------
 
 SQLAlchemy performs application-level connection pooling automatically
-in most cases.  With the exception of SQLite, a :class:`_engine.Engine` object
-refers to a :class:`.QueuePool` as a source of connectivity.
+in most cases.  For all included dialects (except SQLite when using a 
+"memory" database), a :class:`_engine.Engine` object refers to a 
+:class:`.QueuePool` as a source of connectivity.
 
 For more detail, see :ref:`engines_toplevel` and :ref:`pooling_toplevel`.
 
@@ -28,13 +29,13 @@ The :func:`_sa.create_engine` call accepts additional arguments either
 directly via the ``connect_args`` keyword argument::
 
     e = create_engine(
-        "mysql://scott:tiger@localhost/test", connect_args={"encoding": "utf8"}
+        "mysql+mysqldb://scott:tiger@localhost/test", connect_args={"encoding": "utf8"}
     )
 
 Or for basic string and integer arguments, they can usually be specified
 in the query string of the URL::
 
-    e = create_engine("mysql://scott:tiger@localhost/test?encoding=utf8")
+    e = create_engine("mysql+mysqldb://scott:tiger@localhost/test?encoding=utf8")
 
 .. seealso::
 
@@ -245,57 +246,60 @@ A connection will transparently reconnect for single-parameter and no-parameter
 statement executions::
 
 
-  import time
+    import time
 
-  from sqlalchemy import event
+    from sqlalchemy import event
 
 
-  def reconnecting_engine(engine, num_retries, retry_interval):
-      def _run_with_retries(fn, context, cursor_obj, statement, *arg, **kw):
-          for retry in range(num_retries + 1):
-              try:
-                  fn(cursor_obj, statement, context=context, *arg)
-              except engine.dialect.dbapi.Error as raw_dbapi_err:
-                  connection = context.root_connection
-                  if engine.dialect.is_disconnect(raw_dbapi_err, connection, cursor_obj):
-                      if retry > num_retries:
-                          raise
-                      engine.logger.error(
-                          "disconnection error, retrying operation",
-                          exc_info=True,
-                      )
-                      connection.invalidate()
+    def reconnecting_engine(engine, num_retries, retry_interval):
+        def _run_with_retries(fn, context, cursor_obj, statement, *arg, **kw):
+            for retry in range(num_retries + 1):
+                try:
+                    fn(cursor_obj, statement, context=context, *arg)
+                except engine.dialect.dbapi.Error as raw_dbapi_err:
+                    connection = context.root_connection
+                    if engine.dialect.is_disconnect(raw_dbapi_err, connection, cursor_obj):
+                        engine.logger.error(
+                            "disconnection error, attempt %d/%d",
+                            retry + 1,
+                            num_retries + 1,
+                            exc_info=True,
+                        )
+                        connection.invalidate()
 
-                      # use SQLAlchemy 2.0 API if available
-                      if hasattr(connection, "rollback"):
-                          connection.rollback()
-                      else:
-                          trans = connection.get_transaction()
-                          if trans:
-                              trans.rollback()
+                        # use SQLAlchemy 2.0 API if available
+                        if hasattr(connection, "rollback"):
+                            connection.rollback()
+                        else:
+                            trans = connection.get_transaction()
+                            if trans:
+                                trans.rollback()
 
-                      time.sleep(retry_interval)
-                      context.cursor = cursor_obj = connection.connection.cursor()
-                  else:
-                      raise
-              else:
-                  return True
+                        if retry == num_retries:
+                            raise
 
-      e = engine.execution_options(isolation_level="AUTOCOMMIT")
+                        time.sleep(retry_interval)
+                        context.cursor = cursor_obj = connection.connection.cursor()
+                    else:
+                        raise
+                else:
+                    return True
 
-      @event.listens_for(e, "do_execute_no_params")
-      def do_execute_no_params(cursor_obj, statement, context):
-          return _run_with_retries(
-              context.dialect.do_execute_no_params, context, cursor_obj, statement
-          )
+        e = engine.execution_options(isolation_level="AUTOCOMMIT")
 
-      @event.listens_for(e, "do_execute")
-      def do_execute(cursor_obj, statement, parameters, context):
-          return _run_with_retries(
-              context.dialect.do_execute, context, cursor_obj, statement, parameters
-          )
+        @event.listens_for(e, "do_execute_no_params")
+        def do_execute_no_params(cursor_obj, statement, context):
+            return _run_with_retries(
+                context.dialect.do_execute_no_params, context, cursor_obj, statement
+            )
 
-      return e
+        @event.listens_for(e, "do_execute")
+        def do_execute(cursor_obj, statement, parameters, context):
+            return _run_with_retries(
+                context.dialect.do_execute, context, cursor_obj, statement, parameters
+            )
+
+        return e
 
 Given the above recipe, a reconnection mid-transaction may be demonstrated
 using the following proof of concept script.  Once run, it will emit a
@@ -305,8 +309,7 @@ using the following proof of concept script.  Once run, it will emit a
     from sqlalchemy import select
 
     if __name__ == "__main__":
-
-        engine = create_engine("mysql://scott:tiger@localhost/test", echo_pool=True)
+        engine = create_engine("mysql+mysqldb://scott:tiger@localhost/test", echo_pool=True)
 
         def do_a_thing(engine):
             with engine.begin() as conn:
@@ -315,7 +318,7 @@ using the following proof of concept script.  Once run, it will emit a
                     time.sleep(5)
 
         e = reconnecting_engine(
-            create_engine("mysql://scott:tiger@localhost/test", echo_pool=True),
+            create_engine("mysql+mysqldb://scott:tiger@localhost/test", echo_pool=True),
             num_retries=5,
             retry_interval=2,
         )
@@ -323,7 +326,9 @@ using the following proof of concept script.  Once run, it will emit a
         do_a_thing(e)
 
 Restart the database while the script runs to demonstrate the transparent
-reconnect operation::
+reconnect operation:
+
+.. sourcecode:: text
 
     $ python reconnect_test.py
     ping: 1
@@ -372,7 +377,7 @@ configured using ``reset_on_return``::
     from sqlalchemy.pool import QueuePool
 
     engine = create_engine(
-        "mysql://scott:tiger@localhost/myisam_database",
+        "mysql+mysqldb://scott:tiger@localhost/myisam_database",
         pool=QueuePool(reset_on_return=False),
     )
 
@@ -384,19 +389,18 @@ to ``True``, ``False``, and ``None``.   Setting to ``commit`` will cause
 a COMMIT as any connection is returned to the pool::
 
     engine = create_engine(
-        "mssql://scott:tiger@mydsn", pool=QueuePool(reset_on_return="commit")
+        "mssql+pyodbc://scott:tiger@mydsn", pool=QueuePool(reset_on_return="commit")
     )
 
 I am using multiple connections with a SQLite database (typically to test transaction operation), and my test program is not working!
 ----------------------------------------------------------------------------------------------------------------------------------------------------------
 
-If using a SQLite ``:memory:`` database, or a version of SQLAlchemy prior
-to version 0.7, the default connection pool is the :class:`.SingletonThreadPool`,
-which maintains exactly one SQLite connection per thread.  So two
-connections in use in the same thread will actually be the same SQLite
-connection.   Make sure you're not using a :memory: database and
-use :class:`.NullPool`, which is the default for non-memory databases in
-current SQLAlchemy versions.
+If using a SQLite ``:memory:`` database the default connection pool is the 
+:class:`.SingletonThreadPool`, which maintains exactly one SQLite connection
+per thread.  So two connections in use in the same thread will actually be 
+the same SQLite connection.  Make sure you're not using a :memory: database
+so that the engine will use :class:`.QueuePool` (the default for non-memory 
+databases in current SQLAlchemy versions).
 
 .. seealso::
 
@@ -410,14 +414,14 @@ How do I get at the raw DBAPI connection when using an Engine?
 With a regular SA engine-level Connection, you can get at a pool-proxied
 version of the DBAPI connection via the :attr:`_engine.Connection.connection` attribute on
 :class:`_engine.Connection`, and for the really-real DBAPI connection you can call the
-:attr:`._ConnectionFairy.dbapi_connection` attribute on that.  On regular sync drivers
+:attr:`.PoolProxiedConnection.dbapi_connection` attribute on that.  On regular sync drivers
 there is usually no need to access the non-pool-proxied DBAPI connection,
 as all methods are proxied through::
 
     engine = create_engine(...)
     conn = engine.connect()
 
-    # pep-249 style ConnectionFairy connection pool proxy object
+    # pep-249 style PoolProxiedConnection (historically called a "connection fairy")
     connection_fairy = conn.connection
 
     # typically to run statements one would get a cursor() from this
@@ -434,28 +438,28 @@ as all methods are proxied through::
     also_raw_dbapi_connection = connection_fairy.driver_connection
 
 .. versionchanged:: 1.4.24  Added the
-   :attr:`._ConnectionFairy.dbapi_connection` attribute,
+   :attr:`.PoolProxiedConnection.dbapi_connection` attribute,
    which supersedes the previous
-   :attr:`._ConnectionFairy.connection` attribute which still remains
+   :attr:`.PoolProxiedConnection.connection` attribute which still remains
    available; this attribute always provides a pep-249 synchronous style
-   connection object.  The :attr:`._ConnectionFairy.driver_connection`
+   connection object.  The :attr:`.PoolProxiedConnection.driver_connection`
    attribute is also added which will always refer to the real driver-level
    connection regardless of what API it presents.
 
-Accessing the underlying connnection for an asyncio driver
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Accessing the underlying connection for an asyncio driver
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 When an asyncio driver is in use, there are two changes to the above
 scheme.  The first is that when using an :class:`_asyncio.AsyncConnection`,
-the :class:`._ConnectionFairy` must be accessed using the awaitable method
+the :class:`.PoolProxiedConnection` must be accessed using the awaitable method
 :meth:`_asyncio.AsyncConnection.get_raw_connection`.   The
-returned :class:`._ConnectionFairy` in this case retains a sync-style
-pep-249 usage pattern, and the :attr:`._ConnectionFairy.dbapi_connection`
+returned :class:`.PoolProxiedConnection` in this case retains a sync-style
+pep-249 usage pattern, and the :attr:`.PoolProxiedConnection.dbapi_connection`
 attribute refers to a
 a SQLAlchemy-adapted connection object which adapts the asyncio
 connection to a sync style pep-249 API, in other words there are *two* levels
 of proxying going on when using an asyncio driver.   The actual asyncio connection
-is available from the :class:`._ConnectionFairy.driver_connection` attribute.
+is available from the :class:`.PoolProxiedConnection.driver_connection` attribute.
 To restate the previous example in terms of asyncio looks like::
 
     async def main():
@@ -479,8 +483,8 @@ To restate the previous example in terms of asyncio looks like::
         result = await raw_asyncio_connection.execute(...)
 
 .. versionchanged:: 1.4.24  Added the
-   :attr:`._ConnectionFairy.dbapi_connection`
-   and :attr:`._ConnectionFairy.driver_connection` attributes to allow access
+   :attr:`.PoolProxiedConnection.dbapi_connection`
+   and :attr:`.PoolProxiedConnection.driver_connection` attributes to allow access
    to pep-249 connections, pep-249 adaption layers, and underlying driver
    connections using a consistent interface.
 
@@ -489,10 +493,10 @@ SQLAlchemy-adapted form of connection which presents a synchronous-style
 pep-249 style API.  To access the actual
 asyncio driver connection, which will present the original asyncio API
 of the driver in use, this can be accessed via the
-:attr:`._ConnectionFairy.driver_connection` attribute of
-:class:`._ConnectionFairy`.
-For a standard pep-249 driver, :attr:`._ConnectionFairy.dbapi_connection`
-and :attr:`._ConnectionFairy.driver_connection` are synonymous.
+:attr:`.PoolProxiedConnection.driver_connection` attribute of
+:class:`.PoolProxiedConnection`.
+For a standard pep-249 driver, :attr:`.PoolProxiedConnection.dbapi_connection`
+and :attr:`.PoolProxiedConnection.driver_connection` are synonymous.
 
 You must ensure that you revert any isolation level settings or other
 operation-specific settings on the connection back to normal before returning
@@ -502,7 +506,9 @@ As an alternative to reverting settings, you can call the
 :meth:`_engine.Connection.detach` method on either :class:`_engine.Connection`
 or the proxied connection, which will de-associate the connection from the pool
 such that it will be closed and discarded when :meth:`_engine.Connection.close`
-is called::
+is called:
+
+.. sourcecode:: text
 
     conn = engine.connect()
     conn.detach()  # detaches the DBAPI connection from the connection pool

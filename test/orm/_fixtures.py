@@ -279,7 +279,11 @@ class FixtureTest(fixtures.MappedTest):
             Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
             ),
-            Column("parent_id", Integer, ForeignKey("nodes.id")),
+            Column(
+                "parent_id",
+                Integer,
+                ForeignKey("nodes.id"),
+            ),
             Column("data", String(30)),
             test_needs_acid=True,
             test_needs_fk=True,
@@ -396,7 +400,7 @@ class FixtureTest(fixtures.MappedTest):
         return CannedResults(self)
 
 
-class CannedResults(object):
+class CannedResults:
     """Built on demand, instances use mappers in effect at time of call."""
 
     def __init__(self, test):

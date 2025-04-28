@@ -1,7 +1,9 @@
+import itertools
 import unicodedata
 
 import sqlalchemy as sa
 from sqlalchemy import Computed
+from sqlalchemy import Connection
 from sqlalchemy import DefaultClause
 from sqlalchemy import event
 from sqlalchemy import FetchedValue
@@ -17,6 +19,9 @@ from sqlalchemy import sql
 from sqlalchemy import String
 from sqlalchemy import testing
 from sqlalchemy import UniqueConstraint
+from sqlalchemy.engine import Inspector
+from sqlalchemy.engine.reflection import cache
+from sqlalchemy.sql.elements import quoted_name
 from sqlalchemy.testing import assert_raises
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
@@ -36,9 +41,9 @@ from sqlalchemy.testing import is_true
 from sqlalchemy.testing import mock
 from sqlalchemy.testing import not_in
 from sqlalchemy.testing import skip
+from sqlalchemy.testing.provision import normalize_sequence
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
-from sqlalchemy.util import ue
 
 
 class ReflectionTest(fixtures.TestBase, ComparesTables):
@@ -53,7 +58,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             Column("user_id", sa.INT, primary_key=True),
             Column("user_name", sa.VARCHAR(20), nullable=False),
             Column("test1", sa.CHAR(5), nullable=False),
-            Column("test2", sa.Float(5), nullable=False),
+            Column("test2", sa.Float(), nullable=False),
             Column("test3", sa.Text),
             Column("test4", sa.Numeric(10, 2), nullable=False),
             Column("test5", sa.Date),
@@ -134,10 +139,10 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         )
         meta.create_all(connection)
         meta2 = MetaData()
-        t1r, t2r, t3r = [
+        t1r, t2r, t3r = (
             Table(x, meta2, autoload_with=connection)
             for x in ("t1", "t2", "t3")
-        ]
+        )
         assert t1r.c.t2id.references(t2r.c.id)
         assert t1r.c.t3id.references(t3r.c.id)
 
@@ -255,7 +260,8 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         )
         assert "nonexistent" not in meta.tables
 
-    def test_extend_existing(self, connection, metadata):
+    @testing.variation("use_metadata_reflect", [True, False])
+    def test_extend_existing(self, connection, metadata, use_metadata_reflect):
         meta = metadata
 
         Table(
@@ -274,6 +280,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         old_q = Column("q", Integer)
         t2 = Table("t", m2, old_z, old_q)
         eq_(list(t2.primary_key.columns), [t2.c.z])
+
         t2 = Table(
             "t",
             m2,
@@ -281,14 +288,17 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             extend_existing=True,
             autoload_with=connection,
         )
-        eq_(set(t2.columns.keys()), set(["x", "y", "z", "q", "id"]))
+        if use_metadata_reflect:
+            m2.reflect(connection, extend_existing=True)
+        eq_(set(t2.columns.keys()), {"x", "y", "z", "q", "id"})
 
         # this has been the actual behavior, the cols are added together,
         # however the test wasn't checking this correctly
         eq_(list(t2.primary_key.columns), [t2.c.z, t2.c.id])
 
         assert t2.c.z is not old_z
-        assert t2.c.y is old_y
+        if not use_metadata_reflect:
+            assert t2.c.y is old_y
         assert t2.c.z.type._type_affinity is Integer
         assert t2.c.q is old_q
 
@@ -300,7 +310,9 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             extend_existing=False,
             autoload_with=connection,
         )
-        eq_(set(t3.columns.keys()), set(["z"]))
+        if use_metadata_reflect:
+            m3.reflect(connection, extend_existing=False)
+        eq_(set(t3.columns.keys()), {"z"})
 
         m4 = MetaData()
         old_z = Column("z", String, primary_key=True)
@@ -316,12 +328,96 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             autoload_replace=False,
             autoload_with=connection,
         )
-        eq_(set(t4.columns.keys()), set(["x", "y", "z", "q", "id"]))
+        if use_metadata_reflect:
+            m4.reflect(
+                connection, extend_existing=True, autoload_replace=False
+            )
+        eq_(set(t4.columns.keys()), {"x", "y", "z", "q", "id"})
         eq_(list(t4.primary_key.columns), [t4.c.z, t4.c.id])
         assert t4.c.z is old_z
         assert t4.c.y is old_y
         assert t4.c.z.type._type_affinity is String
         assert t4.c.q is old_q
+
+    @testing.variation(
+        "extend_type",
+        [
+            "autoload",
+            "metadata_reflect",
+            "metadata_reflect_no_replace",
+            "plain_table",
+        ],
+    )
+    def test_extend_existing_never_dupe_column(
+        self, connection, metadata, extend_type
+    ):
+        """test #8925"""
+        meta = metadata
+
+        Table(
+            "t",
+            meta,
+            Column("id", Integer, primary_key=True),
+            Column("x", Integer),
+            Column("y", Integer),
+        )
+        meta.create_all(connection)
+
+        m2 = MetaData()
+        if extend_type.metadata_reflect:
+            t2 = Table(
+                "t",
+                m2,
+                Column("id", Integer, primary_key=True),
+                Column("x", Integer, key="x2"),
+            )
+            with expect_warnings(
+                'Column with user-specified key "x2" is being replaced '
+                'with plain named column "x", key "x2" is being removed.'
+            ):
+                m2.reflect(connection, extend_existing=True)
+            eq_(set(t2.columns.keys()), {"x", "y", "id"})
+        elif extend_type.metadata_reflect_no_replace:
+            t2 = Table(
+                "t",
+                m2,
+                Column("id", Integer, primary_key=True),
+                Column("x", Integer, key="x2"),
+            )
+            m2.reflect(
+                connection, extend_existing=True, autoload_replace=False
+            )
+            eq_(set(t2.columns.keys()), {"x2", "y", "id"})
+        elif extend_type.autoload:
+            t2 = Table(
+                "t",
+                m2,
+                Column("id", Integer, primary_key=True),
+                Column("x", Integer, key="x2"),
+                autoload_with=connection,
+                extend_existing=True,
+            )
+            eq_(set(t2.columns.keys()), {"x2", "y", "id"})
+        elif extend_type.plain_table:
+            Table(
+                "t",
+                m2,
+                Column("id", Integer, primary_key=True),
+                Column("x", Integer, key="x2"),
+            )
+            with expect_warnings(
+                'Column with user-specified key "x2" is being replaced with '
+                'plain named column "x", key "x2" is being removed.'
+            ):
+                t2 = Table(
+                    "t",
+                    m2,
+                    Column("id", Integer, primary_key=True),
+                    Column("x", Integer),
+                    Column("y", Integer),
+                    extend_existing=True,
+                )
+            eq_(set(t2.columns.keys()), {"x", "y", "id"})
 
     def test_extend_existing_reflect_all_dont_dupe_index(
         self, connection, metadata
@@ -374,7 +470,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
                 1,
             )
 
-    @testing.emits_warning(r".*omitted columns")
     def test_include_columns_indexes(self, connection, metadata):
         m = metadata
 
@@ -1057,7 +1152,6 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
     @testing.crashes("oracle", "FIXME: unknown, confirm not fails_on")
     @testing.requires.check_constraints
     def test_reserved(self, connection, metadata):
-
         # check a table that uses a SQL reserved name doesn't cause an
         # error
 
@@ -1116,11 +1210,11 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
 
         m2 = MetaData()
         m2.reflect(connection, only=["rt_a", "rt_b"])
-        eq_(set(m2.tables.keys()), set(["rt_a", "rt_b"]))
+        eq_(set(m2.tables.keys()), {"rt_a", "rt_b"})
 
         m3 = MetaData()
         m3.reflect(connection, only=lambda name, meta: name == "rt_c")
-        eq_(set(m3.tables.keys()), set(["rt_c"]))
+        eq_(set(m3.tables.keys()), {"rt_c"})
 
         m4 = MetaData()
 
@@ -1154,7 +1248,7 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         m8_e2 = MetaData()
         rt_c = Table("rt_c", m8_e2)
         m8_e2.reflect(connection, extend_existing=True, only=["rt_a", "rt_c"])
-        eq_(set(m8_e2.tables.keys()), set(["rt_a", "rt_c"]))
+        eq_(set(m8_e2.tables.keys()), {"rt_a", "rt_c"})
         eq_(rt_c.c.keys(), ["id"])
 
         baseline.drop_all(connection)
@@ -1211,16 +1305,16 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         # Make sure indexes are in the order we expect them in
         tmp = [(idx.name, idx) for idx in t2.indexes]
         tmp.sort()
-        r1, r2, r3 = [idx[1] for idx in tmp]
+        r1, r2, r3 = (idx[1] for idx in tmp)
 
         assert r1.name == "idx1"
         assert r2.name == "idx2"
         assert r1.unique == True  # noqa
         assert r2.unique == False  # noqa
         assert r3.unique == False  # noqa
-        assert set([t2.c.id]) == set(r1.columns)
-        assert set([t2.c.name, t2.c.id]) == set(r2.columns)
-        assert set([t2.c.name]) == set(r3.columns)
+        assert {t2.c.id} == set(r1.columns)
+        assert {t2.c.name, t2.c.id} == set(r2.columns)
+        assert {t2.c.name} == set(r3.columns)
 
     @testing.requires.comment_reflection
     def test_comment_reflection(self, connection, metadata):
@@ -1255,12 +1349,13 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         m2 = MetaData()
         t2 = Table("x", m2, autoload_with=connection)
 
-        ck = [
+        cks = [
             const
             for const in t2.constraints
             if isinstance(const, sa.CheckConstraint)
-        ][0]
-
+        ]
+        eq_(len(cks), 1)
+        ck = cks[0]
         eq_regex(ck.sqltext.text, r"[\(`]*q[\)`]* > 10")
         eq_(ck.name, "ck1")
 
@@ -1269,11 +1364,17 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
         sa.Index("x_ix", t.c.a, t.c.b)
         metadata.create_all(connection)
 
-        def mock_get_columns(self, connection, table_name, **kw):
-            return [{"name": "b", "type": Integer, "primary_key": False}]
+        gri = Inspector._get_reflection_info
+
+        def mock_gri(self, *a, **kw):
+            res = gri(self, *a, **kw)
+            res.columns[(None, "x")] = [
+                col for col in res.columns[(None, "x")] if col["name"] == "b"
+            ]
+            return res
 
         with testing.mock.patch.object(
-            connection.dialect, "get_columns", mock_get_columns
+            Inspector, "_get_reflection_info", mock_gri
         ):
             m = MetaData()
             with testing.expect_warnings(
@@ -1282,6 +1383,34 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
                 t = Table("x", m, autoload_with=connection)
 
         eq_(list(t.indexes)[0].columns, [t.c.b])
+
+    def test_index_reflection_expression_not_found(self, connection, metadata):
+        t = Table("x", metadata, Column("a", Integer), Column("b", Integer))
+        sa.Index("x_ix", t.c.a)
+        sa.Index("x_iy", t.c.a, t.c.b)
+        metadata.create_all(connection)
+
+        gri = Inspector._get_reflection_info
+
+        def mock_gri(self, *a, **kw):
+            res = gri(self, *a, **kw)
+            for idx in res.indexes[(None, "x")]:
+                if idx["name"] == "x_iy":
+                    idx["column_names"][1] = None
+                    idx.pop("expressions", None)
+            return res
+
+        with testing.mock.patch.object(
+            Inspector, "_get_reflection_info", mock_gri
+        ):
+            m = MetaData()
+            with testing.expect_warnings(
+                "Skipping index 'x_iy' because key 2 reflected as None"
+            ):
+                t = Table("x", m, autoload_with=connection)
+
+        eq_(len(t.indexes), 1)
+        eq_(list(t.indexes)[0].name, "x_ix")
 
     @testing.requires.views
     def test_views(self, connection, metadata):
@@ -1314,23 +1443,19 @@ class ReflectionTest(fixtures.TestBase, ComparesTables):
             m2 = MetaData()
 
             m2.reflect(connection, views=False)
-            eq_(
-                set(m2.tables), set(["users", "email_addresses", "dingalings"])
-            )
+            eq_(set(m2.tables), {"users", "email_addresses", "dingalings"})
 
             m2 = MetaData()
             m2.reflect(connection, views=True)
             eq_(
                 set(m2.tables),
-                set(
-                    [
-                        "email_addresses_v",
-                        "users_v",
-                        "users",
-                        "dingalings",
-                        "email_addresses",
-                    ]
-                ),
+                {
+                    "email_addresses_v",
+                    "users_v",
+                    "users",
+                    "dingalings",
+                    "email_addresses",
+                },
             )
         finally:
             _drop_views(connection)
@@ -1356,7 +1481,9 @@ class CreateDropTest(fixtures.TablesTest):
             Column(
                 "user_id",
                 sa.Integer,
-                sa.Sequence("user_id_seq", optional=True),
+                normalize_sequence(
+                    config, sa.Sequence("user_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column("user_name", sa.String(40)),
@@ -1368,7 +1495,9 @@ class CreateDropTest(fixtures.TablesTest):
             Column(
                 "address_id",
                 sa.Integer,
-                sa.Sequence("address_id_seq", optional=True),
+                normalize_sequence(
+                    config, sa.Sequence("address_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column("user_id", sa.Integer, sa.ForeignKey("users.user_id")),
@@ -1381,7 +1510,9 @@ class CreateDropTest(fixtures.TablesTest):
             Column(
                 "order_id",
                 sa.Integer,
-                sa.Sequence("order_id_seq", optional=True),
+                normalize_sequence(
+                    config, sa.Sequence("order_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column("user_id", sa.Integer, sa.ForeignKey("users.user_id")),
@@ -1394,7 +1525,9 @@ class CreateDropTest(fixtures.TablesTest):
             Column(
                 "item_id",
                 sa.INT,
-                sa.Sequence("items_id_seq", optional=True),
+                normalize_sequence(
+                    config, sa.Sequence("items_id_seq", optional=True)
+                ),
                 primary_key=True,
             ),
             Column("order_id", sa.INT, sa.ForeignKey("orders")),
@@ -1410,44 +1543,68 @@ class CreateDropTest(fixtures.TablesTest):
         eq_(ua, ["users", "email_addresses"])
         eq_(oi, ["orders", "items"])
 
-    def test_checkfirst(self, connection):
+    def test_checkfirst(self, connection: Connection) -> None:
         insp = inspect(connection)
+
         users = self.tables.users
 
         is_false(insp.has_table("users"))
         users.create(connection)
+        insp.clear_cache()
         is_true(insp.has_table("users"))
         users.create(connection, checkfirst=True)
         users.drop(connection)
         users.drop(connection, checkfirst=True)
+        insp.clear_cache()
         is_false(insp.has_table("users"))
         users.create(connection, checkfirst=True)
         users.drop(connection)
 
-    def test_createdrop(self, connection):
+    def test_createdrop(self, connection: Connection) -> None:
         insp = inspect(connection)
 
         metadata = self.tables_test_metadata
+        assert metadata is not None
 
         metadata.create_all(connection)
         is_true(insp.has_table("items"))
         is_true(insp.has_table("email_addresses"))
         metadata.create_all(connection)
+        insp.clear_cache()
         is_true(insp.has_table("items"))
 
         metadata.drop_all(connection)
+        insp.clear_cache()
         is_false(insp.has_table("items"))
         is_false(insp.has_table("email_addresses"))
         metadata.drop_all(connection)
+        insp.clear_cache()
         is_false(insp.has_table("items"))
 
-    def test_tablenames(self, connection):
+    def test_has_table_and_table_names(self, connection):
+        """establish that has_table and get_table_names are consistent w/
+        each other with regard to caching
+
+        """
         metadata = self.tables_test_metadata
         metadata.create_all(bind=connection)
         insp = inspect(connection)
 
         # ensure all tables we created are in the list.
         is_true(set(insp.get_table_names()).issuperset(metadata.tables))
+
+        assert insp.has_table("items")
+        assert "items" in insp.get_table_names()
+
+        self.tables.items.drop(connection)
+
+        # cached
+        assert insp.has_table("items")
+        assert "items" in insp.get_table_names()
+
+        insp = inspect(connection)
+        assert not insp.has_table("items")
+        assert "items" not in insp.get_table_names()
 
 
 class SchemaManipulationTest(fixtures.TestBase):
@@ -1469,7 +1626,7 @@ class SchemaManipulationTest(fixtures.TestBase):
         addresses.append_constraint(fk)
         addresses.append_constraint(fk)
         assert len(addresses.c.user_id.foreign_keys) == 1
-        assert addresses.constraints == set([addresses.primary_key, fk])
+        assert addresses.constraints == {addresses.primary_key, fk}
 
 
 class UnicodeReflectionTest(fixtures.TablesTest):
@@ -1477,38 +1634,37 @@ class UnicodeReflectionTest(fixtures.TablesTest):
 
     @classmethod
     def define_tables(cls, metadata):
-
-        no_multibyte_period = set([("plain", "col_plain", "ix_plain")])
+        no_multibyte_period = {("plain", "col_plain", "ix_plain")}
         no_has_table = [
             (
                 "no_has_table_1",
-                ue("col_Unit\u00e9ble"),
-                ue("ix_Unit\u00e9ble"),
+                "col_Unit\u00e9ble",
+                "ix_Unit\u00e9ble",
             ),
-            ("no_has_table_2", ue("col_\u6e2c\u8a66"), ue("ix_\u6e2c\u8a66")),
+            ("no_has_table_2", "col_\u6e2c\u8a66", "ix_\u6e2c\u8a66"),
         ]
         no_case_sensitivity = [
             (
-                ue("\u6e2c\u8a66"),
-                ue("col_\u6e2c\u8a66"),
-                ue("ix_\u6e2c\u8a66"),
+                "\u6e2c\u8a66",
+                "col_\u6e2c\u8a66",
+                "ix_\u6e2c\u8a66",
             ),
             (
-                ue("unit\u00e9ble"),
-                ue("col_unit\u00e9ble"),
-                ue("ix_unit\u00e9ble"),
+                "unit\u00e9ble",
+                "col_unit\u00e9ble",
+                "ix_unit\u00e9ble",
             ),
         ]
         full = [
             (
-                ue("Unit\u00e9ble"),
-                ue("col_Unit\u00e9ble"),
-                ue("ix_Unit\u00e9ble"),
+                "Unit\u00e9ble",
+                "col_Unit\u00e9ble",
+                "ix_Unit\u00e9ble",
             ),
             (
-                ue("\u6e2c\u8a66"),
-                ue("col_\u6e2c\u8a66"),
-                ue("ix_\u6e2c\u8a66"),
+                "\u6e2c\u8a66",
+                "col_\u6e2c\u8a66",
+                "ix_\u6e2c\u8a66",
             ),
         ]
 
@@ -1538,7 +1694,7 @@ class UnicodeReflectionTest(fixtures.TablesTest):
                 Column(
                     "id",
                     sa.Integer,
-                    sa.Sequence(cname + "_id_seq"),
+                    normalize_sequence(config, sa.Sequence(cname + "_id_seq")),
                     primary_key=True,
                 ),
                 Column(cname, Integer),
@@ -1560,18 +1716,17 @@ class UnicodeReflectionTest(fixtures.TablesTest):
         # (others?) expect non-unicode strings in result sets/bind
         # params
 
-        names = set([rec[0] for rec in self.names])
+        names = {rec[0] for rec in self.names}
 
         reflected = set(inspect(connection).get_table_names())
 
         if not names.issubset(reflected) and hasattr(unicodedata, "normalize"):
-
             # Python source files in the utf-8 coding seem to
             # normalize literals as NFC (and the above are
             # explicitly NFC).  Maybe this database normalizes NFD
             # on reflection.
 
-            nfc = set([unicodedata.normalize("NFC", n) for n in names])
+            nfc = {unicodedata.normalize("NFC", n) for n in names}
             self.assert_(nfc == names)
 
             # Yep.  But still ensure that bulk reflection and
@@ -1585,9 +1740,7 @@ class UnicodeReflectionTest(fixtures.TablesTest):
     @testing.requires.unicode_connections
     def test_get_names(self, connection):
         inspector = inspect(connection)
-        names = dict(
-            (tname, (cname, ixname)) for tname, cname, ixname in self.names
-        )
+        names = {tname: (cname, ixname) for tname, cname, ixname in self.names}
         for tname in inspector.get_table_names():
             assert tname in names
             eq_(
@@ -1603,13 +1756,7 @@ class SchemaTest(fixtures.TestBase):
     __backend__ = True
 
     @testing.requires.schemas
-    @testing.requires.cross_schema_fk_reflection
     def test_has_schema(self):
-        if not hasattr(testing.db.dialect, "has_schema"):
-            testing.config.skip_test(
-                "dialect %s doesn't have a has_schema method"
-                % testing.db.dialect.name
-            )
         with testing.db.connect() as conn:
             eq_(
                 testing.db.dialect.has_schema(
@@ -1626,7 +1773,6 @@ class SchemaTest(fixtures.TestBase):
     @testing.requires.cross_schema_fk_reflection
     @testing.requires.implicit_default_schema
     def test_blank_schema_arg(self, connection, metadata):
-
         Table(
             "some_table",
             metadata,
@@ -1648,17 +1794,14 @@ class SchemaTest(fixtures.TestBase):
 
         eq_(
             set(meta2.tables),
-            set(
-                [
-                    "some_other_table",
-                    "%s.some_table" % testing.config.test_schema,
-                ]
-            ),
+            {
+                "some_other_table",
+                "%s.some_table" % testing.config.test_schema,
+            },
         )
 
     @testing.requires.schemas
     def test_explicit_default_schema(self, connection, metadata):
-
         schema = connection.dialect.default_schema_name
 
         assert bool(schema)
@@ -1708,7 +1851,6 @@ class SchemaTest(fixtures.TestBase):
         eq_(t.c.keys(), ["q"])
 
     @testing.requires.schemas
-    @testing.fails_on("sybase", "FIXME: unknown")
     def test_explicit_default_schema_metadata(self, connection, metadata):
         schema = connection.dialect.default_schema_name
 
@@ -1745,13 +1887,11 @@ class SchemaTest(fixtures.TestBase):
         m2.reflect(connection)
         eq_(
             set(m2.tables),
-            set(
-                [
-                    "%s.dingalings" % testing.config.test_schema,
-                    "%s.users" % testing.config.test_schema,
-                    "%s.email_addresses" % testing.config.test_schema,
-                ]
-            ),
+            {
+                "%s.dingalings" % testing.config.test_schema,
+                "%s.users" % testing.config.test_schema,
+                "%s.email_addresses" % testing.config.test_schema,
+            },
         )
 
     @testing.requires.schemas
@@ -1776,8 +1916,8 @@ class SchemaTest(fixtures.TestBase):
         m3.reflect(connection, schema=testing.config.test_schema)
 
         eq_(
-            set((t.name, t.schema) for t in m2.tables.values()),
-            set((t.name, t.schema) for t in m3.tables.values()),
+            {(t.name, t.schema) for t in m2.tables.values()},
+            {(t.name, t.schema) for t in m3.tables.values()},
         )
 
 
@@ -1796,7 +1936,7 @@ def createTables(meta, schema=None):
         Column("user_id", sa.INT, primary_key=True),
         Column("user_name", sa.VARCHAR(20), nullable=False),
         Column("test1", sa.CHAR(5), nullable=False),
-        Column("test2", sa.Float(5), nullable=False),
+        Column("test2", sa.Float(), nullable=False),
         Column("test3", sa.Text),
         Column("test4", sa.Numeric(10, 2), nullable=False),
         Column("test5", sa.Date),
@@ -1932,7 +2072,7 @@ class CaseSensitiveTest(fixtures.TablesTest):
     @testing.fails_if(testing.requires._has_mysql_on_windows)
     def test_table_names(self, connection):
         x = inspect(connection).get_table_names()
-        assert set(["SomeTable", "SomeOtherTable"]).issubset(x)
+        assert {"SomeTable", "SomeOtherTable"}.issubset(x)
 
     def test_reflect_exact_name(self, connection):
         m = MetaData()
@@ -2007,7 +2147,7 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TablesTest):
     def test_override_key(self, connection):
         def assertions(table):
             eq_(table.c.YXZ.name, "x")
-            eq_(set(table.primary_key), set([table.c.YXZ]))
+            eq_(set(table.primary_key), {table.c.YXZ})
 
         self._do_test(connection, "x", {"key": "YXZ"}, assertions)
 
@@ -2022,7 +2162,6 @@ class ColumnEventsTest(fixtures.RemovesEvents, fixtures.TablesTest):
         m = MetaData()
 
         def column_reflect(insp, table, column_info):
-
             if column_info["name"] == "q":
                 column_info["key"] = "qyz"
             elif column_info["name"] == "x":
@@ -2214,7 +2353,10 @@ class IncludeColsFksTest(AssertsCompiledSQL, fixtures.TestBase):
         foo = Table(
             "foo",
             meta,
-            *[Column(n, sa.String(30)) for n in ["a", "b", "c", "d", "e", "f"]]
+            *[
+                Column(n, sa.String(30))
+                for n in ["a", "b", "c", "d", "e", "f"]
+            ],
         )
         meta.create_all(connection)
 
@@ -2274,7 +2416,6 @@ class IncludeColsFksTest(AssertsCompiledSQL, fixtures.TestBase):
         for c in ("a", "c", "d"):
             assert c not in foo.c
 
-    @testing.emits_warning
     @testing.combinations(True, False, argnames="resolve_fks")
     def test_include_cols_skip_fk_col(
         self, connection, tab_w_fks, resolve_fks
@@ -2294,7 +2435,7 @@ class IncludeColsFksTest(AssertsCompiledSQL, fixtures.TestBase):
         eq_([c.name for c in b2.c], ["x", "q", "p"])
 
         # no FK, whether or not resolve_fks was called
-        eq_(b2.constraints, set((b2.primary_key,)))
+        eq_(b2.constraints, {b2.primary_key})
 
         b2a = b2.alias()
         eq_([c.name for c in b2a.c], ["x", "q", "p"])
@@ -2356,3 +2497,162 @@ class IncludeColsFksTest(AssertsCompiledSQL, fixtures.TestBase):
             "SELECT b_1.x, b_1.q, b_1.p, b_1.r, b_1.s, b_1.t "
             "FROM b AS b_1 JOIN a ON a.x = b_1.r",
         )
+
+
+class ReflectionCacheTest(fixtures.TestBase):
+    @testing.fixture(params=["arg", "kwarg"])
+    def cache(self, connection, request):
+        dialect = connection.dialect
+        info_cache = {}
+        counter = itertools.count(1)
+
+        @cache
+        def get_cached_name(self, connection, *args, **kw):
+            return next(counter)
+
+        def get_cached_name_via_arg(name):
+            return get_cached_name(
+                dialect, connection, name, info_cache=info_cache
+            )
+
+        def get_cached_name_via_kwarg(name):
+            return get_cached_name(
+                dialect, connection, name=name, info_cache=info_cache
+            )
+
+        if request.param == "arg":
+            yield get_cached_name_via_arg
+        elif request.param == "kwarg":
+            yield get_cached_name_via_kwarg
+        else:
+            assert False
+
+    @testing.fixture(params=[False, True])
+    def quote(self, request):
+        yield request.param
+
+    def test_single_string(self, cache):
+        # new value
+        eq_(cache("name1"), 1)
+
+        # same value, counter not incremented
+        eq_(cache("name1"), 1)
+
+    def test_multiple_string(self, cache):
+        # new value
+        eq_(cache("name1"), 1)
+        eq_(cache("name2"), 2)
+
+        # same values, counter not incremented
+        eq_(cache("name1"), 1)
+        eq_(cache("name2"), 2)
+
+    def test_single_quoted_name(self, cache, quote):
+        # new value
+        eq_(cache(quoted_name("name1", quote=quote)), 1)
+
+        # same value, counter not incremented
+        eq_(cache(quoted_name("name1", quote=quote)), 1)
+
+    def test_multiple_quoted_name(self, cache, quote):
+        # new value
+        eq_(cache(quoted_name("name1", quote=quote)), 1)
+        eq_(cache(quoted_name("name2", quote=quote)), 2)
+
+        # same values, counter not incremented
+        eq_(cache(quoted_name("name1", quote=quote)), 1)
+        eq_(cache(quoted_name("name2", quote=quote)), 2)
+
+    def test_single_quoted_name_and_string(self, cache, quote):
+        # new values
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache("n1"), 2)
+
+        # same values, counter not incremented
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache("n1"), 2)
+
+    def test_multiple_quoted_name_and_string(self, cache, quote):
+        # new values
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n2", quote=quote)), 2)
+        eq_(cache("n1"), 3)
+        eq_(cache("n2"), 4)
+
+        # same values, counter not incremented
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n2", quote=quote)), 2)
+        eq_(cache("n1"), 3)
+        eq_(cache("n2"), 4)
+
+    def test_single_quoted_name_false_true_and_string(self, cache, quote):
+        # new values
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n1", quote=not quote)), 2)
+        eq_(cache("n1"), 3)
+
+        # same values, counter not incremented
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n1", quote=not quote)), 2)
+        eq_(cache("n1"), 3)
+
+    def test_multiple_quoted_name_false_true_and_string(self, cache, quote):
+        # new values
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n2", quote=quote)), 2)
+        eq_(cache(quoted_name("n1", quote=not quote)), 3)
+        eq_(cache(quoted_name("n2", quote=not quote)), 4)
+        eq_(cache("n1"), 5)
+        eq_(cache("n2"), 6)
+
+        # same values, counter not incremented
+        eq_(cache(quoted_name("n1", quote=quote)), 1)
+        eq_(cache(quoted_name("n2", quote=quote)), 2)
+        eq_(cache(quoted_name("n1", quote=not quote)), 3)
+        eq_(cache(quoted_name("n2", quote=not quote)), 4)
+        eq_(cache("n1"), 5)
+        eq_(cache("n2"), 6)
+
+    def test_multiple_quoted_name_false_true_and_string_arg_and_kwarg(
+        self, connection, quote
+    ):
+        dialect = connection.dialect
+        info_cache = {}
+        counter = itertools.count(1)
+
+        @cache
+        def get_cached_name(self, connection, *args, **kw):
+            return next(counter)
+
+        def cache_(*args, **kw):
+            return get_cached_name(
+                dialect, connection, *args, **kw, info_cache=info_cache
+            )
+
+        # new values
+        eq_(cache_(quoted_name("n1", quote=quote)), 1)
+        eq_(cache_(name=quoted_name("n1", quote=quote)), 2)
+        eq_(cache_(quoted_name("n2", quote=quote)), 3)
+        eq_(cache_(name=quoted_name("n2", quote=quote)), 4)
+        eq_(cache_(quoted_name("n1", quote=not quote)), 5)
+        eq_(cache_(name=quoted_name("n1", quote=not quote)), 6)
+        eq_(cache_(quoted_name("n2", quote=not quote)), 7)
+        eq_(cache_(name=quoted_name("n2", quote=not quote)), 8)
+        eq_(cache_("n1"), 9)
+        eq_(cache_(name="n1"), 10)
+        eq_(cache_("n2"), 11)
+        eq_(cache_(name="n2"), 12)
+
+        # same values, counter not incremented
+        eq_(cache_(quoted_name("n1", quote=quote)), 1)
+        eq_(cache_(name=quoted_name("n1", quote=quote)), 2)
+        eq_(cache_(quoted_name("n2", quote=quote)), 3)
+        eq_(cache_(name=quoted_name("n2", quote=quote)), 4)
+        eq_(cache_(quoted_name("n1", quote=not quote)), 5)
+        eq_(cache_(name=quoted_name("n1", quote=not quote)), 6)
+        eq_(cache_(quoted_name("n2", quote=not quote)), 7)
+        eq_(cache_(name=quoted_name("n2", quote=not quote)), 8)
+        eq_(cache_("n1"), 9)
+        eq_(cache_(name="n1"), 10)
+        eq_(cache_("n2"), 11)
+        eq_(cache_(name="n2"), 12)

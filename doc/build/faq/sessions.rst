@@ -118,13 +118,13 @@ does not properly handle the exception.    For example::
 The usage of the :class:`.Session` should fit within a structure similar to this::
 
     try:
-        <use session>
+        # <use session>
         session.commit()
     except:
-       session.rollback()
-       raise
+        session.rollback()
+        raise
     finally:
-       session.close()  # optional, depends on use case
+        session.close()  # optional, depends on use case
 
 Many things can cause a failure within the try/except besides flushes.
 Applications should ensure some system of "framing" is applied to ORM-oriented
@@ -155,7 +155,9 @@ any time and be exactly consistent with what's been flushed to the database.
 While this is theoretically possible, the usefulness of the enhancement is
 greatly decreased by the fact that many database operations require a ROLLBACK
 in any case. Postgres in particular has operations which, once failed, the
-transaction is not allowed to continue::
+transaction is not allowed to continue:
+
+.. sourcecode:: text
 
     test=> create table foo(id integer primary key);
     NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "foo_pkey" for table "foo"
@@ -187,13 +189,13 @@ point of view there is still a transaction that is now in an inactive state.
 
 Given a block such as::
 
-  sess = Session()  # begins a logical transaction
-  try:
-      sess.flush()
+    sess = Session()  # begins a logical transaction
+    try:
+        sess.flush()
 
-      sess.commit()
-  except:
-      sess.rollback()
+        sess.commit()
+    except:
+        sess.rollback()
 
 Above, when a :class:`.Session` is first created, assuming "autocommit mode"
 isn't used, a logical transaction is established within the :class:`.Session`.
@@ -235,7 +237,7 @@ My Query does not return the same number of objects as query.count() tells me - 
 
 The :class:`_query.Query` object, when asked to return a list of ORM-mapped objects,
 will **deduplicate the objects based on primary key**.   That is, if we
-for example use the ``User`` mapping described at :ref:`ormtutorial_toplevel`,
+for example use the ``User`` mapping described at :ref:`tutorial_orm_table_metadata`,
 and we had a SQL query like the following::
 
     q = session.query(User).outerjoin(User.addresses).filter(User.name == "jack")
@@ -308,9 +310,9 @@ I've created a mapping against an Outer Join, and while the query returns rows, 
 Rows returned by an outer join may contain NULL for part of the primary key,
 as the primary key is the composite of both tables.  The :class:`_query.Query` object ignores incoming rows
 that don't have an acceptable primary key.   Based on the setting of the ``allow_partial_pks``
-flag on :func:`.mapper`, a primary key is accepted if the value has at least one non-NULL
+flag on :class:`_orm.Mapper`, a primary key is accepted if the value has at least one non-NULL
 value, or alternatively if the value has no NULL values.  See ``allow_partial_pks``
-at :func:`.mapper`.
+at :class:`_orm.Mapper`.
 
 
 I'm using ``joinedload()`` or ``lazy=False`` to create a JOIN/OUTER JOIN and SQLAlchemy is not constructing the correct query when I try to add a WHERE, ORDER BY, LIMIT, etc. (which relies upon the (OUTER) JOIN)
@@ -332,7 +334,7 @@ method, which emits a `SELECT COUNT`. The reason this is not possible is
 because evaluating the query as a list would incur two SQL calls instead of
 one::
 
-    class Iterates(object):
+    class Iterates:
         def __len__(self):
             print("LEN!")
             return 5
@@ -344,7 +346,9 @@ one::
 
     list(Iterates())
 
-output::
+output:
+
+.. sourcecode:: text
 
     ITER!
     LEN!
@@ -366,7 +370,7 @@ See :ref:`session_deleting_from_collections` for a description of this behavior.
 why isn't my ``__init__()`` called when I load objects?
 -------------------------------------------------------
 
-See :ref:`mapping_constructors` for a description of this behavior.
+See :ref:`mapped_class_load_events` for a description of this behavior.
 
 how do I use ON DELETE CASCADE with SA's ORM?
 ---------------------------------------------
@@ -390,7 +394,7 @@ ORM behind the scenes, the end user sets up object
 relationships naturally. Therefore, the recommended way to
 set ``o.foo`` is to do just that - set it!::
 
-    foo = Session.query(Foo).get(7)
+    foo = session.get(Foo, 7)
     o.foo = foo
     Session.commit()
 
@@ -399,7 +403,7 @@ setting a foreign-key attribute to a new value currently does not trigger
 an "expire" event of the :func:`_orm.relationship` in which it's involved.  This means
 that for the following sequence::
 
-    o = Session.query(SomeClass).first()
+    o = session.scalars(select(SomeClass).limit(1)).first()
 
     # assume the existing o.foo_id value is None;
     # accessing o.foo will reconcile this as ``None``, but will effectively
@@ -424,7 +428,7 @@ and expires all state::
 
     session.commit()  # expires all attributes
 
-    foo_7 = Session.query(Foo).get(7)
+    foo_7 = session.get(Foo, 7)
 
     # o.foo will lazyload again, this time getting the new object
     assert o.foo is foo_7
@@ -432,11 +436,11 @@ and expires all state::
 A more minimal operation is to expire the attribute individually - this can
 be performed for any :term:`persistent` object using :meth:`.Session.expire`::
 
-    o = Session.query(SomeClass).first()
+    o = session.scalars(select(SomeClass).limit(1)).first()
     o.foo_id = 7
     Session.expire(o, ["foo"])  # object must be persistent for this
 
-    foo_7 = Session.query(Foo).get(7)
+    foo_7 = session.get(Foo, 7)
 
     assert o.foo is foo_7  # o.foo lazyloads on access
 
@@ -538,7 +542,9 @@ The function can be demonstrated as follows::
     for obj in walk(a1):
         print(obj)
 
-Output::
+Output:
+
+.. sourcecode:: text
 
     <__main__.A object at 0x10303b190>
     <__main__.B object at 0x103025210>

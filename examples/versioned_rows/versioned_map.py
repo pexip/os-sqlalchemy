@@ -43,7 +43,7 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import validates
-from sqlalchemy.orm.collections import attribute_mapped_collection
+from sqlalchemy.orm.collections import attribute_keyed_dict
 
 
 @event.listens_for(Session, "before_flush")
@@ -54,7 +54,6 @@ def before_flush(session, flush_context, instances):
     """
     for instance in session.dirty:
         if hasattr(instance, "new_version") and session.is_modified(instance):
-
             # make it transient
             instance.new_version(session)
 
@@ -83,7 +82,7 @@ class ConfigData(Base):
 
     elements = relationship(
         "ConfigValueAssociation",
-        collection_class=attribute_mapped_collection("name"),
+        collection_class=attribute_keyed_dict("name"),
         backref=backref("config_data"),
         lazy="subquery",
     )

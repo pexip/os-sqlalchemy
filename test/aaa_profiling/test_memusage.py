@@ -2,9 +2,11 @@ import decimal
 import gc
 import itertools
 import multiprocessing
+import pickle
 import weakref
 
 import sqlalchemy as sa
+from sqlalchemy import and_
 from sqlalchemy import ForeignKey
 from sqlalchemy import func
 from sqlalchemy import inspect
@@ -13,9 +15,14 @@ from sqlalchemy import MetaData
 from sqlalchemy import select
 from sqlalchemy import String
 from sqlalchemy import testing
+from sqlalchemy import types
 from sqlalchemy import Unicode
 from sqlalchemy import util
+from sqlalchemy.dialects import mysql
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.dialects import sqlite
 from sqlalchemy.engine import result
+from sqlalchemy.engine.processors import to_decimal_processor_factory
 from sqlalchemy.orm import aliased
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import clear_mappers
@@ -30,15 +37,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import subqueryload
 from sqlalchemy.orm.session import _sessions
-from sqlalchemy.processors import to_decimal_processor_factory
-from sqlalchemy.processors import to_unicode_processor_factory
 from sqlalchemy.sql import column
 from sqlalchemy.sql import util as sql_util
+from sqlalchemy.sql.util import visit_binary_product
 from sqlalchemy.sql.visitors import cloned_traverse
 from sqlalchemy.sql.visitors import replacement_traverse
 from sqlalchemy.testing import engines
 from sqlalchemy.testing import eq_
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import pickleable
+from sqlalchemy.testing.entities import ComparableEntity
 from sqlalchemy.testing.fixtures import fixture_session
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
@@ -46,11 +54,11 @@ from sqlalchemy.testing.util import gc_collect
 from ..orm import _fixtures
 
 
-class A(fixtures.ComparableEntity):
+class A(ComparableEntity):
     pass
 
 
-class B(fixtures.ComparableEntity):
+class B(ComparableEntity):
     pass
 
 
@@ -255,8 +263,8 @@ class EnsureZeroed(fixtures.ORMTest):
         )
 
 
+@testing.add_to_marker.memory_intensive
 class MemUsageTest(EnsureZeroed):
-    __tags__ = ("memory_intensive",)
     __requires__ = ("cpython", "no_windows")
 
     def test_type_compile(self):
@@ -288,16 +296,7 @@ class MemUsageTest(EnsureZeroed):
         go()
 
     @testing.requires.cextensions
-    def test_UnicodeResultProcessor_init(self):
-        @profile_memory()
-        def go():
-            to_unicode_processor_factory("utf8")
-
-        go()
-
-    @testing.requires.cextensions
     def test_cycles_in_row(self):
-
         tup = result.result_tuple(["a", "b", "c"])
 
         @profile_memory()
@@ -317,25 +316,24 @@ class MemUsageTest(EnsureZeroed):
         """test storage of bind processors, result processors
         in dialect-wide registry."""
 
-        from sqlalchemy.dialects import mysql, postgresql, sqlite
-        from sqlalchemy import types
-
         eng = engines.testing_engine()
         for args in (
-            (types.Integer,),
-            (types.String,),
-            (types.PickleType,),
-            (types.Enum, "a", "b", "c"),
-            (sqlite.DATETIME,),
-            (postgresql.ENUM, "a", "b", "c"),
-            (types.Interval,),
-            (postgresql.INTERVAL,),
-            (mysql.VARCHAR,),
+            (types.Integer, {}),
+            (types.String, {}),
+            (types.PickleType, {}),
+            (types.Enum, "a", "b", "c", {}),
+            (sqlite.DATETIME, {}),
+            (postgresql.ENUM, "a", "b", "c", {"name": "pgenum"}),
+            (types.Interval, {}),
+            (postgresql.INTERVAL, {}),
+            (mysql.VARCHAR, {}),
         ):
 
             @profile_memory()
             def go():
-                type_ = args[0](*args[1:])
+                kwargs = args[-1]
+                posargs = args[1:-1]
+                type_ = args[0](*posargs, **kwargs)
                 bp = type_._cached_bind_processor(eng.dialect)
                 rp = type_._cached_result_processor(eng.dialect, 0)
                 bp, rp  # strong reference
@@ -346,7 +344,7 @@ class MemUsageTest(EnsureZeroed):
 
     @testing.fails()
     def test_fixture_failure(self):
-        class Foo(object):
+        class Foo:
             pass
 
         stuff = []
@@ -366,35 +364,39 @@ class MemUsageTest(EnsureZeroed):
         # expressions that dont have BindParameter objects in them.
 
         root_expr = column("x", Integer) == column("y", Integer)
-        expr = [root_expr]
+
+        expr = root_expr
 
         @profile_memory()
         def go():
-            expr[0] = cloned_traverse(expr[0], {}, {})
+            nonlocal expr
+
+            expr = cloned_traverse(expr, {}, {})
 
         go()
 
     def test_tv_render_derived(self):
         root_expr = func.some_fn().table_valued()
-        expr = [root_expr]
+        expr = root_expr
 
         @profile_memory()
         def go():
-            expr[0] = expr[0].render_derived()
+            nonlocal expr
+
+            expr = expr.render_derived()
 
         go()
 
 
+@testing.add_to_marker.memory_intensive
 class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
-
-    __tags__ = ("memory_intensive",)
     __requires__ = "cpython", "memory_process_intensive", "no_asyncio"
     __sparse_backend__ = True
 
     # ensure a pure growing test trips the assertion
     @testing.fails_if(lambda: True)
     def test_fixture(self):
-        class Foo(object):
+        class Foo:
             pass
 
         x = []
@@ -496,7 +498,7 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
     @testing.emits_warning("Compiled statement cache for lazy loader.*")
     @testing.crashes("sqlite", ":memory: connection not suitable here")
     def test_orm_many_engines(self):
-        metadata = MetaData(self.engine)
+        metadata = MetaData()
 
         table1 = Table(
             "mytable",
@@ -523,7 +525,7 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             Column("col3", Integer, ForeignKey("mytable.col1")),
         )
 
-        metadata.create_all()
+        metadata.create_all(self.engine)
 
         m1 = self.mapper_registry.map_imperatively(
             A,
@@ -577,7 +579,7 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
 
         go()
 
-        metadata.drop_all()
+        metadata.drop_all(self.engine)
         del m1, m2
         assert_no_mappers()
 
@@ -591,10 +593,10 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
             ),
-            *[Column("col%d" % i, Integer) for i in range(10)]
+            *[Column("col%d" % i, Integer) for i in range(10)],
         )
 
-        class Wide(object):
+        class Wide:
             pass
 
         self.mapper_registry.map_imperatively(
@@ -642,7 +644,7 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             ),
         )
 
-        class SomeClass(object):
+        class SomeClass:
             pass
 
         self.mapper_registry.map_imperatively(SomeClass, some_table)
@@ -693,7 +695,6 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
         @testing.emits_warning()
         @profile_memory()
         def go():
-
             # execute with a non-unicode object. a warning is emitted,
             # this warning shouldn't clog up memory.
 
@@ -916,7 +917,7 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
 
         @profile_memory()
         def go():
-            class A(fixtures.ComparableEntity):
+            class A(ComparableEntity):
                 pass
 
             class B(A):
@@ -997,10 +998,10 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
 
         @profile_memory()
         def go():
-            class A(fixtures.ComparableEntity):
+            class A(ComparableEntity):
                 pass
 
-            class B(fixtures.ComparableEntity):
+            class B(ComparableEntity):
                 pass
 
             self.mapper_registry.map_imperatively(
@@ -1046,25 +1047,6 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             metadata.drop_all(self.engine)
         assert_no_mappers()
 
-    @testing.uses_deprecated()
-    def test_key_fallback_result(self):
-        m = MetaData()
-        e = self.engine
-        t = Table("t", m, Column("x", Integer), Column("y", Integer))
-        m.create_all(e)
-        e.execute(t.insert(), {"x": 1, "y": 1})
-
-        @profile_memory()
-        def go():
-            r = e.execute(t.alias().select())
-            for row in r:
-                row[t.c.x]
-
-        try:
-            go()
-        finally:
-            m.drop_all(e)
-
     def test_many_discarded_relationships(self):
         """a use case that really isn't supported, nonetheless we can
         guard against memleaks here so why not"""
@@ -1078,15 +1060,16 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             Column("t1id", ForeignKey("t1.id")),
         )
 
-        class T1(object):
+        class T1:
             pass
 
         t1_mapper = self.mapper_registry.map_imperatively(T1, t1)
 
-        @testing.emits_warning()
+        @testing.emits_warning(r"This declarative base")
+        @testing.expect_deprecated(r"User-placed attribute .* is replacing")
         @profile_memory()
         def go():
-            class T2(object):
+            class T2:
                 pass
 
             t2_mapper = self.mapper_registry.map_imperatively(T2, t2)
@@ -1122,10 +1105,10 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             Column("t1id", Integer, ForeignKey("table1.id")),
         )
 
-        class Foo(object):
+        class Foo:
             pass
 
-        class Bar(object):
+        class Bar:
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1145,7 +1128,9 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             s = table2.select()
             sess = session()
             with testing.expect_deprecated(
-                "Implicit coercion of SELECT and " "textual SELECT constructs"
+                "Implicit coercion of SELECT and textual SELECT constructs",
+                "An alias is being generated automatically",
+                assert_=False,
             ):
                 sess.query(Foo).join(s, Foo.bars).all()
             sess.rollback()
@@ -1176,10 +1161,10 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             Column("t1id", Integer, ForeignKey("table1.id")),
         )
 
-        class Foo(object):
+        class Foo:
             pass
 
-        class Bar(object):
+        class Bar:
             pass
 
         self.mapper_registry.map_imperatively(
@@ -1207,8 +1192,8 @@ class MemUsageWBackendTest(fixtures.MappedTest, EnsureZeroed):
             metadata.drop_all(self.engine)
 
 
+@testing.add_to_marker.memory_intensive
 class CycleTest(_fixtures.FixtureTest):
-    __tags__ = ("memory_intensive",)
     __requires__ = ("cpython", "no_windows")
 
     run_setup_mappers = "once"
@@ -1260,7 +1245,7 @@ class CycleTest(_fixtures.FixtureTest):
 
         users = self.tables.users
 
-        class Foo(object):
+        class Foo:
             @hybrid.hybrid_property
             def user_name(self):
                 return self.name
@@ -1269,25 +1254,14 @@ class CycleTest(_fixtures.FixtureTest):
 
         # unfortunately there's a lot of cycles with an aliased()
         # for now, however calling upon clause_element does not seem
-        # to make it worse which is what this was looking to test
-        @assert_cycles(69)
+        # to make it worse which is what this was looking to test.
+        #
+        # update as of #8796.  clause_element makes it a little bit worse
+        # as we now generate more metrics for the .c collection.
+        @assert_cycles(79)
         def go():
             a1 = aliased(Foo)
             a1.user_name.__clause_element__()
-
-        go()
-
-    def test_raise_from(self):
-        @assert_cycles()
-        def go():
-            try:
-                try:
-                    raise KeyError("foo")
-                except KeyError as ke:
-
-                    util.raise_(Exception("oops"), from_=ke)
-            except Exception as err:  # noqa
-                pass
 
         go()
 
@@ -1520,7 +1494,9 @@ class CycleTest(_fixtures.FixtureTest):
 
         @assert_cycles(4)
         def go():
-            result = s.connection(mapper=User).execute(stmt)
+            result = s.connection(bind_arguments=dict(mapper=User)).execute(
+                stmt
+            )
             while True:
                 row = result.fetchone()
                 if row is None:
@@ -1650,7 +1626,7 @@ class CycleTest(_fixtures.FixtureTest):
         go()
 
     def test_weak_sequence(self):
-        class Foo(object):
+        class Foo:
             pass
 
         f = Foo()
@@ -1663,7 +1639,6 @@ class CycleTest(_fixtures.FixtureTest):
 
     @testing.provide_metadata
     def test_optimized_get(self):
-
         Base = declarative_base(metadata=self.metadata)
 
         class Employee(Base):
@@ -1696,10 +1671,7 @@ class CycleTest(_fixtures.FixtureTest):
         go()
 
     def test_visit_binary_product(self):
-        a, b, q, e, f, j, r = [column(chr_) for chr_ in "abqefjr"]
-
-        from sqlalchemy import and_, func
-        from sqlalchemy.sql.util import visit_binary_product
+        a, b, q, e, f, j, r = (column(chr_) for chr_ in "abqefjr")
 
         expr = and_((a + b) == q + func.sum(e + f), j == r)
 
@@ -1758,9 +1730,8 @@ class CycleTest(_fixtures.FixtureTest):
         go()
 
 
+@testing.add_to_marker.memory_intensive
 class MiscMemoryIntensiveTests(fixtures.TestBase):
-    __tags__ = ("memory_intensive",)
-
     @testing.fixture
     def user_fixture(self, decl_base):
         class User(decl_base):
@@ -1810,3 +1781,168 @@ class MiscMemoryIntensiveTests(fixtures.TestBase):
         s.flush()
         eq_(s.scalar(select(func.count("*")).select_from(User.__table__)), 0)
         s.commit()
+
+
+class WeakIdentityMapTest(_fixtures.FixtureTest):
+    run_inserts = None
+
+    @testing.requires.predictable_gc
+    def test_weakref(self):
+        """test the weak-referencing identity map, which strongly-
+        references modified items."""
+
+        users, User = self.tables.users, self.classes.User
+
+        s = fixture_session()
+        self.mapper_registry.map_imperatively(User, users)
+        gc_collect()
+
+        s.add(User(name="ed"))
+        s.flush()
+        assert not s.dirty
+
+        user = s.query(User).one()
+
+        # heisenberg the GC a little bit, since #7823 caused a lot more
+        # GC when mappings are set up, larger test suite started failing
+        # on this being gc'ed
+        user_is = user._sa_instance_state
+        del user
+        gc_collect()
+        gc_collect()
+        gc_collect()
+        assert user_is.obj() is None
+
+        assert len(s.identity_map) == 0
+
+        user = s.query(User).one()
+        user.name = "fred"
+        del user
+        gc_collect()
+        assert len(s.identity_map) == 1
+        assert len(s.dirty) == 1
+        assert None not in s.dirty
+        s.flush()
+        gc_collect()
+        assert not s.dirty
+        assert not s.identity_map
+
+        user = s.query(User).one()
+        assert user.name == "fred"
+        assert s.identity_map
+
+    @testing.requires.predictable_gc
+    def test_weakref_pickled(self):
+        users, User = self.tables.users, pickleable.User
+
+        s = fixture_session()
+        self.mapper_registry.map_imperatively(User, users)
+        gc_collect()
+
+        s.add(User(name="ed"))
+        s.flush()
+        assert not s.dirty
+
+        user = s.query(User).one()
+        user.name = "fred"
+        s.expunge(user)
+
+        u2 = pickle.loads(pickle.dumps(user))
+
+        del user
+        s.add(u2)
+
+        del u2
+        gc_collect()
+
+        assert len(s.identity_map) == 1
+        assert len(s.dirty) == 1
+        assert None not in s.dirty
+        s.flush()
+        gc_collect()
+        assert not s.dirty
+
+        assert not s.identity_map
+
+    @testing.requires.predictable_gc
+    def test_weakref_with_cycles_o2m(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+
+        s = fixture_session()
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={"addresses": relationship(Address, backref="user")},
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
+        gc_collect()
+
+        s.add(User(name="ed", addresses=[Address(email_address="ed1")]))
+        s.commit()
+
+        user = s.query(User).options(joinedload(User.addresses)).one()
+        user.addresses[0].user  # lazyload
+        eq_(user, User(name="ed", addresses=[Address(email_address="ed1")]))
+
+        del user
+        gc_collect()
+        assert len(s.identity_map) == 0
+
+        user = s.query(User).options(joinedload(User.addresses)).one()
+        user.addresses[0].email_address = "ed2"
+        user.addresses[0].user  # lazyload
+        del user
+        gc_collect()
+        assert len(s.identity_map) == 2
+
+        s.commit()
+        user = s.query(User).options(joinedload(User.addresses)).one()
+        eq_(user, User(name="ed", addresses=[Address(email_address="ed2")]))
+
+    @testing.requires.predictable_gc
+    def test_weakref_with_cycles_o2o(self):
+        Address, addresses, users, User = (
+            self.classes.Address,
+            self.tables.addresses,
+            self.tables.users,
+            self.classes.User,
+        )
+
+        s = fixture_session()
+        self.mapper_registry.map_imperatively(
+            User,
+            users,
+            properties={
+                "address": relationship(Address, backref="user", uselist=False)
+            },
+        )
+        self.mapper_registry.map_imperatively(Address, addresses)
+        gc_collect()
+
+        s.add(User(name="ed", address=Address(email_address="ed1")))
+        s.commit()
+
+        user = s.query(User).options(joinedload(User.address)).one()
+        user.address.user
+        eq_(user, User(name="ed", address=Address(email_address="ed1")))
+
+        del user
+        gc_collect()
+        assert len(s.identity_map) == 0
+
+        user = s.query(User).options(joinedload(User.address)).one()
+        user.address.email_address = "ed2"
+        user.address.user  # lazyload
+
+        del user
+        gc_collect()
+        assert len(s.identity_map) == 2
+
+        s.commit()
+        user = s.query(User).options(joinedload(User.address)).one()
+        eq_(user, User(name="ed", address=Address(email_address="ed2")))

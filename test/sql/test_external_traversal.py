@@ -1,4 +1,6 @@
+import pickle
 import re
+from unittest import mock
 
 from sqlalchemy import and_
 from sqlalchemy import bindparam
@@ -31,6 +33,7 @@ from sqlalchemy.sql import util as sql_util
 from sqlalchemy.sql import visitors
 from sqlalchemy.sql.elements import _clone
 from sqlalchemy.sql.expression import _from_objects
+from sqlalchemy.sql.util import _deep_annotate
 from sqlalchemy.sql.visitors import ClauseVisitor
 from sqlalchemy.sql.visitors import cloned_traverse
 from sqlalchemy.sql.visitors import CloningVisitor
@@ -44,7 +47,6 @@ from sqlalchemy.testing import fixtures
 from sqlalchemy.testing import is_
 from sqlalchemy.testing import is_not
 from sqlalchemy.testing.schema import eq_clause_element
-from sqlalchemy.util import pickle
 
 A = B = t1 = t2 = t3 = table1 = table2 = table3 = table4 = None
 
@@ -52,7 +54,6 @@ A = B = t1 = t2 = t3 = table1 = table2 = table3 = table4 = None
 class TraversalTest(
     fixtures.TestBase, AssertsExecutionResults, AssertsCompiledSQL
 ):
-
     """test ClauseVisitor's traversal, particularly its
     ability to copy and modify a ClauseElement in place."""
 
@@ -356,11 +357,10 @@ class TraversalTest(
         foo, bar = CustomObj("foo", String), CustomObj("bar", String)
         bin_ = foo == bar
         set(ClauseVisitor().iterate(bin_))
-        assert set(ClauseVisitor().iterate(bin_)) == set([foo, bar, bin_])
+        assert set(ClauseVisitor().iterate(bin_)) == {foo, bar, bin_}
 
 
 class BinaryEndpointTraversalTest(fixtures.TestBase):
-
     """test the special binary product visit"""
 
     def _assert_traversal(self, expr, expected):
@@ -441,7 +441,6 @@ class BinaryEndpointTraversalTest(fixtures.TestBase):
 
 
 class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
-
     """test copy-in-place behavior of various ClauseElements."""
 
     __dialect__ = "default"
@@ -506,6 +505,71 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
         adapted = sql_util.ClauseAdapter(a1).traverse(expr)
 
         self.assert_compile(adapted, expected)
+
+    @testing.variation("annotate", [True, False])
+    def test_bindparam_render_literal_execute(self, annotate):
+        """test #9526"""
+
+        bp = bindparam("some_value")
+
+        if annotate:
+            bp = bp._annotate({"foo": "bar"})
+
+        bp = bp.render_literal_execute()
+        self.assert_compile(
+            column("q") == bp, "q = __[POSTCOMPILE_some_value]"
+        )
+
+    @testing.variation("limit_type", ["limit", "fetch"])
+    @testing.variation("dialect", ["default", "oracle"])
+    def test_annotated_fetch(self, limit_type: testing.Variation, dialect):
+        """test #9526"""
+
+        if limit_type.limit:
+            stmt = select(column("q")).limit(1)
+        elif limit_type.fetch:
+            stmt = select(column("q")).fetch(1)
+        else:
+            limit_type.fail()
+
+        stmt = _deep_annotate(stmt, {"foo": "bar"})
+
+        if limit_type.limit:
+            if dialect.default:
+                self.assert_compile(
+                    stmt,
+                    "SELECT q LIMIT :param_1",
+                    use_literal_execute_for_simple_int=True,
+                    dialect=dialect.name,
+                )
+            elif dialect.oracle:
+                self.assert_compile(
+                    stmt,
+                    "SELECT q FROM DUAL FETCH FIRST "
+                    "__[POSTCOMPILE_param_1] ROWS ONLY",
+                    dialect=dialect.name,
+                )
+            else:
+                dialect.fail()
+        elif limit_type.fetch:
+            if dialect.default:
+                self.assert_compile(
+                    stmt,
+                    "SELECT q FETCH FIRST __[POSTCOMPILE_param_1] ROWS ONLY",
+                    use_literal_execute_for_simple_int=True,
+                    dialect=dialect.name,
+                )
+            elif dialect.oracle:
+                self.assert_compile(
+                    stmt,
+                    "SELECT q FROM DUAL FETCH FIRST "
+                    "__[POSTCOMPILE_param_1] ROWS ONLY",
+                    dialect=dialect.name,
+                )
+            else:
+                dialect.fail()
+        else:
+            limit_type.fail()
 
     @testing.combinations((null(),), (true(),))
     def test_dont_adapt_singleton_elements(self, elem):
@@ -738,7 +802,7 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
         assert c1 == str(clause)
         assert str(clause2) == c1 + " SOME MODIFIER=:lala"
         assert list(clause._bindparams.keys()) == ["bar"]
-        assert set(clause2._bindparams.keys()) == set(["bar", "lala"])
+        assert set(clause2._bindparams.keys()) == {"bar", "lala"}
 
     def test_select(self):
         s2 = select(t1)
@@ -840,6 +904,34 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
                 eq_clause_element(bindparam("xb", value=42)),
             ],
             sel._generate_cache_key()[1],
+        )
+
+    def test_dont_traverse_immutables(self):
+        meta = MetaData()
+
+        b = Table("b", meta, Column("id", Integer), Column("data", String))
+
+        subq = select(b.c.id).where(b.c.data == "some data").subquery()
+
+        check = mock.Mock()
+
+        class Vis(dict):
+            def get(self, key, default=None):
+                return getattr(check, key)
+
+            def __missing__(self, key):
+                return getattr(check, key)
+
+        visitors.cloned_traverse(subq, {}, Vis())
+
+        eq_(
+            check.mock_calls,
+            [
+                mock.call.bindparam(mock.ANY),
+                mock.call.binary(mock.ANY),
+                mock.call.select(mock.ANY),
+                mock.call.subquery(mock.ANY),
+            ],
         )
 
     def test_params_on_expr_against_subquery(self):
@@ -1165,7 +1257,6 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_this_thing_using_setup_joins_three(self):
-
         j = t1.join(t2, t1.c.col1 == t2.c.col2)
 
         s1 = select(j)
@@ -1210,7 +1301,6 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_this_thing_using_setup_joins_four(self):
-
         j = t1.join(t2, t1.c.col1 == t2.c.col2)
 
         s1 = select(j)
@@ -1268,7 +1358,7 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
             s,
             "SELECT table1.col1, table1.col2, table1.col3 FROM table1 "
             "WHERE table1.col1 = "
-            "(SELECT 1 FROM table1, table1 AS table1_1 "
+            "(SELECT 1 FROM table1 AS table1_1, table1 "
             "WHERE table1.col1 = table1_1.col1)",
         )
         s = CloningVisitor().traverse(s)
@@ -1276,7 +1366,7 @@ class ClauseTest(fixtures.TestBase, AssertsCompiledSQL):
             s,
             "SELECT table1.col1, table1.col2, table1.col3 FROM table1 "
             "WHERE table1.col1 = "
-            "(SELECT 1 FROM table1, table1 AS table1_1 "
+            "(SELECT 1 FROM table1 AS table1_1, table1 "
             "WHERE table1.col1 = table1_1.col1)",
         )
 
@@ -1577,6 +1667,36 @@ class ColumnAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         # not covered by a1, rejected by a2
         is_(a3.columns[c2a1], c2a1)
 
+    @testing.combinations(True, False, argnames="colpresent")
+    @testing.combinations(True, False, argnames="adapt_on_names")
+    @testing.combinations(True, False, argnames="use_label")
+    def test_adapt_binary_col(self, colpresent, use_label, adapt_on_names):
+        """test #9273"""
+
+        if use_label:
+            stmt = select(t1.c.col1, (t1.c.col2 > 18).label("foo"))
+        else:
+            stmt = select(t1.c.col1, (t1.c.col2 > 18))
+
+        sq = stmt.subquery()
+
+        if colpresent:
+            s2 = select(sq.c[0], sq.c[1])
+        else:
+            s2 = select(sq.c[0])
+
+        a1 = sql_util.ColumnAdapter(s2, adapt_on_names=adapt_on_names)
+
+        is_(a1.columns[stmt.selected_columns[0]], s2.selected_columns[0])
+
+        if colpresent:
+            is_(a1.columns[stmt.selected_columns[1]], s2.selected_columns[1])
+        else:
+            is_(
+                a1.columns[stmt.selected_columns[1]],
+                a1.columns[stmt.selected_columns[1]],
+            )
+
 
 class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
     __dialect__ = "default"
@@ -1706,7 +1826,6 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         )
 
     def test_adapt_select_w_unlabeled_fn(self):
-
         expr = func.count(t1.c.col1)
         stmt = select(t1, expr)
 
@@ -2066,7 +2185,7 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_table_to_alias_9(self):
         s = select(literal_column("*")).select_from(t1).alias("foo")
         self.assert_compile(
-            s.select(), "SELECT foo.* FROM (SELECT * FROM table1) " "AS foo"
+            s.select(), "SELECT foo.* FROM (SELECT * FROM table1) AS foo"
         )
 
     def test_table_to_alias_10(self):
@@ -2075,13 +2194,13 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         vis = sql_util.ClauseAdapter(t1alias)
         self.assert_compile(
             vis.traverse(s.select()),
-            "SELECT foo.* FROM (SELECT * FROM table1 " "AS t1alias) AS foo",
+            "SELECT foo.* FROM (SELECT * FROM table1 AS t1alias) AS foo",
         )
 
     def test_table_to_alias_11(self):
         s = select(literal_column("*")).select_from(t1).alias("foo")
         self.assert_compile(
-            s.select(), "SELECT foo.* FROM (SELECT * FROM table1) " "AS foo"
+            s.select(), "SELECT foo.* FROM (SELECT * FROM table1) AS foo"
         )
 
     def test_table_to_alias_12(self):
@@ -2090,7 +2209,7 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         ff = vis.traverse(func.count(t1.c.col1).label("foo"))
         self.assert_compile(
             select(ff),
-            "SELECT count(t1alias.col1) AS foo FROM " "table1 AS t1alias",
+            "SELECT count(t1alias.col1) AS foo FROM table1 AS t1alias",
         )
         assert list(_from_objects(ff)) == [t1alias]
 
@@ -2193,8 +2312,8 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
 
         e = sql_util.ClauseAdapter(
             b,
-            include_fn=lambda x: x in set([a.c.id]),
-            equivalents={a.c.id: set([a.c.id])},
+            include_fn=lambda x: x in {a.c.id},
+            equivalents={a.c.id: {a.c.id}},
         ).traverse(e)
 
         assert str(e) == "a_1.id = a.xxx_id"
@@ -2209,7 +2328,7 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         # asking for a nonexistent col.  corresponding_column should prevent
         # endless depth.
         adapt = sql_util.ClauseAdapter(
-            b, equivalents={a.c.x: set([c.c.x]), c.c.x: set([a.c.x])}
+            b, equivalents={a.c.x: {c.c.x}, c.c.x: {a.c.x}}
         )
         assert adapt._corresponding_column(a.c.x, False) is None
 
@@ -2224,7 +2343,7 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         # two levels of indirection from c.x->b.x->a.x, requires recursive
         # corresponding_column call
         adapt = sql_util.ClauseAdapter(
-            alias, equivalents={b.c.x: set([a.c.x]), c.c.x: set([b.c.x])}
+            alias, equivalents={b.c.x: {a.c.x}, c.c.x: {b.c.x}}
         )
         assert adapt._corresponding_column(a.c.x, False) is alias.c.x
         assert adapt._corresponding_column(c.c.x, False) is alias.c.x
@@ -2306,7 +2425,6 @@ class ClauseAdapterTest(fixtures.TestBase, AssertsCompiledSQL):
         assert s2.is_derived_from(s1)
 
     def test_aliasedselect_to_aliasedselect_straight(self):
-
         # original issue from ticket #904
 
         s1 = select(t1).alias("foo")
@@ -2519,9 +2637,9 @@ class SpliceJoinsTest(fixtures.TestBase, AssertsCompiledSQL):
         def _table(name):
             return table(name, column("col1"), column("col2"), column("col3"))
 
-        table1, table2, table3, table4 = [
+        table1, table2, table3, table4 = (
             _table(name) for name in ("table1", "table2", "table3", "table4")
-        ]
+        )
 
     def test_splice(self):
         t1, t2, t3, t4 = table1, table2, table1.alias(), table2.alias()
@@ -2582,7 +2700,7 @@ class SpliceJoinsTest(fixtures.TestBase, AssertsCompiledSQL):
         )
         self.assert_compile(
             sql_util.splice_joins(table1, j2),
-            "table1 JOIN table4 AS table4_1 ON " "table1.col3 = table4_1.col3",
+            "table1 JOIN table4 AS table4_1 ON table1.col3 = table4_1.col3",
         )
         self.assert_compile(
             sql_util.splice_joins(sql_util.splice_joins(table1, j1), j2),
@@ -2595,7 +2713,6 @@ class SpliceJoinsTest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
-
     """tests the generative capability of Select"""
 
     __dialect__ = "default"
@@ -2609,39 +2726,39 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
     def test_columns(self):
         s = t1.select()
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
         select_copy = s.add_columns(column("yyy"))
         self.assert_compile(
             select_copy,
-            "SELECT table1.col1, table1.col2, " "table1.col3, yyy FROM table1",
+            "SELECT table1.col1, table1.col2, table1.col3, yyy FROM table1",
         )
         is_not(s.selected_columns, select_copy.selected_columns)
         is_not(s._raw_columns, select_copy._raw_columns)
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
 
     def test_froms(self):
         s = t1.select()
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
         select_copy = s.select_from(t2)
         self.assert_compile(
             select_copy,
             "SELECT table1.col1, table1.col2, "
-            "table1.col3 FROM table1, table2",
+            "table1.col3 FROM table2, table1",
         )
 
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
 
     def test_prefixes(self):
         s = t1.select()
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
         select_copy = s.prefix_with("FOOBER")
         self.assert_compile(
@@ -2650,7 +2767,7 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
             "table1.col3 FROM table1",
         )
         self.assert_compile(
-            s, "SELECT table1.col1, table1.col2, " "table1.col3 FROM table1"
+            s, "SELECT table1.col1, table1.col2, table1.col3 FROM table1"
         )
 
     def test_execution_options(self):
@@ -2690,10 +2807,9 @@ class SelectTest(fixtures.TestBase, AssertsCompiledSQL):
 
 
 class ValuesBaseTest(fixtures.TestBase, AssertsCompiledSQL):
-
     """Tests the generative capability of Insert, Update"""
 
-    __dialect__ = "default_enhanced"
+    __dialect__ = "default"
 
     # fixme: consolidate converage from elsewhere here and expand
 

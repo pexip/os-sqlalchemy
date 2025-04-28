@@ -31,7 +31,7 @@ E.g.::
     # execute and results
     result = session.execute(stmt)
 
-    print(result.scalars.all())
+    print(result.scalars().all())
 
 To run, both SQLAlchemy and dogpile.cache must be
 installed or on the current PYTHONPATH. The demo will create a local
@@ -44,13 +44,13 @@ pull from cache.
 The demo scripts themselves, in order of complexity, are run as Python
 modules so that relative imports work::
 
-   python -m examples.dogpile_caching.helloworld
+   $ python -m examples.dogpile_caching.helloworld
 
-   python -m examples.dogpile_caching.relationship_caching
+   $ python -m examples.dogpile_caching.relationship_caching
 
-   python -m examples.dogpile_caching.advanced
+   $ python -m examples.dogpile_caching.advanced
 
-   python -m examples.dogpile_caching.local_session_caching
+   $ python -m examples.dogpile_caching.local_session_caching
 
 .. autosource::
     :files: environment.py, caching_query.py, model.py, fixture_data.py, \

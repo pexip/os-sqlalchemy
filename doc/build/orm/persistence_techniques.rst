@@ -19,10 +19,10 @@ an attribute::
 
         # ...
 
-        value = Column(Integer)
+        value = mapped_column(Integer)
 
 
-    someobject = session.query(SomeClass).get(5)
+    someobject = session.get(SomeClass, 5)
 
     # set 'value' attribute to a SQL expression adding one
     someobject.value = SomeClass.value + 1
@@ -36,26 +36,26 @@ expired, so that when next accessed the newly generated value will be loaded
 from the database.
 
 The feature also has conditional support to work in conjunction with
-primary key columns.  A database that supports RETURNING, e.g. PostgreSQL,
-Oracle, or SQL Server, or as a special case when using SQLite with the pysqlite
-driver and a single auto-increment column, a SQL expression may be assigned
-to a primary key column as well.  This allows both the SQL expression to
-be evaluated, as well as allows any server side triggers that modify the
-primary key value on INSERT, to be successfully retrieved by the ORM as
-part of the object's primary key::
+primary key columns.  For backends that have RETURNING support
+(including Oracle Database, SQL Server, MariaDB 10.5, SQLite 3.35) a
+SQL expression may be assigned to a primary key column as well.  This allows
+both the SQL expression to be evaluated, as well as allows any server side
+triggers that modify the primary key value on INSERT, to be successfully
+retrieved by the ORM as part of the object's primary key::
 
 
     class Foo(Base):
-        __tablename__ = 'foo'
-        pk = Column(Integer, primary_key=True)
-        bar = Column(Integer)
+        __tablename__ = "foo"
+        pk = mapped_column(Integer, primary_key=True)
+        bar = mapped_column(Integer)
 
-    e = create_engine("postgresql://scott:tiger@localhost/test", echo=True)
+
+    e = create_engine("postgresql+psycopg2://scott:tiger@localhost/test", echo=True)
     Base.metadata.create_all(e)
 
     session = Session(e)
 
-    foo = Foo(pk=sql.select(sql.func.coalesce(sql.func.max(Foo.pk) + 1, 1))
+    foo = Foo(pk=sql.select(sql.func.coalesce(sql.func.max(Foo.pk) + 1, 1)))
     session.add(foo)
     session.commit()
 
@@ -90,7 +90,7 @@ This is most easily accomplished using the
     session = Session()
 
     # execute a string statement
-    result = session.execute("select * from table where id=:id", {"id": 7})
+    result = session.execute(text("select * from table where id=:id"), {"id": 7})
 
     # execute a SQL expression construct
     result = session.execute(select(mytable).where(mytable.c.id == 7))
@@ -145,8 +145,8 @@ The ORM considers any attribute that was never set on an object as a
 
     class MyObject(Base):
         __tablename__ = "my_table"
-        id = Column(Integer, primary_key=True)
-        data = Column(String(50), nullable=True)
+        id = mapped_column(Integer, primary_key=True)
+        data = mapped_column(String(50), nullable=True)
 
 
     obj = MyObject(id=1)
@@ -163,8 +163,8 @@ defaults::
 
     class MyObject(Base):
         __tablename__ = "my_table"
-        id = Column(Integer, primary_key=True)
-        data = Column(String(50), nullable=True, server_default="default")
+        id = mapped_column(Integer, primary_key=True)
+        data = mapped_column(String(50), nullable=True, server_default="default")
 
 
     obj = MyObject(id=1)
@@ -178,8 +178,8 @@ assigned::
 
     class MyObject(Base):
         __tablename__ = "my_table"
-        id = Column(Integer, primary_key=True)
-        data = Column(String(50), nullable=True, server_default="default")
+        id = mapped_column(Integer, primary_key=True)
+        data = mapped_column(String(50), nullable=True, server_default="default")
 
 
     obj = MyObject(id=1, data=None)
@@ -219,8 +219,8 @@ value and pass it through, rather than omitting it as a "missing" value::
 
     class MyObject(Base):
         __tablename__ = "my_table"
-        id = Column(Integer, primary_key=True)
-        data = Column(
+        id = mapped_column(Integer, primary_key=True)
+        data = mapped_column(
             String(50).evaluates_none(),  # indicate that None should always be passed
             nullable=True,
             server_default="default",
@@ -243,9 +243,6 @@ value and pass it through, rather than omitting it as a "missing" value::
   signal to the ORM that we'd like ``None`` to be passed into the type whenever
   present, even though no special type-level behaviors are assigned to it.
 
-.. versionadded:: 1.1 added the :meth:`.TypeEngine.evaluates_none` method
-   in order to indicate that a "None" value should be treated as significant.
-
 .. _orm_server_defaults:
 
 Fetching Server-Generated Defaults
@@ -264,10 +261,9 @@ generated automatically by the database are  simple integer columns, which are
 implemented by the database as either a so-called "autoincrement" column, or
 from a sequence associated with the column.   Every database dialect within
 SQLAlchemy Core supports a method of retrieving these primary key values which
-is often native to the Python DBAPI, and in general this process is automatic,
-with the exception of a database like Oracle that requires us to specify a
-:class:`.Sequence` explicitly.   There is more documentation regarding this
-at :paramref:`_schema.Column.autoincrement`.
+is often native to the Python DBAPI, and in general this process is automatic.
+There is more documentation regarding this at
+:paramref:`_schema.Column.autoincrement`.
 
 For server-generating columns that are not primary key columns or that are not
 simple autoincrementing integer columns, the ORM requires that these columns
@@ -277,30 +273,36 @@ so care must be taken to use the appropriate method. The two questions to be
 answered are, 1. is this column part of the primary key or not, and 2. does the
 database support RETURNING or an equivalent, such as "OUTPUT inserted"; these
 are SQL phrases which return a server-generated value at the same time as the
-INSERT or UPDATE statement is invoked. Databases that support RETURNING or
-equivalent include PostgreSQL, Oracle, and SQL Server.  Databases that do not
-include SQLite and MySQL.
+INSERT or UPDATE statement is invoked.   RETURNING is currently supported
+by PostgreSQL, Oracle Database, MariaDB 10.5, SQLite 3.35, and SQL Server.
 
 Case 1: non primary key, RETURNING or equivalent is supported
 -------------------------------------------------------------
 
 In this case, columns should be marked as :class:`.FetchedValue` or with an
-explicit :paramref:`_schema.Column.server_default`.   The
-:paramref:`_orm.mapper.eager_defaults` parameter
-may be used to indicate that these
-columns should be fetched immediately upon INSERT and sometimes UPDATE::
+explicit :paramref:`_schema.Column.server_default`.   The ORM will
+automatically add these columns to the RETURNING clause when performing
+INSERT statements, assuming the
+:paramref:`_orm.Mapper.eager_defaults` parameter is set to ``True``, or
+if left at its default setting of ``"auto"``, for dialects that support
+both RETURNING as well as :ref:`insertmanyvalues <engine_insertmanyvalues>`::
 
 
     class MyModel(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
-        timestamp = Column(DateTime(), server_default=func.now())
+        id = mapped_column(Integer, primary_key=True)
 
-        # assume a database trigger populates a value into this column
-        # during INSERT
-        special_identifier = Column(String(50), server_default=FetchedValue())
+        # server-side SQL date function generates a new timestamp
+        timestamp = mapped_column(DateTime(), server_default=func.now())
 
+        # some other server-side function not named here, such as a trigger,
+        # populates a value into this column during INSERT
+        special_identifier = mapped_column(String(50), server_default=FetchedValue())
+
+        # set eager defaults to True.  This is usually optional, as if the
+        # backend supports RETURNING + insertmanyvalues, eager defaults
+        # will take place regardless on INSERT
         __mapper_args__ = {"eager_defaults": True}
 
 Above, an INSERT statement that does not specify explicit values for
@@ -313,35 +315,102 @@ above table will look like:
 
    INSERT INTO my_table DEFAULT VALUES RETURNING my_table.id, my_table.timestamp, my_table.special_identifier
 
+.. versionchanged:: 2.0.0rc1 The :paramref:`_orm.Mapper.eager_defaults` parameter now defaults
+   to a new setting ``"auto"``, which will automatically make use of RETURNING
+   to fetch server-generated default values on INSERT if the backing database
+   supports both RETURNING as well as :ref:`insertmanyvalues <engine_insertmanyvalues>`.
 
-Case 2: non primary key, RETURNING or equivalent is not supported or not needed
---------------------------------------------------------------------------------
+.. note:: The ``"auto"`` value for :paramref:`_orm.Mapper.eager_defaults` only
+   applies to INSERT statements.  UPDATE statements will not use RETURNING,
+   even if available, unless :paramref:`_orm.Mapper.eager_defaults` is set to
+   ``True``.  This is because there is no equivalent "insertmanyvalues" feature
+   for UPDATE, so UPDATE RETURNING will require that UPDATE statements are
+   emitted individually for each row being UPDATEd.
 
-This case is the same as case 1 above, except we don't specify
-:paramref:`.orm.mapper.eager_defaults`::
+Case 2: Table includes trigger-generated values which are not compatible with RETURNING
+----------------------------------------------------------------------------------------
+
+The ``"auto"`` setting of :paramref:`_orm.Mapper.eager_defaults` means that
+a backend that supports RETURNING will usually make use of RETURNING with
+INSERT statements in order to retrieve newly generated default values.
+However there are limitations of server-generated values that are generated
+using triggers, such that RETURNING can't be used:
+
+* SQL Server does not allow RETURNING to be used in an INSERT statement
+  to retrieve a trigger-generated value; the statement will fail.
+
+* SQLite has limitations in combining the use of RETURNING with triggers, such
+  that the RETURNING clause will not have the INSERTed value available
+
+* Other backends may have limitations with RETURNING in conjunction with
+  triggers, or other kinds of server-generated values.
+
+To disable the use of RETURNING for such values, including not just for
+server generated default values but also to ensure that the ORM will never
+use RETURNING with a particular table, specify
+:paramref:`_schema.Table.implicit_returning`
+as ``False`` for the mapped :class:`.Table`.  Using a Declarative mapping
+this looks like::
 
     class MyModel(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
-        timestamp = Column(DateTime(), server_default=func.now())
+        id: Mapped[int] = mapped_column(primary_key=True)
+        data: Mapped[str] = mapped_column(String(50))
 
         # assume a database trigger populates a value into this column
         # during INSERT
-        special_identifier = Column(String(50), server_default=FetchedValue())
+        special_identifier = mapped_column(String(50), server_default=FetchedValue())
 
-After a record with the above mapping is INSERTed, the "timestamp" and
-"special_identifier" columns will remain empty, and will be fetched via
-a second SELECT statement when they are first accessed after the flush, e.g.
-they are marked as "expired".
+        # disable all use of RETURNING for the table
+        __table_args__ = {"implicit_returning": False}
 
-If the :paramref:`.orm.mapper.eager_defaults` is still used, and the backend
-database does not support RETURNING or an equivalent, the ORM will emit this
-SELECT statement immediately following the INSERT statement.   This is often
-undesirable as it adds additional SELECT statements to the flush process that
-may not be needed.  Using the above mapping with the
-:paramref:`.orm.mapper.eager_defaults` flag set to True against MySQL results
-in SQL like this upon flush (minus the comment, which is for clarification only):
+On SQL Server with the pyodbc driver, an INSERT for the above table will
+not use RETURNING and will use the SQL Server ``scope_identity()`` function
+to retrieve the newly generated primary key value:
+
+.. sourcecode:: sql
+
+    INSERT INTO my_table (data) VALUES (?); select scope_identity()
+
+.. seealso::
+
+    :ref:`mssql_insert_behavior` - background on the SQL Server dialect's
+    methods of fetching newly generated primary key values
+
+Case 3: non primary key, RETURNING or equivalent is not supported or not needed
+--------------------------------------------------------------------------------
+
+This case is the same as case 1 above, except we typically don't want to
+use :paramref:`.orm.Mapper.eager_defaults`, as its current implementation
+in the absence of RETURNING support is to emit a SELECT-per-row, which
+is not performant.  Therefore the parameter is omitted in the mapping below::
+
+    class MyModel(Base):
+        __tablename__ = "my_table"
+
+        id = mapped_column(Integer, primary_key=True)
+        timestamp = mapped_column(DateTime(), server_default=func.now())
+
+        # assume a database trigger populates a value into this column
+        # during INSERT
+        special_identifier = mapped_column(String(50), server_default=FetchedValue())
+
+After a record with the above mapping is INSERTed on a backend that does not
+include RETURNING or "insertmanyvalues" support, the "timestamp" and
+"special_identifier" columns will remain empty, and will be fetched via a
+second SELECT statement when they are first accessed after the flush, e.g. they
+are marked as "expired".
+
+If the :paramref:`.orm.Mapper.eager_defaults` is explicitly provided with a
+value of ``True``, and the backend database does not support RETURNING or an
+equivalent, the ORM will emit a SELECT statement immediately following the
+INSERT statement in order to fetch newly generated values; the ORM does not
+currently have the ability to SELECT many newly inserted rows in batch if
+RETURNING was not available. This is usually undesirable as it adds additional
+SELECT statements to the flush process that may not be needed. Using the above
+mapping with the :paramref:`.orm.Mapper.eager_defaults` flag set to True
+against MySQL (not MariaDB) results in SQL like this upon flush:
 
 .. sourcecode:: sql
 
@@ -351,69 +420,102 @@ in SQL like this upon flush (minus the comment, which is for clarification only)
     SELECT my_table.timestamp AS my_table_timestamp, my_table.special_identifier AS my_table_special_identifier
     FROM my_table WHERE my_table.id = %s
 
-Case 3: primary key, RETURNING or equivalent is supported
+A future release of SQLAlchemy may seek to improve the efficiency of
+eager defaults in the abcense of RETURNING to batch many rows within a
+single SELECT statement.
+
+Case 4: primary key, RETURNING or equivalent is supported
 ----------------------------------------------------------
 
 A primary key column with a server-generated value must be fetched immediately
 upon INSERT; the ORM can only access rows for which it has a primary key value,
-so if the primary key is generated by the server, the ORM needs a way for the
-database to give us that new value immediately upon INSERT.
+so if the primary key is generated by the server, the ORM needs a way
+to retrieve that new value immediately upon INSERT.
 
-As mentioned above, for integer "autoincrement" columns as well as
+As mentioned above, for integer "autoincrement" columns, as well as
+columns marked with :class:`.Identity` and special constructs such as
 PostgreSQL SERIAL, these types are handled automatically by the Core; databases
 include functions for fetching the "last inserted id" where RETURNING
 is not supported, and where RETURNING is supported SQLAlchemy will use that.
 
-However, for non-integer values, as well as for integer values that must be
-explicitly linked to a sequence or other triggered routine,  the server default
-generation must be marked in the table metadata.
-
-For an explicit sequence as we use with Oracle, this just means we are using
-the :class:`.Sequence` construct::
+For example, using Oracle Database with a column marked as :class:`.Identity`,
+RETURNING is used automatically to fetch the new primary key value::
 
     class MyOracleModel(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, Sequence("my_sequence"), primary_key=True)
-        data = Column(String(50))
+        id: Mapped[int] = mapped_column(Identity(), primary_key=True)
+        data: Mapped[str] = mapped_column(String(50))
 
-The INSERT for a model as above on Oracle looks like:
+The INSERT for a model as above on Oracle Database looks like:
 
 .. sourcecode:: sql
 
-    INSERT INTO my_table (id, data) VALUES (my_sequence.nextval, :data) RETURNING my_table.id INTO :ret_0
+    INSERT INTO my_table (data) VALUES (:data) RETURNING my_table.id INTO :ret_0
 
-Where above, SQLAlchemy renders ``my_sequence.nextval`` for the primary key column
-and also uses RETURNING to get the new value back immediately.
+SQLAlchemy renders an INSERT for the "data" field, but only includes "id" in
+the RETURNING clause, so that server-side generation for "id" will take
+place and the new value will be returned immediately.
 
-For datatypes that generate values automatically, or columns that are populated
-by a trigger, we use :class:`.FetchedValue`.  Below is a model that uses a
-SQL Server TIMESTAMP column as the primary key, which generates values automatically::
+For non-integer values generated by server side functions or triggers, as well
+as for integer values that come from constructs outside the table itself,
+including explicit sequences and triggers, the server default generation must
+be marked in the table metadata. Using Oracle Database as the example again, we can
+illustrate a similar table as above naming an explicit sequence using the
+:class:`.Sequence` construct::
 
-    class MyModel(Base):
+    class MyOracleModel(Base):
         __tablename__ = "my_table"
 
-        timestamp = Column(TIMESTAMP(), server_default=FetchedValue(), primary_key=True)
+        id: Mapped[int] = mapped_column(Sequence("my_oracle_seq"), primary_key=True)
+        data: Mapped[str] = mapped_column(String(50))
+
+An INSERT for this version of the model on Oracle Database would look like:
+
+.. sourcecode:: sql
+
+    INSERT INTO my_table (id, data) VALUES (my_oracle_seq.nextval, :data) RETURNING my_table.id INTO :ret_0
+
+Where above, SQLAlchemy renders ``my_sequence.nextval`` for the primary key
+column so that it is used for new primary key generation, and also uses
+RETURNING to get the new value back immediately.
+
+If the source of data is not represented by a simple SQL function or
+:class:`.Sequence`, such as when using triggers or database-specific datatypes
+that produce new values, the presence of a value-generating default may be
+indicated by using :class:`.FetchedValue` within the column definition. Below
+is a model that uses a SQL Server TIMESTAMP column as the primary key; on SQL
+Server, this datatype generates new values automatically, so this is indicated
+in the table metadata by indicating :class:`.FetchedValue` for the
+:paramref:`.Column.server_default` parameter::
+
+    class MySQLServerModel(Base):
+        __tablename__ = "my_table"
+
+        timestamp: Mapped[datetime.datetime] = mapped_column(
+            TIMESTAMP(), server_default=FetchedValue(), primary_key=True
+        )
+        data: Mapped[str] = mapped_column(String(50))
 
 An INSERT for the above table on SQL Server looks like:
 
 .. sourcecode:: sql
 
-    INSERT INTO my_table OUTPUT inserted.timestamp DEFAULT VALUES
+    INSERT INTO my_table (data) OUTPUT inserted.timestamp VALUES (?)
 
-Case 4: primary key, RETURNING or equivalent is not supported
+Case 5: primary key, RETURNING or equivalent is not supported
 --------------------------------------------------------------
 
-In this area we are generating rows for a database such as SQLite or MySQL
+In this area we are generating rows for a database such as MySQL
 where some means of generating a default is occurring on the server, but is
 outside of the database's usual autoincrement routine. In this case, we have to
 make sure SQLAlchemy can "pre-execute" the default, which means it has to be an
 explicit SQL expression.
 
 .. note::  This section will illustrate multiple recipes involving
-   datetime values for MySQL and SQLite, since the datetime datatypes on these
-   two  backends have additional idiosyncratic requirements that are useful to
-   illustrate.  Keep in mind however that SQLite and MySQL require an explicit
+   datetime values for MySQL, since the datetime datatypes on this
+   backend has additional idiosyncratic requirements that are useful to
+   illustrate.  Keep in mind however that MySQL requires an explicit
    "pre-executed" default generator for *any* auto-generated datatype used as
    the primary key other than the usual single-column autoincrementing integer
    value.
@@ -427,7 +529,7 @@ pre-execute-supported default using the "NOW()" SQL function::
     class MyModel(Base):
         __tablename__ = "my_table"
 
-        timestamp = Column(DateTime(), default=func.now(), primary_key=True)
+        timestamp = mapped_column(DateTime(), default=func.now(), primary_key=True)
 
 Where above, we select the "NOW()" function to deliver a datetime value
 to the column.  The SQL generated by the above is:
@@ -455,7 +557,9 @@ into the column::
     class MyModel(Base):
         __tablename__ = "my_table"
 
-        timestamp = Column(TIMESTAMP(), default=cast(func.now(), Binary), primary_key=True)
+        timestamp = mapped_column(
+            TIMESTAMP(), default=cast(func.now(), Binary), primary_key=True
+        )
 
 Above, in addition to selecting the "NOW()" function, we additionally make
 use of the :class:`.Binary` datatype in conjunction with :func:`.cast` so that
@@ -467,38 +571,6 @@ INSERT looks like:
     SELECT CAST(now() AS BINARY) AS anon_1
     INSERT INTO my_table (timestamp) VALUES (%s)
     (b'2018-08-09 13:08:46',)
-
-SQLite with DateTime primary key
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-For SQLite, new timestamps can be generated using the SQL function
-``datetime('now', 'localtime')`` (or specify ``'utc'`` for UTC),
-however making things more complicated is that this returns a string
-value, which is then incompatible with SQLAlchemy's :class:`.DateTime`
-datatype (even though the datatype converts the information back into a
-string for the SQLite backend, it must be passed through as a Python datetime).
-We therefore must also specify that we'd like to coerce the return value to
-:class:`.DateTime` when it is returned from the function, which we achieve
-by passing this as the ``type_`` parameter::
-
-    class MyModel(Base):
-        __tablename__ = "my_table"
-
-        timestamp = Column(
-            DateTime,
-            default=func.datetime("now", "localtime", type_=DateTime),
-            primary_key=True,
-        )
-
-The above mapping upon INSERT will look like:
-
-.. sourcecode:: sql
-
-    SELECT datetime(?, ?) AS datetime_1
-    ('now', 'localtime')
-    INSERT INTO my_table (timestamp) VALUES (?)
-    ('2018-10-02 13:37:33.000000',)
-
 
 .. seealso::
 
@@ -518,8 +590,8 @@ are set up using the :paramref:`_schema.Column.default` and
 
 These SQL expressions currently are subject to the same limitations within the
 ORM as occurs for true server-side defaults; they won't be eagerly fetched with
-RETURNING when using :paramref:`_orm.mapper.eager_defaults` unless the
-:class:`.FetchedValue` directive is associated with the
+RETURNING when :paramref:`_orm.Mapper.eager_defaults` is set to ``"auto"`` or
+``True`` unless the :class:`.FetchedValue` directive is associated with the
 :class:`_schema.Column`, even though these expressions are not DDL server
 defaults and are actively rendered by SQLAlchemy itself. This limitation may be
 addressed in future SQLAlchemy releases.
@@ -532,7 +604,7 @@ expression is used with :paramref:`_schema.Column.default` and
 ``func.now()`` construct is used as a client-invoked SQL expression
 for :paramref:`_schema.Column.default` and
 :paramref:`_schema.Column.onupdate`.  In order for the behavior of
-:paramref:`_orm.mapper.eager_defaults` to include that it fetches these
+:paramref:`_orm.Mapper.eager_defaults` to include that it fetches these
 values using RETURNING when available, :paramref:`_schema.Column.server_default` and
 :paramref:`_schema.Column.server_onupdate` are used with :class:`.FetchedValue`
 to ensure that the fetch occurs::
@@ -540,10 +612,12 @@ to ensure that the fetch occurs::
     class MyModel(Base):
         __tablename__ = "my_table"
 
-        id = Column(Integer, primary_key=True)
+        id = mapped_column(Integer, primary_key=True)
 
-        created = Column(DateTime(), default=func.now(), server_default=FetchedValue())
-        updated = Column(
+        created = mapped_column(
+            DateTime(), default=func.now(), server_default=FetchedValue()
+        )
+        updated = mapped_column(
             DateTime(),
             onupdate=func.now(),
             server_default=FetchedValue(),
@@ -554,7 +628,9 @@ to ensure that the fetch occurs::
 
 With a mapping similar to the above, the SQL rendered by the ORM for
 INSERT and UPDATE will include ``created`` and ``updated`` in the RETURNING
-clause::
+clause:
+
+.. sourcecode:: sql
 
   INSERT INTO my_table (created) VALUES (now()) RETURNING my_table.id, my_table.created, my_table.updated
 
@@ -568,149 +644,16 @@ clause::
 Using INSERT, UPDATE and ON CONFLICT (i.e. upsert) to return ORM Objects
 ==========================================================================
 
-.. deepalchemy:: The feature of linking ORM objects to RETURNING is a new and
-   experimental feature.
-
-.. versionadded:: 1.4.0
-
-The :term:`DML` constructs :func:`_dml.insert`, :func:`_dml.update`, and
-:func:`_dml.delete` feature a method :meth:`_dml.UpdateBase.returning` which on
-database backends that support RETURNING (PostgreSQL, SQL Server, some MariaDB
-versions) may be used to return database rows generated or matched by
-the statement as though they were SELECTed. The ORM-enabled UPDATE and DELETE
-statements may be combined with this feature, so that they return rows
-corresponding to all the rows which were matched by the criteria::
-
-    from sqlalchemy import update
-
-    stmt = (
-        update(User)
-        .where(User.name == "squidward")
-        .values(name="spongebob")
-        .returning(User.id)
-    )
-
-    for row in session.execute(stmt):
-        print(f"id: {row.id}")
-
-The above example returns the ``User.id`` attribute for each row matched.
-Provided that each row contains at least a primary key value, we may opt to
-receive these rows as ORM objects, allowing ORM objects to be loaded from the
-database corresponding atomically to an UPDATE statement against those rows. To
-achieve this, we may combine the :class:`_dml.Update` construct which returns
-``User`` rows with a :func:`_sql.select` that's adapted to run this UPDATE
-statement in an ORM context using the :meth:`_sql.Select.from_statement`
-method::
-
-    stmt = (
-        update(User)
-        .where(User.name == "squidward")
-        .values(name="spongebob")
-        .returning(User)
-    )
-
-    orm_stmt = select(User).from_statement(stmt).execution_options(populate_existing=True)
-
-    for user in session.execute(orm_stmt).scalars():
-        print("updated user: %s" % user)
-
-Above, we produce an :func:`_dml.update` construct that includes
-:meth:`_dml.Update.returning` given the full ``User`` entity, which will
-produce complete rows from the database table as it UPDATEs them; any arbitrary
-set of columns to load may be specified as long as the full primary key is
-included. Next, these rows are adapted to an ORM load by producing a
-:func:`_sql.select` for the desired entity, then adapting it to the UPDATE
-statement by passing the :class:`_dml.Update` construct to the
-:meth:`_sql.Select.from_statement` method; this special ORM method, introduced
-at :ref:`orm_queryguide_selecting_text`, produces an ORM-specific adapter that
-allows the given statement to act as though it were the SELECT of rows that is
-first described.   No SELECT is actually emitted in the database, only the
-UPDATE..RETURNING we've constructed.
-
-Finally, we make use of :ref:`orm_queryguide_populate_existing` on the
-construct so that all the data returned by the UPDATE, including the columns
-we've updated, are populated into the returned objects, replacing any
-values which were there already.  This has the same effect as if we had
-used the ``synchronize_session='fetch'`` strategy described previously
-at :ref:`orm_expression_update_delete_sync`.
+SQLAlchemy 2.0 includes enhanced capabilities for emitting several varieties
+of ORM-enabled INSERT, UPDATE, and upsert statements.  See the
+document at :doc:`queryguide/dml` for documentation.  For upsert, see
+:ref:`orm_queryguide_upsert`.
 
 Using PostgreSQL ON CONFLICT with RETURNING to return upserted ORM objects
 ---------------------------------------------------------------------------
 
-The above approach can be used with INSERTs with RETURNING as well. As a more
-advanced example, below illustrates how to use the PostgreSQL
-:ref:`postgresql_insert_on_conflict` construct to INSERT or UPDATE rows in the
-database, while simultaneously producing those objects as ORM instances::
+This section has moved to :ref:`orm_queryguide_upsert`.
 
-    from sqlalchemy.dialects.postgresql import insert
-
-    stmt = insert(User).values(
-        [
-            dict(name="sandy", fullname="Sandy Cheeks"),
-            dict(name="squidward", fullname="Squidward Tentacles"),
-            dict(name="spongebob", fullname="Spongebob Squarepants"),
-        ]
-    )
-
-    stmt = stmt.on_conflict_do_update(
-        index_elements=[User.name], set_=dict(fullname=stmt.excluded.fullname)
-    ).returning(User)
-
-    orm_stmt = select(User).from_statement(stmt).execution_options(populate_existing=True)
-    for user in session.execute(
-        orm_stmt,
-    ).scalars():
-        print("inserted or updated: %s" % user)
-
-To start, we make sure we are using the PostgreSQL variant of the
-:func:`_postgresql.insert` construct.   Next, we construct a multi-values
-INSERT statement, where a single INSERT statement will provide multiple rows
-to be inserted.  On the PostgreSQL database, this syntax provides the most
-efficient means of sending many hundreds of rows at once to be INSERTed.
-
-From there, we could if we wanted add the ``RETURNING`` clause to produce
-a bulk INSERT.  However, to make the example even more interesting, we will
-also add the PostgreSQL specific ``ON CONFLICT..DO UPDATE`` syntax so that
-rows which already exist based on a unique criteria will be UPDATEd instead.
-We assume there is an INDEX or UNIQUE constraint on the ``name`` column of the
-``user_account`` table above, and then specify an appropriate :meth:`_postgresql.Insert.on_conflict_do_update`
-criteria that will update the ``fullname`` column for rows that already exist.
-
-Finally, we add the :meth:`_dml.Insert.returning` clause as we did in the
-previous example, and select our ``User`` objects using the same
-:meth:`_sql.Select.from_statement` approach as we did earlier. Supposing the
-database only a row for ``(1, "squidward", NULL)`` present; this row will
-trigger the ON CONFLICT routine in our above statement, in other words perform
-the equivalent of an UPDATE statement. The other two rows,
-``(NULL, "sandy", "Sandy Cheeks")`` and
-``(NULL, "spongebob", "Spongebob Squarepants")`` do not yet exist in the
-database, and will be inserted using normal INSERT semantics; the primary key
-column ``id`` uses either ``SERIAL`` or ``IDENTITY`` to auto-generate new
-integer values.
-
-Using this above form, we see SQL emitted on the PostgreSQL database as:
-
-
-.. sourcecode:: pycon+sql
-
-    {opensql}INSERT INTO user_account (name, fullname)
-    VALUES (%(name_m0)s, %(fullname_m0)s), (%(name_m1)s, %(fullname_m1)s), (%(name_m2)s, %(fullname_m2)s)
-    ON CONFLICT (name) DO UPDATE SET fullname = excluded.fullname
-    RETURNING user_account.id, user_account.name, user_account.fullname
-    {'name_m0': 'sandy', 'fullname_m0': 'Sandy Cheeks', 'name_m1': 'squidward', 'fullname_m1': 'Squidward Tentacles', 'name_m2': 'spongebob', 'fullname_m2': 'Spongebob Squarepants'}{stop}
-
-    inserted or updated: User(id=2, name='sandy', fullname='Sandy Cheeks')
-    inserted or updated: User(id=3, name='squidward', fullname='Squidward Tentacles')
-    inserted or updated: User(id=1, name='spongebob', fullname='Spongebob Squarepants')
-
-Above we can also see that the INSERTed ``User`` objects have a
-newly generated primary key value as we would expect with any other ORM
-oriented INSERT statement.
-
-.. seealso::
-
-  :ref:`orm_queryguide_selecting_text` - introduces the
-  :meth:`_sql.Select.from_statement` method.
 
 .. _session_partitioning:
 
@@ -732,8 +675,8 @@ The dictionary is consulted whenever the :class:`.Session` needs to
 emit SQL on behalf of a particular kind of mapped class in order to locate
 the appropriate source of database connectivity::
 
-    engine1 = create_engine("postgresql://db1")
-    engine2 = create_engine("postgresql://db2")
+    engine1 = create_engine("postgresql+psycopg2://db1")
+    engine2 = create_engine("postgresql+psycopg2://db2")
 
     Session = sessionmaker()
 
@@ -758,29 +701,35 @@ arbitrary Python class as a key, which will be used if it is found to be in the
 Supposing two declarative bases are representing two different database
 connections::
 
-    BaseA = declarative_base()
-
-    BaseB = declarative_base()
-
-    class User(BaseA):
-        # ...
-
-    class Address(BaseA):
-        # ...
+    from sqlalchemy.orm import DeclarativeBase
+    from sqlalchemy.orm import Session
 
 
-    class GameInfo(BaseB):
-        # ...
+    class BaseA(DeclarativeBase):
+        pass
 
-    class GameStats(BaseB):
-        # ...
+
+    class BaseB(DeclarativeBase):
+        pass
+
+
+    class User(BaseA): ...
+
+
+    class Address(BaseA): ...
+
+
+    class GameInfo(BaseB): ...
+
+
+    class GameStats(BaseB): ...
 
 
     Session = sessionmaker()
 
     # all User/Address operations will be on engine 1, all
     # Game operations will be on engine 2
-    Session.configure(binds={BaseA:engine1, BaseB:engine2})
+    Session.configure(binds={BaseA: engine1, BaseB: engine2})
 
 Above, classes which descend from ``BaseA`` and ``BaseB`` will have their
 SQL operations routed to one of two engines based on which superclass
@@ -849,6 +798,10 @@ a custom :class:`.Session` which delivers the following rules:
             if mapper and issubclass(mapper.class_, MyOtherClass):
                 return engines["other"]
             elif self._flushing or isinstance(clause, (Update, Delete)):
+                # NOTE: this is for example, however in practice reader/writer
+                # splits are likely more straightforward by using two distinct
+                # Sessions at the top of a "reader" or "writer" operation.
+                # See note below
                 return engines["leader"]
             else:
                 return engines[random.choice(["follower1", "follower2"])]
@@ -861,6 +814,20 @@ argument to :class:`.sessionmaker`::
 This approach can be combined with multiple :class:`_schema.MetaData` objects,
 using an approach such as that of using the declarative ``__abstract__``
 keyword, described at :ref:`declarative_abstract`.
+
+.. note:: While the above example illustrates routing of specific SQL statements
+   to a so-called "leader" or "follower" database based on whether or not the
+   statement expects to write data, this is likely not a practical approach,
+   as it leads to uncoordinated transaction behavior between reading
+   and writing within the same operation.  In practice, it's likely best
+   to construct the :class:`_orm.Session` up front as a "reader" or "writer"
+   session, based on the overall operation / transaction that's proceeding.
+   That way, an operation that will be writing data will also emit its read-queries
+   within the same transaction scope.  See the example at
+   :ref:`session_transaction_isolation_enginewide` for a recipe that sets up
+   one :class:`_orm.sessionmaker` for "read only" operations using autocommit
+   connections, and another for "write" operations which will include DML /
+   COMMIT.
 
 .. seealso::
 
@@ -881,181 +848,11 @@ ORM extension.   An example of use is at: :ref:`examples_sharding`.
 Bulk Operations
 ===============
 
-.. tip::
+.. legacy::
 
-   Bulk operations are essentially lower-functionality versions
-   of the Unit of Work's facilities for emitting INSERT and UPDATE statements
-   on primary key targeted rows.   These routines were added to suit some
-   cases where many rows being inserted or updated could be run into the
-   database without as much of the usual unit of work overhead, by bypassing
-   a large portion of the functionality that the unit of work provides.
-
-   SQLAlchemy 2.0 features new and improved bulk techniques with clarified
-   behavior, better integration with ORM objects as well as INSERT/UPDATE/DELETE
-   statements, and new capabilities.  They additionally repair some long lived
-   performance issues that plagued both regular unit of work and "bulk" routines,
-   most notably in the area of INSERT operations.
-
-   For these reasons, the previous bulk methods move into legacy status, which
-   is revised from the original plan that "bulk" features were to be deprecated
-   entirely.
-
-   When using the legacy 1.4 versions of these features, please read all
-   caveats at :ref:`bulk_operations_caveats`, as they are not always obvious.
-
-.. note:: Bulk INSERT and UPDATE should not be confused with the
-   more common feature known as :ref:`orm_expression_update_delete`.   This
-   feature allows a single UPDATE or DELETE statement with arbitrary WHERE
-   criteria to be emitted.    There is also an option on some backends to
-   use true "upsert" with the ORM, such as on PostgreSQL.  See the section
-   :ref:`orm_dml_returning_objects` for examples.
-
-.. seealso::
-
-    :ref:`orm_expression_update_delete` - using straight multi-row UPDATE and DELETE statements
-    in an ORM context.
-
-    :ref:`orm_dml_returning_objects` - use UPDATE, INSERT or upsert operations to
-    return ORM objects
-
-.. versionadded:: 1.0.0
-
-Bulk INSERT/per-row UPDATE operations on the :class:`.Session` include
-:meth:`.Session.bulk_save_objects`, :meth:`.Session.bulk_insert_mappings`, and
-:meth:`.Session.bulk_update_mappings`. The purpose of these methods is to
-directly expose internal elements of the unit of work system, such that
-facilities for emitting INSERT and UPDATE statements given dictionaries or
-object states can be utilized alone, bypassing the normal unit of work
-mechanics of state, relationship and attribute management.   The advantages to
-this approach is strictly one of reduced Python overhead:
-
-* The flush() process, including the survey of all objects, their state,
-  their cascade status, the status of all objects associated with them
-  via :func:`_orm.relationship`, and the topological sort of all operations to
-  be performed is completely bypassed.  This reduces a great amount of
-  Python overhead.
-
-* The objects as given have no defined relationship to the target
-  :class:`.Session`, even when the operation is complete, meaning there's no
-  overhead in attaching them or managing their state in terms of the identity
-  map or session.
-
-* The :meth:`.Session.bulk_insert_mappings` and :meth:`.Session.bulk_update_mappings`
-  methods accept lists of plain Python dictionaries, not objects; this further
-  reduces a large amount of overhead associated with instantiating mapped
-  objects and assigning state to them, which normally is also subject to
-  expensive tracking of history on a per-attribute basis.
-
-* The set of objects passed to all bulk methods are processed
-  in the order they are received.   In the case of
-  :meth:`.Session.bulk_save_objects`, when objects of different types are passed,
-  the INSERT and UPDATE statements are necessarily broken up into per-type
-  groups.  In order to reduce the number of batch INSERT or UPDATE statements
-  passed to the DBAPI, ensure that the incoming list of objects
-  are grouped by type.
-
-* The process of fetching primary keys after an INSERT also is disabled by
-  default.   When performed correctly, INSERT statements can now more readily
-  be batched by the unit of work process into ``executemany()`` blocks, which
-  perform vastly better than individual statement invocations.
-
-* UPDATE statements can similarly be tailored such that all attributes
-  are subject to the SET clause unconditionally, again making it much more
-  likely that ``executemany()`` blocks can be used.
-
-The performance behavior of the bulk routines should be studied using the
-:ref:`examples_performance` example suite.  This is a series of example
-scripts which illustrate Python call-counts across a variety of scenarios,
-including bulk insert and update scenarios.
-
-.. seealso::
-
-  :ref:`examples_performance` - includes detailed examples of bulk operations
-  contrasted against traditional Core and ORM methods, including performance
-  metrics.
-
-Usage
------
-
-The methods each work in the context of the :class:`.Session` object's
-transaction, like any other::
-
-    s = Session()
-    objects = [User(name="u1"), User(name="u2"), User(name="u3")]
-    s.bulk_save_objects(objects)
-    s.commit()
-
-For :meth:`.Session.bulk_insert_mappings`, and :meth:`.Session.bulk_update_mappings`,
-dictionaries are passed::
-
-    s.bulk_insert_mappings(User, [dict(name="u1"), dict(name="u2"), dict(name="u3")])
-    s.commit()
-
-.. seealso::
-
-    :meth:`.Session.bulk_save_objects`
-
-    :meth:`.Session.bulk_insert_mappings`
-
-    :meth:`.Session.bulk_update_mappings`
-
-
-Comparison to Core Insert / Update Constructs
----------------------------------------------
-
-The bulk methods offer performance that under particular circumstances
-can be close to that of using the core :class:`_expression.Insert` and
-:class:`_expression.Update` constructs in an "executemany" context (for a description
-of "executemany", see :ref:`tutorial_multiple_parameters` in the Core tutorial).
-In order to achieve this, the
-:paramref:`.Session.bulk_insert_mappings.return_defaults`
-flag should be disabled so that rows can be batched together.   The example
-suite in :ref:`examples_performance` should be carefully studied in order
-to gain familiarity with how fast bulk performance can be achieved.
-
-.. _bulk_operations_caveats:
-
-ORM Compatibility / Caveats
-----------------------------
-
-.. warning::  Be sure to familiarize with these limitations before using the
-   bulk routines.
-
-The bulk insert / update methods lose a significant amount of functionality
-versus traditional ORM use.   The following is a listing of features that
-are **not available** when using these methods:
-
-* persistence along :func:`_orm.relationship` linkages
-
-* sorting of rows within order of dependency; rows are inserted or updated
-  directly in the order in which they are passed to the methods
-
-* Session-management on the given objects, including attachment to the
-  session, identity map management.
-
-* Functionality related to primary key mutation, ON UPDATE cascade -
-  **mutation of primary key columns will not work** - as the original PK
-  value of each row is not available, so the WHERE criteria cannot be
-  generated.
-
-* SQL expression inserts / updates (e.g. :ref:`flush_embedded_sql_expressions`) -
-  having to evaluate these would prevent INSERT and UPDATE statements from
-  being batched together in a straightforward way for a single executemany()
-  call as they alter the SQL compilation of the statement itself.
-
-* ORM events such as :meth:`.MapperEvents.before_insert`, etc.  The bulk
-  session methods have no event support.
-
-Features that **are available** include:
-
-* INSERTs and UPDATEs of mapped objects
-
-* Version identifier support
-
-* Multi-table mappings, such as joined-inheritance - however, an object
-  to be inserted across multiple tables either needs to have primary key
-  identifiers fully populated ahead of time, else the
-  :paramref:`.Session.bulk_save_objects.return_defaults` flag must be used,
-  which will greatly reduce the performance benefits
-
-
+  SQLAlchemy 2.0 has integrated the :class:`_orm.Session` "bulk insert" and
+  "bulk update" capabilities into 2.0 style :meth:`_orm.Session.execute`
+  method, making direct use of :class:`_dml.Insert` and :class:`_dml.Update`
+  constructs. See the document at :doc:`queryguide/dml` for documentation,
+  including :ref:`orm_queryguide_legacy_bulk_insert` which illustrates migration
+  from the older methods to the new methods.

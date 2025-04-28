@@ -204,8 +204,7 @@ scenarios. Highlights of this release include:
 
 A demonstration of callcount reduction including a sample
 benchmark script is at
-https://techspot.zzzeek.org/2010/12/12/a-tale-of-three-
-profiles/
+https://techspot.zzzeek.org/2010/12/12/a-tale-of-three-profiles/
 
 Composites Rewritten
 --------------------
@@ -404,7 +403,7 @@ tutorial:
 
 SQL:
 
-::
+.. sourcecode:: sql
 
     SELECT empsalary.depname, empsalary.empno, empsalary.salary,
     avg(empsalary.salary) OVER (PARTITION BY empsalary.depname) AS avg
@@ -513,7 +512,7 @@ call.
 The SQL emitted by ``query.count()`` is now always of the
 form:
 
-::
+.. sourcecode:: sql
 
     SELECT count(1) AS count_1 FROM (
         SELECT user.id AS user_id, user.name AS user_name from user
@@ -926,12 +925,13 @@ Using declarative, the scenario is this:
 ::
 
     class Parent(Base):
-        __tablename__ = 'parent'
+        __tablename__ = "parent"
         id = Column(Integer, primary_key=True)
 
+
     class Child(Parent):
-       __tablename__ = 'child'
-        id = Column(Integer, ForeignKey('parent.id'), primary_key=True)
+        __tablename__ = "child"
+        id = Column(Integer, ForeignKey("parent.id"), primary_key=True)
 
 Above, the attribute ``Child.id`` refers to both the
 ``child.id`` column as well as ``parent.id`` - this due to
@@ -958,15 +958,17 @@ local column:
 ::
 
     class Child(Parent):
-       __tablename__ = 'child'
-        id = Column(Integer, ForeignKey('parent.id'), primary_key=True)
-        some_related = relationship("SomeRelated",
-                        primaryjoin="Child.id==SomeRelated.child_id")
+        __tablename__ = "child"
+        id = Column(Integer, ForeignKey("parent.id"), primary_key=True)
+        some_related = relationship(
+            "SomeRelated", primaryjoin="Child.id==SomeRelated.child_id"
+        )
+
 
     class SomeRelated(Base):
-       __tablename__ = 'some_related'
+        __tablename__ = "some_related"
         id = Column(Integer, primary_key=True)
-        child_id = Column(Integer, ForeignKey('child.id'))
+        child_id = Column(Integer, ForeignKey("child.id"))
 
 Prior to 0.7 the ``Child.id`` expression would reference
 ``Parent.id``, and it would be necessary to map ``child.id``
@@ -981,7 +983,7 @@ behavior:
 
 In 0.6, this would render:
 
-::
+.. sourcecode:: sql
 
     SELECT parent.id AS parent_id
     FROM parent
@@ -989,7 +991,7 @@ In 0.6, this would render:
 
 in 0.7, you get:
 
-::
+.. sourcecode:: sql
 
     SELECT parent.id AS parent_id
     FROM parent, child
@@ -1009,7 +1011,7 @@ same manner as that of 0.5 and 0.6:
 
 Which on both 0.6 and 0.7 renders:
 
-::
+.. sourcecode:: sql
 
     SELECT parent.id AS parent_id, child.id AS child_id
     FROM parent LEFT OUTER JOIN child ON parent.id = child.id

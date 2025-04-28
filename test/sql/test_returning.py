@@ -1,6 +1,7 @@
 import itertools
 
 from sqlalchemy import Boolean
+from sqlalchemy import column
 from sqlalchemy import delete
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func
@@ -10,15 +11,24 @@ from sqlalchemy import MetaData
 from sqlalchemy import select
 from sqlalchemy import Sequence
 from sqlalchemy import String
+from sqlalchemy import table
 from sqlalchemy import testing
 from sqlalchemy import type_coerce
 from sqlalchemy import update
+from sqlalchemy.sql import crud
+from sqlalchemy.sql.sqltypes import NullType
 from sqlalchemy.testing import assert_raises_message
 from sqlalchemy.testing import AssertsCompiledSQL
 from sqlalchemy.testing import AssertsExecutionResults
-from sqlalchemy.testing import engines
+from sqlalchemy.testing import config
 from sqlalchemy.testing import eq_
+from sqlalchemy.testing import expect_raises_message
 from sqlalchemy.testing import fixtures
+from sqlalchemy.testing import is_
+from sqlalchemy.testing import is_false
+from sqlalchemy.testing import is_true
+from sqlalchemy.testing import mock
+from sqlalchemy.testing import provision
 from sqlalchemy.testing.schema import Column
 from sqlalchemy.testing.schema import Table
 from sqlalchemy.types import TypeDecorator
@@ -69,11 +79,39 @@ class ReturnCombinationTests(fixtures.TestBase, AssertsCompiledSQL):
 
         stmt = stmt.returning(t.c.x)
 
+        stmt = stmt.return_defaults()
+
         assert_raises_message(
-            sa_exc.InvalidRequestError,
-            "RETURNING is already configured on this statement",
-            stmt.return_defaults,
+            sa_exc.CompileError,
+            r"Can't compile statement that includes returning\(\) "
+            r"and return_defaults\(\) simultaneously",
+            stmt.compile,
         )
+
+    @testing.combinations("return_defaults", "returning", argnames="methname")
+    @testing.combinations(insert, update, delete, argnames="construct")
+    def test_sort_by_parameter_ordering_param(
+        self, methname, construct, table_fixture
+    ):
+        t = table_fixture
+
+        stmt = construct(t)
+
+        if construct is insert:
+            is_false(stmt._sort_by_parameter_order)
+
+        meth = getattr(stmt, methname)
+
+        if construct in (update, delete):
+            with expect_raises_message(
+                sa_exc.ArgumentError,
+                rf"The 'sort_by_parameter_order' argument to "
+                rf"{methname}\(\) only applies to INSERT statements",
+            ):
+                meth(t.c.id, sort_by_parameter_order=True)
+        else:
+            new = meth(t.c.id, sort_by_parameter_order=True)
+            is_true(new._sort_by_parameter_order)
 
     def test_return_defaults_no_returning(self, table_fixture):
         t = table_fixture
@@ -89,9 +127,116 @@ class ReturnCombinationTests(fixtures.TestBase, AssertsCompiledSQL):
             t.c.x,
         )
 
+    def test_named_expressions_selected_columns(self, table_fixture):
+        table = table_fixture
+        stmt = (
+            table.insert()
+            .values(goofy="someOTHERgoofy")
+            .returning(func.lower(table.c.x).label("goof"))
+        )
+        self.assert_compile(
+            select(stmt.exported_columns.goof),
+            "SELECT lower(foo.x) AS goof FROM foo",
+        )
 
-class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
-    __requires__ = ("returning",)
+    def test_anon_expressions_selected_columns(self, table_fixture):
+        table = table_fixture
+        stmt = (
+            table.insert()
+            .values(goofy="someOTHERgoofy")
+            .returning(func.lower(table.c.x))
+        )
+        self.assert_compile(
+            select(stmt.exported_columns[0]),
+            "SELECT lower(foo.x) AS lower_1 FROM foo",
+        )
+
+    def test_returning_fromclause(self):
+        t = table("t", column("x"), column("y"), column("z"))
+        stmt = t.update().returning(t)
+
+        self.assert_compile(
+            stmt,
+            "UPDATE t SET x=%(x)s, y=%(y)s, z=%(z)s RETURNING t.x, t.y, t.z",
+        )
+
+        eq_(
+            stmt.returning_column_descriptions,
+            [
+                {
+                    "name": "x",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.x,
+                },
+                {
+                    "name": "y",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.y,
+                },
+                {
+                    "name": "z",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.z,
+                },
+            ],
+        )
+
+        cte = stmt.cte("c")
+
+        stmt = select(cte.c.z)
+        self.assert_compile(
+            stmt,
+            "WITH c AS (UPDATE t SET x=%(x)s, y=%(y)s, z=%(z)s "
+            "RETURNING t.x, t.y, t.z) SELECT c.z FROM c",
+        )
+
+    def test_returning_inspectable(self):
+        t = table("t", column("x"), column("y"), column("z"))
+
+        class HasClauseElement:
+            def __clause_element__(self):
+                return t
+
+        stmt = update(HasClauseElement()).returning(HasClauseElement())
+
+        eq_(
+            stmt.returning_column_descriptions,
+            [
+                {
+                    "name": "x",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.x,
+                },
+                {
+                    "name": "y",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.y,
+                },
+                {
+                    "name": "z",
+                    "type": testing.eq_type_affinity(NullType),
+                    "expr": t.c.z,
+                },
+            ],
+        )
+
+        self.assert_compile(
+            stmt,
+            "UPDATE t SET x=%(x)s, y=%(y)s, z=%(z)s "
+            "RETURNING t.x, t.y, t.z",
+        )
+        cte = stmt.cte("c")
+
+        stmt = select(cte.c.z)
+        self.assert_compile(
+            stmt,
+            "WITH c AS (UPDATE t SET x=%(x)s, y=%(y)s, z=%(z)s "
+            "RETURNING t.x, t.y, t.z) SELECT c.z FROM c",
+        )
+
+
+class InsertReturningTest(fixtures.TablesTest, AssertsExecutionResults):
+    __requires__ = ("insert_returning",)
     __backend__ = True
 
     run_create_tables = "each"
@@ -115,7 +260,7 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         cls.GoofyType = GoofyType
 
         Table(
-            "tables",
+            "returning_tbl",
             metadata,
             Column(
                 "id", Integer, primary_key=True, test_needs_autoincrement=True
@@ -127,7 +272,7 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         )
 
     def test_column_targeting(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         result = connection.execute(
             table.insert().returning(table.c.id, table.c.full),
             {"persons": 1, "full": False},
@@ -150,9 +295,8 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         eq_(row[table.c.goofy], row["goofy"])
         eq_(row["goofy"], "FOOsomegoofyBAR")
 
-    @testing.fails_on("firebird", "fb can't handle returning x AS y")
     def test_labeling(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         result = connection.execute(
             table.insert()
             .values(persons=6)
@@ -161,11 +305,8 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         row = result.first()._mapping
         assert row["lala"] == 6
 
-    @testing.fails_on(
-        "firebird", "fb/kintersbasdb can't handle the bind params"
-    )
     def test_anon_expressions(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         GoofyType = self.GoofyType
         result = connection.execute(
             table.insert()
@@ -181,47 +322,76 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         row = result.first()
         eq_(row[0], 30)
 
-    def test_update_returning(self, connection):
-        table = self.tables.tables
-        connection.execute(
-            table.insert(),
-            [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
-        )
-
-        result = connection.execute(
-            table.update()
-            .values(dict(full=True))
-            .where(table.c.persons > 4)
-            .returning(table.c.id)
-        )
-        eq_(result.fetchall(), [(1,)])
-
-        result2 = connection.execute(
-            select(table.c.id, table.c.full).order_by(table.c.id)
-        )
-        eq_(result2.fetchall(), [(1, True), (2, False)])
-
-    @testing.fails_on(
-        "mssql",
-        "driver has unknown issue with string concatenation "
-        "in INSERT RETURNING",
+    @testing.combinations(
+        (lambda table: (table.c.strval + "hi",), ("str1hi",)),
+        (
+            lambda table: (
+                table.c.persons,
+                table.c.full,
+                table.c.strval + "hi",
+            ),
+            (
+                5,
+                False,
+                "str1hi",
+            ),
+        ),
+        (
+            lambda table: (
+                table.c.persons,
+                table.c.strval + "hi",
+                table.c.full,
+            ),
+            (5, "str1hi", False),
+        ),
+        (
+            lambda table: (
+                table.c.strval + "hi",
+                table.c.persons,
+                table.c.full,
+            ),
+            ("str1hi", 5, False),
+        ),
+        argnames="testcase, expected_row",
     )
-    def test_insert_returning_w_expression_one(self, connection):
-        table = self.tables.tables
+    def test_insert_returning_w_expression(
+        self, connection, testcase, expected_row
+    ):
+        table = self.tables.returning_tbl
+
+        exprs = testing.resolve_lambda(testcase, table=table)
+
         result = connection.execute(
-            table.insert().returning(table.c.strval + "hi"),
+            table.insert().returning(*exprs),
             {"persons": 5, "full": False, "strval": "str1"},
         )
 
-        eq_(result.fetchall(), [("str1hi",)])
+        eq_(result.fetchall(), [expected_row])
 
         result2 = connection.execute(
             select(table.c.id, table.c.strval).order_by(table.c.id)
         )
         eq_(result2.fetchall(), [(1, "str1")])
 
+    def test_insert_explicit_pk_col(self, connection):
+        table = self.tables.returning_tbl
+        result = connection.execute(
+            table.insert().returning(table.c.id, table.c.strval),
+            {"id": 1, "strval": "str1"},
+        )
+
+        eq_(
+            result.fetchall(),
+            [
+                (
+                    1,
+                    "str1",
+                )
+            ],
+        )
+
     def test_insert_returning_w_type_coerce_expression(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         result = connection.execute(
             table.insert().returning(type_coerce(table.c.goofy, String)),
             {"persons": 5, "goofy": "somegoofy"},
@@ -234,86 +404,22 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         )
         eq_(result2.fetchall(), [(1, "FOOsomegoofyBAR")])
 
-    def test_update_returning_w_expression_one(self, connection):
-        table = self.tables.tables
-        connection.execute(
-            table.insert(),
-            [
-                {"persons": 5, "full": False, "strval": "str1"},
-                {"persons": 3, "full": False, "strval": "str2"},
-            ],
-        )
-
+    def test_no_ipk_on_returning(self, connection, close_result_when_finished):
+        table = self.tables.returning_tbl
         result = connection.execute(
-            table.update()
-            .where(table.c.persons > 4)
-            .values(full=True)
-            .returning(table.c.strval + "hi")
+            table.insert().returning(table.c.id), {"persons": 1, "full": False}
         )
-        eq_(result.fetchall(), [("str1hi",)])
-
-        result2 = connection.execute(
-            select(table.c.id, table.c.strval).order_by(table.c.id)
+        close_result_when_finished(result)
+        assert_raises_message(
+            sa_exc.InvalidRequestError,
+            r"Can't call inserted_primary_key when returning\(\) is used.",
+            getattr,
+            result,
+            "inserted_primary_key",
         )
-        eq_(result2.fetchall(), [(1, "str1"), (2, "str2")])
-
-    def test_update_returning_w_type_coerce_expression(self, connection):
-        table = self.tables.tables
-        connection.execute(
-            table.insert(),
-            [
-                {"persons": 5, "goofy": "somegoofy1"},
-                {"persons": 3, "goofy": "somegoofy2"},
-            ],
-        )
-
-        result = connection.execute(
-            table.update()
-            .where(table.c.persons > 4)
-            .values(goofy="newgoofy")
-            .returning(type_coerce(table.c.goofy, String))
-        )
-        eq_(result.fetchall(), [("FOOnewgoofy",)])
-
-        result2 = connection.execute(
-            select(table.c.id, table.c.goofy).order_by(table.c.id)
-        )
-        eq_(
-            result2.fetchall(),
-            [(1, "FOOnewgoofyBAR"), (2, "FOOsomegoofy2BAR")],
-        )
-
-    @testing.requires.full_returning
-    def test_update_full_returning(self, connection):
-        table = self.tables.tables
-        connection.execute(
-            table.insert(),
-            [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
-        )
-
-        result = connection.execute(
-            table.update()
-            .where(table.c.persons > 2)
-            .values(full=True)
-            .returning(table.c.id, table.c.full)
-        )
-        eq_(result.fetchall(), [(1, True), (2, True)])
-
-    @testing.requires.full_returning
-    def test_delete_full_returning(self, connection):
-        table = self.tables.tables
-        connection.execute(
-            table.insert(),
-            [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
-        )
-
-        result = connection.execute(
-            table.delete().returning(table.c.id, table.c.full)
-        )
-        eq_(result.fetchall(), [(1, False), (2, False)])
 
     def test_insert_returning(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         result = connection.execute(
             table.insert().returning(table.c.id), {"persons": 1, "full": False}
         )
@@ -321,8 +427,8 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         eq_(result.fetchall(), [(1,)])
 
     @testing.requires.multivalues_inserts
-    def test_multirow_returning(self, connection):
-        table = self.tables.tables
+    def test_multivalues_insert_returning(self, connection):
+        table = self.tables.returning_tbl
         ins = (
             table.insert()
             .returning(table.c.id, table.c.persons)
@@ -336,19 +442,6 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         )
         result = connection.execute(ins)
         eq_(result.fetchall(), [(1, 1), (2, 2), (3, 3)])
-
-    def test_no_ipk_on_returning(self, connection):
-        table = self.tables.tables
-        result = connection.execute(
-            table.insert().returning(table.c.id), {"persons": 1, "full": False}
-        )
-        assert_raises_message(
-            sa_exc.InvalidRequestError,
-            r"Can't call inserted_primary_key when returning\(\) is used.",
-            getattr,
-            result,
-            "inserted_primary_key",
-        )
 
     @testing.fixture
     def column_expression_fixture(self, metadata, connection):
@@ -394,21 +487,130 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         eq_(row._mapping["name"], "n1")
         eq_(row._mapping["value"], "value1")
 
-    @testing.fails_on_everything_except("postgresql", "firebird")
+    @testing.fails_on_everything_except(
+        "postgresql", "mariadb>=10.5", "sqlite>=3.34"
+    )
     def test_literal_returning(self, connection):
+        if testing.against("mariadb"):
+            quote = "`"
+        else:
+            quote = '"'
         if testing.against("postgresql"):
             literal_true = "true"
         else:
             literal_true = "1"
 
         result4 = connection.exec_driver_sql(
-            'insert into tables (id, persons, "full") '
-            "values (5, 10, %s) returning persons" % literal_true
+            "insert into returning_tbl (id, persons, %sfull%s) "
+            "values (5, 10, %s) returning persons"
+            % (quote, quote, literal_true)
         )
         eq_([dict(row._mapping) for row in result4], [{"persons": 10}])
 
+
+class UpdateReturningTest(fixtures.TablesTest, AssertsExecutionResults):
+    __requires__ = ("update_returning",)
+    __backend__ = True
+
+    run_create_tables = "each"
+
+    define_tables = InsertReturningTest.define_tables
+
+    def test_update_returning(self, connection):
+        table = self.tables.returning_tbl
+        connection.execute(
+            table.insert(),
+            [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
+        )
+
+        result = connection.execute(
+            table.update()
+            .values(dict(full=True))
+            .where(table.c.persons > 4)
+            .returning(table.c.id)
+        )
+        eq_(result.fetchall(), [(1,)])
+
+        result2 = connection.execute(
+            select(table.c.id, table.c.full).order_by(table.c.id)
+        )
+        eq_(result2.fetchall(), [(1, True), (2, False)])
+
+    def test_update_returning_w_expression_one(self, connection):
+        table = self.tables.returning_tbl
+        connection.execute(
+            table.insert(),
+            [
+                {"persons": 5, "full": False, "strval": "str1"},
+                {"persons": 3, "full": False, "strval": "str2"},
+            ],
+        )
+
+        result = connection.execute(
+            table.update()
+            .where(table.c.persons > 4)
+            .values(full=True)
+            .returning(table.c.strval + "hi")
+        )
+        eq_(result.fetchall(), [("str1hi",)])
+
+        result2 = connection.execute(
+            select(table.c.id, table.c.strval).order_by(table.c.id)
+        )
+        eq_(result2.fetchall(), [(1, "str1"), (2, "str2")])
+
+    def test_update_returning_w_type_coerce_expression(self, connection):
+        table = self.tables.returning_tbl
+        connection.execute(
+            table.insert(),
+            [
+                {"persons": 5, "goofy": "somegoofy1"},
+                {"persons": 3, "goofy": "somegoofy2"},
+            ],
+        )
+
+        result = connection.execute(
+            table.update()
+            .where(table.c.persons > 4)
+            .values(goofy="newgoofy")
+            .returning(type_coerce(table.c.goofy, String))
+        )
+        eq_(result.fetchall(), [("FOOnewgoofy",)])
+
+        result2 = connection.execute(
+            select(table.c.id, table.c.goofy).order_by(table.c.id)
+        )
+        eq_(
+            result2.fetchall(),
+            [(1, "FOOnewgoofyBAR"), (2, "FOOsomegoofy2BAR")],
+        )
+
+    def test_update_full_returning(self, connection):
+        table = self.tables.returning_tbl
+        connection.execute(
+            table.insert(),
+            [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
+        )
+
+        result = connection.execute(
+            table.update()
+            .where(table.c.persons > 2)
+            .values(full=True)
+            .returning(table.c.id, table.c.full)
+        )
+        eq_(result.fetchall(), [(1, True), (2, True)])
+
+
+class DeleteReturningTest(fixtures.TablesTest, AssertsExecutionResults):
+    __requires__ = ("delete_returning",)
+    __backend__ = True
+
+    run_create_tables = "each"
+
+    define_tables = InsertReturningTest.define_tables
+
     def test_delete_returning(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         connection.execute(
             table.insert(),
             [{"persons": 5, "full": False}, {"persons": 3, "full": False}],
@@ -426,7 +628,7 @@ class ReturningTest(fixtures.TablesTest, AssertsExecutionResults):
 
 
 class CompositeStatementTest(fixtures.TestBase):
-    __requires__ = ("returning",)
+    __requires__ = ("insert_returning",)
     __backend__ = True
 
     @testing.provide_metadata
@@ -456,14 +658,14 @@ class CompositeStatementTest(fixtures.TestBase):
 
 
 class SequenceReturningTest(fixtures.TablesTest):
-    __requires__ = "returning", "sequences"
+    __requires__ = "insert_returning", "sequences"
     __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
-        seq = Sequence("tid_seq")
+        seq = provision.normalize_sequence(config, Sequence("tid_seq"))
         Table(
-            "tables",
+            "returning_tbl",
             metadata,
             Column(
                 "id",
@@ -476,28 +678,27 @@ class SequenceReturningTest(fixtures.TablesTest):
         cls.sequences.tid_seq = seq
 
     def test_insert(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         r = connection.execute(
             table.insert().values(data="hi").returning(table.c.id)
         )
         eq_(r.first(), tuple([testing.db.dialect.default_sequence_base]))
         eq_(
-            connection.execute(self.sequences.tid_seq),
+            connection.scalar(self.sequences.tid_seq),
             testing.db.dialect.default_sequence_base + 1,
         )
 
 
 class KeyReturningTest(fixtures.TablesTest, AssertsExecutionResults):
-
     """test returning() works with columns that define 'key'."""
 
-    __requires__ = ("returning",)
+    __requires__ = ("insert_returning",)
     __backend__ = True
 
     @classmethod
     def define_tables(cls, metadata):
         Table(
-            "tables",
+            "returning_tbl",
             metadata,
             Column(
                 "id",
@@ -509,10 +710,9 @@ class KeyReturningTest(fixtures.TablesTest, AssertsExecutionResults):
             Column("data", String(20)),
         )
 
-    @testing.exclude("firebird", "<", (2, 0), "2.0+ feature")
     @testing.exclude("postgresql", "<", (8, 2), "8.2+ feature")
     def test_insert(self, connection):
-        table = self.tables.tables
+        table = self.tables.returning_tbl
         result = connection.execute(
             table.insert().returning(table.c.foo_id), dict(data="somedata")
         )
@@ -523,8 +723,8 @@ class KeyReturningTest(fixtures.TablesTest, AssertsExecutionResults):
         assert row[table.c.foo_id] == row["id"] == 1
 
 
-class ReturnDefaultsTest(fixtures.TablesTest):
-    __requires__ = ("returning",)
+class InsertReturnDefaultsTest(fixtures.TablesTest):
+    __requires__ = ("insert_returning",)
     run_define_tables = "each"
     __backend__ = True
 
@@ -553,6 +753,30 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             Column("upddef", Integer, onupdate=IncDefault()),
         )
 
+        Table(
+            "table_no_addtl_defaults",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(50)),
+        )
+
+        class MyType(TypeDecorator):
+            impl = String(50)
+
+            def process_result_value(self, value, dialect):
+                return f"PROCESSED! {value}"
+
+        Table(
+            "table_datatype_has_result_proc",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", MyType()),
+        )
+
     def test_chained_insert_pk(self, connection):
         t1 = self.tables.t1
         result = connection.execute(
@@ -579,6 +803,99 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             [1, 0],
         )
 
+    def test_insert_non_default(self, connection):
+        """test that a column not marked at all as a
+        default works with this feature."""
+
+        t1 = self.tables.t1
+        result = connection.execute(
+            t1.insert().values(upddef=1).return_defaults(t1.c.data)
+        )
+        eq_(
+            [
+                result.returned_defaults._mapping[k]
+                for k in (t1.c.id, t1.c.data)
+            ],
+            [1, None],
+        )
+
+    def test_insert_sql_expr(self, connection):
+        from sqlalchemy import literal
+
+        t1 = self.tables.t1
+        result = connection.execute(
+            t1.insert().return_defaults().values(insdef=literal(10) + 5)
+        )
+
+        eq_(
+            result.returned_defaults._mapping,
+            {"id": 1, "data": None, "insdef": 15, "upddef": None},
+        )
+
+    def test_insert_non_default_plus_default(self, connection):
+        t1 = self.tables.t1
+        result = connection.execute(
+            t1.insert()
+            .values(upddef=1)
+            .return_defaults(t1.c.data, t1.c.insdef)
+        )
+        eq_(
+            dict(result.returned_defaults._mapping),
+            {"id": 1, "data": None, "insdef": 0},
+        )
+        eq_(result.inserted_primary_key, (1,))
+
+    def test_insert_all(self, connection):
+        t1 = self.tables.t1
+        result = connection.execute(
+            t1.insert().values(upddef=1).return_defaults()
+        )
+        eq_(
+            dict(result.returned_defaults._mapping),
+            {"id": 1, "data": None, "insdef": 0},
+        )
+        eq_(result.inserted_primary_key, (1,))
+
+    def test_insert_w_defaults_supplemental_cols(self, connection):
+        t1 = self.tables.t1
+        result = connection.execute(
+            t1.insert().return_defaults(supplemental_cols=[t1.c.id]),
+            {"data": "d1"},
+        )
+        eq_(result.all(), [(1, 0, None)])
+
+    def test_insert_w_no_defaults_supplemental_cols(self, connection):
+        t1 = self.tables.table_no_addtl_defaults
+        result = connection.execute(
+            t1.insert().return_defaults(supplemental_cols=[t1.c.id]),
+            {"data": "d1"},
+        )
+        eq_(result.all(), [(1,)])
+
+    def test_insert_w_defaults_supplemental_processor_cols(self, connection):
+        """test that the cursor._rewind() used by supplemental RETURNING
+        clears out result-row processors as we will have already processed
+        the rows.
+
+        """
+
+        t1 = self.tables.table_datatype_has_result_proc
+        result = connection.execute(
+            t1.insert().return_defaults(
+                supplemental_cols=[t1.c.id, t1.c.data]
+            ),
+            {"data": "d1"},
+        )
+        eq_(result.all(), [(1, "PROCESSED! d1")])
+
+
+class UpdatedReturnDefaultsTest(fixtures.TablesTest):
+    __requires__ = ("update_returning",)
+    run_define_tables = "each"
+    __backend__ = True
+
+    define_tables = InsertReturnDefaultsTest.define_tables
+
     def test_chained_update_pk(self, connection):
         t1 = self.tables.t1
         connection.execute(t1.insert().values(upddef=1))
@@ -599,28 +916,13 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             [result.returned_defaults._mapping[k] for k in (t1.c.upddef,)], [1]
         )
 
-    def test_insert_non_default(self, connection):
-        """test that a column not marked at all as a
-        default works with this feature."""
-
-        t1 = self.tables.t1
-        result = connection.execute(
-            t1.insert().values(upddef=1).return_defaults(t1.c.data)
-        )
-        eq_(
-            [
-                result.returned_defaults._mapping[k]
-                for k in (t1.c.id, t1.c.data)
-            ],
-            [1, None],
-        )
-
     def test_update_non_default(self, connection):
         """test that a column not marked at all as a
         default works with this feature."""
 
         t1 = self.tables.t1
         connection.execute(t1.insert().values(upddef=1))
+
         result = connection.execute(
             t1.update().values(upddef=2).return_defaults(t1.c.data)
         )
@@ -629,18 +931,71 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             [None],
         )
 
-    def test_insert_sql_expr(self, connection):
-        from sqlalchemy import literal
+    def test_update_values_col_is_excluded(self, connection):
+        """columns that are in values() are not returned"""
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+
+        result = connection.execute(
+            t1.update().values(data="x", upddef=2).return_defaults(t1.c.data)
+        )
+        is_(result.returned_defaults, None)
+
+        result = connection.execute(
+            t1.update()
+            .values(data="x", upddef=2)
+            .return_defaults(t1.c.data, t1.c.id)
+        )
+        eq_(result.returned_defaults, (1,))
+
+    def test_update_supplemental_cols(self, connection):
+        """with supplemental_cols, we can get back arbitrary cols."""
 
         t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
         result = connection.execute(
-            t1.insert().return_defaults().values(insdef=literal(10) + 5)
+            t1.update()
+            .values(data="x", insdef=3)
+            .return_defaults(supplemental_cols=[t1.c.data, t1.c.insdef])
         )
 
-        eq_(
-            result.returned_defaults._mapping,
-            {"id": 1, "data": None, "insdef": 15, "upddef": None},
+        row = result.returned_defaults
+
+        # row has all the cols in it
+        eq_(row, ("x", 3, 1))
+        eq_(row._mapping[t1.c.upddef], 1)
+        eq_(row._mapping[t1.c.insdef], 3)
+
+        # result is rewound
+        # but has both return_defaults + supplemental_cols
+        eq_(result.all(), [("x", 3, 1)])
+
+    def test_update_expl_return_defaults_plus_supplemental_cols(
+        self, connection
+    ):
+        """with supplemental_cols, we can get back arbitrary cols."""
+
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+        result = connection.execute(
+            t1.update()
+            .values(data="x", insdef=3)
+            .return_defaults(
+                t1.c.id, supplemental_cols=[t1.c.data, t1.c.insdef]
+            )
         )
+
+        row = result.returned_defaults
+
+        # row has all the cols in it
+        eq_(row, (1, "x", 3))
+        eq_(row._mapping[t1.c.id], 1)
+        eq_(row._mapping[t1.c.insdef], 3)
+        assert t1.c.upddef not in row._mapping
+
+        # result is rewound
+        # but has both return_defaults + supplemental_cols
+        eq_(result.all(), [(1, "x", 3)])
 
     def test_update_sql_expr(self, connection):
         from sqlalchemy import literal
@@ -652,19 +1007,6 @@ class ReturnDefaultsTest(fixtures.TablesTest):
         )
 
         eq_(result.returned_defaults._mapping, {"upddef": 15})
-
-    def test_insert_non_default_plus_default(self, connection):
-        t1 = self.tables.t1
-        result = connection.execute(
-            t1.insert()
-            .values(upddef=1)
-            .return_defaults(t1.c.data, t1.c.insdef)
-        )
-        eq_(
-            dict(result.returned_defaults._mapping),
-            {"id": 1, "data": None, "insdef": 0},
-        )
-        eq_(result.inserted_primary_key, (1,))
 
     def test_update_non_default_plus_default(self, connection):
         t1 = self.tables.t1
@@ -679,17 +1021,6 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             {"data": None, "upddef": 1},
         )
 
-    def test_insert_all(self, connection):
-        t1 = self.tables.t1
-        result = connection.execute(
-            t1.insert().values(upddef=1).return_defaults()
-        )
-        eq_(
-            dict(result.returned_defaults._mapping),
-            {"id": 1, "data": None, "insdef": 0},
-        )
-        eq_(result.inserted_primary_key, (1,))
-
     def test_update_all(self, connection):
         t1 = self.tables.t1
         connection.execute(t1.insert().values(upddef=1))
@@ -698,7 +1029,83 @@ class ReturnDefaultsTest(fixtures.TablesTest):
         )
         eq_(dict(result.returned_defaults._mapping), {"upddef": 1})
 
-    @testing.requires.insert_executemany_returning
+
+class DeleteReturnDefaultsTest(fixtures.TablesTest):
+    __requires__ = ("delete_returning",)
+    run_define_tables = "each"
+    __backend__ = True
+
+    define_tables = InsertReturnDefaultsTest.define_tables
+
+    def test_delete(self, connection):
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+        result = connection.execute(t1.delete().return_defaults(t1.c.upddef))
+        eq_(
+            [result.returned_defaults._mapping[k] for k in (t1.c.upddef,)], [1]
+        )
+
+    def test_delete_empty_return_defaults(self, connection):
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=5))
+        result = connection.execute(t1.delete().return_defaults())
+
+        # there's no "delete" default, so we get None.  we have to
+        # ask for them in all cases
+        eq_(result.returned_defaults, None)
+
+    def test_delete_non_default(self, connection):
+        """test that a column not marked at all as a
+        default works with this feature."""
+
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+        result = connection.execute(t1.delete().return_defaults(t1.c.data))
+        eq_(
+            [result.returned_defaults._mapping[k] for k in (t1.c.data,)],
+            [None],
+        )
+
+    def test_delete_non_default_plus_default(self, connection):
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+        result = connection.execute(
+            t1.delete().return_defaults(t1.c.data, t1.c.upddef)
+        )
+        eq_(
+            dict(result.returned_defaults._mapping),
+            {"data": None, "upddef": 1},
+        )
+
+    def test_delete_supplemental_cols(self, connection):
+        """with supplemental_cols, we can get back arbitrary cols."""
+
+        t1 = self.tables.t1
+        connection.execute(t1.insert().values(upddef=1))
+        result = connection.execute(
+            t1.delete().return_defaults(
+                t1.c.id, supplemental_cols=[t1.c.data, t1.c.insdef]
+            )
+        )
+
+        row = result.returned_defaults
+
+        # row has all the cols in it
+        eq_(row, (1, None, 0))
+        eq_(row._mapping[t1.c.insdef], 0)
+
+        # result is rewound
+        # but has both return_defaults + supplemental_cols
+        eq_(result.all(), [(1, None, 0)])
+
+
+class InsertManyReturnDefaultsTest(fixtures.TablesTest):
+    __requires__ = ("insert_executemany_returning",)
+    run_define_tables = "each"
+    __backend__ = True
+
+    define_tables = InsertReturnDefaultsTest.define_tables
+
     def test_insert_executemany_no_defaults_passed(self, connection):
         t1 = self.tables.t1
         result = connection.execute(
@@ -742,7 +1149,6 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             lambda: result.inserted_primary_key,
         )
 
-    @testing.requires.insert_executemany_returning
     def test_insert_executemany_insdefault_passed(self, connection):
         t1 = self.tables.t1
         result = connection.execute(
@@ -786,7 +1192,6 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             lambda: result.inserted_primary_key,
         )
 
-    @testing.requires.insert_executemany_returning
     def test_insert_executemany_only_pk_passed(self, connection):
         t1 = self.tables.t1
         result = connection.execute(
@@ -801,50 +1206,448 @@ class ReturnDefaultsTest(fixtures.TablesTest):
             ],
         )
 
-        eq_(
-            [row._mapping for row in result.returned_defaults_rows],
-            [
-                {"insdef": 0, "upddef": None},
-                {"insdef": 0, "upddef": None},
-                {"insdef": 0, "upddef": None},
-                {"insdef": 0, "upddef": None},
-                {"insdef": 0, "upddef": None},
-                {"insdef": 0, "upddef": None},
-            ],
-        )
+        if connection.dialect.insert_null_pk_still_autoincrements:
+            eq_(
+                [row._mapping for row in result.returned_defaults_rows],
+                [
+                    {"id": 10, "insdef": 0, "upddef": None},
+                    {"id": 11, "insdef": 0, "upddef": None},
+                    {"id": 12, "insdef": 0, "upddef": None},
+                    {"id": 13, "insdef": 0, "upddef": None},
+                    {"id": 14, "insdef": 0, "upddef": None},
+                    {"id": 15, "insdef": 0, "upddef": None},
+                ],
+            )
+        else:
+            eq_(
+                [row._mapping for row in result.returned_defaults_rows],
+                [
+                    {"insdef": 0, "upddef": None},
+                    {"insdef": 0, "upddef": None},
+                    {"insdef": 0, "upddef": None},
+                    {"insdef": 0, "upddef": None},
+                    {"insdef": 0, "upddef": None},
+                    {"insdef": 0, "upddef": None},
+                ],
+            )
         eq_(
             result.inserted_primary_key_rows,
             [(10,), (11,), (12,), (13,), (14,), (15,)],
         )
 
 
-class ImplicitReturningFlag(fixtures.TestBase):
+class InsertManyReturningTest(fixtures.TablesTest):
+    __requires__ = ("insert_executemany_returning",)
+    run_define_tables = "each"
     __backend__ = True
 
-    def test_flag_turned_off(self):
-        e = engines.testing_engine(options={"implicit_returning": False})
-        assert e.dialect.implicit_returning is False
-        c = e.connect()
-        c.close()
-        assert e.dialect.implicit_returning is False
+    @classmethod
+    def define_tables(cls, metadata):
+        from sqlalchemy.sql import ColumnElement
+        from sqlalchemy.ext.compiler import compiles
 
-    def test_flag_turned_on(self):
-        e = engines.testing_engine(options={"implicit_returning": True})
-        assert e.dialect.implicit_returning is True
-        c = e.connect()
-        c.close()
-        assert e.dialect.implicit_returning is True
+        counter = itertools.count()
 
-    def test_flag_turned_default(self):
-        supports = [False]
+        class IncDefault(ColumnElement):
+            pass
 
-        def go():
-            supports[0] = True
+        @compiles(IncDefault)
+        def compile_(element, compiler, **kw):
+            return str(next(counter))
 
-        testing.requires.returning(go)()
-        e = engines.testing_engine()
+        Table(
+            "default_cases",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(50)),
+            Column("insdef", Integer, default=IncDefault()),
+            Column("upddef", Integer, onupdate=IncDefault()),
+        )
 
-        # version detection on connect sets it
-        c = e.connect()
-        c.close()
-        assert e.dialect.implicit_returning is supports[0]
+        class GoofyType(TypeDecorator):
+            impl = String
+            cache_ok = True
+
+            def process_bind_param(self, value, dialect):
+                if value is None:
+                    return None
+                return "FOO" + value
+
+            def process_result_value(self, value, dialect):
+                if value is None:
+                    return None
+                return value + "BAR"
+
+        cls.GoofyType = GoofyType
+
+        Table(
+            "type_cases",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("persons", Integer),
+            Column("full", Boolean),
+            Column("goofy", GoofyType(50)),
+            Column("strval", String(50)),
+        )
+
+        Table(
+            "no_implicit_returning",
+            metadata,
+            Column(
+                "id", Integer, primary_key=True, test_needs_autoincrement=True
+            ),
+            Column("data", String(30)),
+            implicit_returning=False,
+        )
+
+    @testing.combinations(
+        (
+            lambda table: (table.c.strval + "hi",),
+            [("str1hi",), ("str2hi",), ("str3hi",)],
+        ),
+        (
+            lambda table: (
+                table.c.persons,
+                table.c.full,
+                table.c.strval + "hi",
+            ),
+            [
+                (5, False, "str1hi"),
+                (6, True, "str2hi"),
+                (7, False, "str3hi"),
+            ],
+        ),
+        (
+            lambda table: (
+                table.c.persons,
+                table.c.strval + "hi",
+                table.c.full,
+            ),
+            [
+                (5, "str1hi", False),
+                (6, "str2hi", True),
+                (7, "str3hi", False),
+            ],
+        ),
+        (
+            lambda table: (
+                table.c.strval + "hi",
+                table.c.persons,
+                table.c.full,
+            ),
+            [
+                ("str1hi", 5, False),
+                ("str2hi", 6, True),
+                ("str3hi", 7, False),
+            ],
+        ),
+        argnames="testcase, expected_rows",
+    )
+    def test_insert_returning_w_expression(
+        self, connection, testcase, expected_rows
+    ):
+        table = self.tables.type_cases
+
+        exprs = testing.resolve_lambda(testcase, table=table)
+        result = connection.execute(
+            table.insert().returning(*exprs),
+            [
+                {"persons": 5, "full": False, "strval": "str1"},
+                {"persons": 6, "full": True, "strval": "str2"},
+                {"persons": 7, "full": False, "strval": "str3"},
+            ],
+        )
+
+        eq_(result.fetchall(), expected_rows)
+
+        result2 = connection.execute(
+            select(table.c.id, table.c.strval).order_by(table.c.id)
+        )
+        eq_(result2.fetchall(), [(1, "str1"), (2, "str2"), (3, "str3")])
+
+    @testing.fails_if(
+        # Oracle has native executemany() + returning and does not use
+        # insertmanyvalues to achieve this.  so test that for
+        # that particular dialect, the exception expected is not raised
+        # in the case that the compiler vetoed insertmanyvalues (
+        # since Oracle's compiler will always veto it)
+        lambda config: not config.db.dialect.use_insertmanyvalues
+    )
+    def test_iie_supported_but_not_this_statement(self, connection):
+        """test the case where INSERT..RETURNING w/ executemany is used,
+        the dialect requires use_insertmanyreturning, but
+        the compiler vetoed the use of insertmanyvalues."""
+
+        t1 = self.tables.type_cases
+
+        grm = crud._get_returning_modifiers
+
+        def _grm(*arg, **kw):
+            (
+                need_pks,
+                implicit_returning,
+                implicit_return_defaults,
+                postfetch_lastrowid,
+                _,
+                _,
+            ) = grm(*arg, **kw)
+
+            return (
+                need_pks,
+                implicit_returning,
+                implicit_return_defaults,
+                postfetch_lastrowid,
+                False,
+                None,
+            )
+
+        with mock.patch.object(
+            crud,
+            "_get_returning_modifiers",
+            new=_grm,
+        ):
+            with expect_raises_message(
+                sa_exc.StatementError,
+                r'Statement does not have "insertmanyvalues" enabled, '
+                r"can\'t use INSERT..RETURNING with executemany in this "
+                "case.",
+            ):
+                connection.execute(
+                    t1.insert().returning(t1.c.id, t1.c.goofy, t1.c.full),
+                    [
+                        {"persons": 5, "full": True},
+                        {"persons": 6, "full": True},
+                        {"persons": 7, "full": False},
+                    ],
+                )
+
+    @testing.variation(
+        "style",
+        ["no_cols", "cols", "cols_plus_supplemental", "normal_returning"],
+    )
+    def test_no_executemany_w_no_implicit_returning(self, connection, style):
+        """test a refinement made during fixes for #10453;
+        return_defaults() with 'supplemental_cols' is considered to be an
+        explicit returning case, bypassing the implicit_returning parameter.
+
+        """
+        t1 = self.tables.no_implicit_returning
+
+        if style.cols_plus_supplemental:
+            result = connection.execute(
+                t1.insert().return_defaults(
+                    t1.c.id, supplemental_cols=[t1.c.data]
+                ),
+                [
+                    {"data": "d1"},
+                    {"data": "d2"},
+                    {"data": "d3"},
+                ],
+            )
+            eq_(result.scalars().all(), ["d1", "d2", "d3"])
+        elif style.normal_returning:
+            result = connection.execute(
+                t1.insert().returning(t1.c.data),
+                [
+                    {"data": "d1"},
+                    {"data": "d2"},
+                    {"data": "d3"},
+                ],
+            )
+            eq_(result.scalars().all(), ["d1", "d2", "d3"])
+        elif style.cols:
+            result = connection.execute(
+                t1.insert().return_defaults(t1.c.id),
+                [
+                    {"data": "d1"},
+                    {"data": "d2"},
+                    {"data": "d3"},
+                ],
+            )
+            assert not result.returns_rows
+        elif style.no_cols:
+            result = connection.execute(
+                t1.insert().return_defaults(t1.c.id),
+                [
+                    {"data": "d1"},
+                    {"data": "d2"},
+                    {"data": "d3"},
+                ],
+            )
+            assert not result.returns_rows
+
+    def test_insert_executemany_type_test(self, connection):
+        t1 = self.tables.type_cases
+        result = connection.execute(
+            t1.insert().returning(t1.c.id, t1.c.goofy, t1.c.full),
+            [
+                {"persons": 5, "full": True, "goofy": "row1", "strval": "s1"},
+                {"persons": 6, "full": True, "goofy": "row2", "strval": "s2"},
+                {"persons": 7, "full": False, "goofy": "row3", "strval": "s3"},
+                {"persons": 8, "full": True, "goofy": "row4", "strval": "s4"},
+            ],
+        )
+        eq_(
+            result.mappings().all(),
+            [
+                {"id": 1, "goofy": "FOOrow1BAR", "full": True},
+                {"id": 2, "goofy": "FOOrow2BAR", "full": True},
+                {"id": 3, "goofy": "FOOrow3BAR", "full": False},
+                {"id": 4, "goofy": "FOOrow4BAR", "full": True},
+            ],
+        )
+
+    def test_insert_executemany_default_generators(self, connection):
+        t1 = self.tables.default_cases
+        result = connection.execute(
+            t1.insert().returning(t1.c.id, t1.c.insdef, t1.c.upddef),
+            [
+                {"data": "d1"},
+                {"data": "d2"},
+                {"data": "d3"},
+                {"data": "d4"},
+                {"data": "d5"},
+                {"data": "d6"},
+            ],
+        )
+
+        eq_(
+            result.mappings().all(),
+            [
+                {"id": 1, "insdef": 0, "upddef": None},
+                {"id": 2, "insdef": 0, "upddef": None},
+                {"id": 3, "insdef": 0, "upddef": None},
+                {"id": 4, "insdef": 0, "upddef": None},
+                {"id": 5, "insdef": 0, "upddef": None},
+                {"id": 6, "insdef": 0, "upddef": None},
+            ],
+        )
+
+    @testing.combinations(True, False, argnames="update_cols")
+    @testing.requires.provisioned_upsert
+    def test_upsert_data_w_defaults(self, connection, update_cols):
+        t1 = self.tables.default_cases
+
+        new_rows = connection.execute(
+            t1.insert().returning(t1.c.id, t1.c.insdef, t1.c.data),
+            [
+                {"data": "d1"},
+                {"data": "d2"},
+                {"data": "d3"},
+                {"data": "d4"},
+                {"data": "d5"},
+                {"data": "d6"},
+            ],
+        ).all()
+
+        eq_(
+            new_rows,
+            [
+                (1, 0, "d1"),
+                (2, 0, "d2"),
+                (3, 0, "d3"),
+                (4, 0, "d4"),
+                (5, 0, "d5"),
+                (6, 0, "d6"),
+            ],
+        )
+
+        stmt = provision.upsert(
+            config,
+            t1,
+            (t1.c.id, t1.c.insdef, t1.c.data),
+            set_lambda=(
+                (lambda excluded: {"data": excluded.data + " excluded"})
+                if update_cols
+                else None
+            ),
+        )
+
+        upserted_rows = connection.execute(
+            stmt,
+            [
+                {"id": 1, "data": "d1 upserted"},
+                {"id": 4, "data": "d4 upserted"},
+                {"id": 5, "data": "d5 upserted"},
+                {"id": 7, "data": "d7 upserted"},
+                {"id": 8, "data": "d8 upserted"},
+                {"id": 9, "data": "d9 upserted"},
+            ],
+        ).all()
+
+        if update_cols:
+            eq_(
+                upserted_rows,
+                [
+                    (1, 0, "d1 upserted excluded"),
+                    (4, 0, "d4 upserted excluded"),
+                    (5, 0, "d5 upserted excluded"),
+                    (7, 1, "d7 upserted"),
+                    (8, 1, "d8 upserted"),
+                    (9, 1, "d9 upserted"),
+                ],
+            )
+        else:
+            if testing.against("sqlite", "postgresql"):
+                eq_(
+                    upserted_rows,
+                    [
+                        (7, 1, "d7 upserted"),
+                        (8, 1, "d8 upserted"),
+                        (9, 1, "d9 upserted"),
+                    ],
+                )
+            elif testing.against("mariadb"):
+                # mariadb does not seem to have an "empty" upsert,
+                # so the provision.upsert() sets table.c.id to itself.
+                # this means we get all the rows back
+                eq_(
+                    upserted_rows,
+                    [
+                        (1, 0, "d1"),
+                        (4, 0, "d4"),
+                        (5, 0, "d5"),
+                        (7, 1, "d7 upserted"),
+                        (8, 1, "d8 upserted"),
+                        (9, 1, "d9 upserted"),
+                    ],
+                )
+
+        resulting_data = connection.execute(
+            t1.select().order_by(t1.c.id)
+        ).all()
+
+        if update_cols:
+            eq_(
+                resulting_data,
+                [
+                    (1, "d1 upserted excluded", 0, None),
+                    (2, "d2", 0, None),
+                    (3, "d3", 0, None),
+                    (4, "d4 upserted excluded", 0, None),
+                    (5, "d5 upserted excluded", 0, None),
+                    (6, "d6", 0, None),
+                    (7, "d7 upserted", 1, None),
+                    (8, "d8 upserted", 1, None),
+                    (9, "d9 upserted", 1, None),
+                ],
+            )
+        else:
+            eq_(
+                resulting_data,
+                [
+                    (1, "d1", 0, None),
+                    (2, "d2", 0, None),
+                    (3, "d3", 0, None),
+                    (4, "d4", 0, None),
+                    (5, "d5", 0, None),
+                    (6, "d6", 0, None),
+                    (7, "d7 upserted", 1, None),
+                    (8, "d8 upserted", 1, None),
+                    (9, "d9 upserted", 1, None),
+                ],
+            )

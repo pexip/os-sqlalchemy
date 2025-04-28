@@ -3,12 +3,13 @@
 Mapping Class Inheritance Hierarchies
 =====================================
 
-SQLAlchemy supports three forms of inheritance: **single table inheritance**,
-where several types of classes are represented by a single table, **concrete
-table inheritance**, where each type of class is represented by independent
-tables, and **joined table inheritance**, where the class hierarchy is broken
-up among dependent tables, each class represented by its own table that only
-includes those attributes local to that class.
+SQLAlchemy supports three forms of inheritance:
+
+* **single table inheritance** – several types of classes are represented by a single table;
+
+* **concrete table inheritance** – each type of class is represented by independent tables;
+
+* **joined table inheritance** – the class hierarchy is broken up among dependent tables. Each class represented by its own table that only includes those attributes local to that class.
 
 The most common forms of inheritance are single and joined table, while
 concrete inheritance presents more configurational challenges.
@@ -18,6 +19,8 @@ ability to load elements :term:`polymorphically`, meaning that a single query ca
 return objects of multiple types.
 
 .. seealso::
+
+    :ref:`loading_joined_inheritance` - in the :ref:`queryguide_toplevel`
 
     :ref:`examples_inheritance` - complete examples of joined, single and
     concrete inheritance
@@ -30,44 +33,60 @@ Joined Table Inheritance
 In joined table inheritance, each class along a hierarchy of classes
 is represented by a distinct table.  Querying for a particular subclass
 in the hierarchy will render as a SQL JOIN along all tables in its
-inheritance path. If the queried class is the base class, the **default behavior
-is to include only the base table** in a SELECT statement.   In all cases, the
-ultimate class to instantiate for a given row is determined by a discriminator
-column or an expression that works against the base table.    When a subclass
-is loaded **only** against a base table, resulting objects will have base attributes
-populated at first; attributes that are local to the subclass will :term:`lazy load`
-when they are accessed.    Alternatively, there are options which can change
-the default behavior, allowing the query to include columns corresponding to
-multiple tables/subclasses up front.
+inheritance path. If the queried class is the base class, the base table
+is queried instead, with options to include other tables at the same time
+or to allow attributes specific to sub-tables to load later.
+
+In all cases, the ultimate class to instantiate for a given row is determined
+by a :term:`discriminator` column or SQL expression, defined on the base class,
+which will yield a scalar value that is associated with a particular subclass.
+
 
 The base class in a joined inheritance hierarchy is configured with
-additional arguments that will refer to the polymorphic discriminator
-column as well as the identifier for the base class::
+additional arguments that will indicate to the polymorphic discriminator
+column, and optionally a polymorphic identifier for the base class itself::
+
+    from sqlalchemy import ForeignKey
+    from sqlalchemy.orm import DeclarativeBase
+    from sqlalchemy.orm import Mapped
+    from sqlalchemy.orm import mapped_column
+
+
+    class Base(DeclarativeBase):
+        pass
+
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(50))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
         }
 
-Above, an additional column ``type`` is established to act as the
-**discriminator**, configured as such using the :paramref:`.mapper.polymorphic_on`
-parameter.  This column will store a value which indicates the type of object
+        def __repr__(self):
+            return f"{self.__class__.__name__}({self.name!r})"
+
+In the above example, the discriminator is the ``type`` column, whichever is
+configured using the :paramref:`_orm.Mapper.polymorphic_on` parameter. This
+parameter accepts a column-oriented expression, specified either as a string
+name of the mapped attribute to use or as a column expression object such as
+:class:`_schema.Column` or :func:`_orm.mapped_column` construct.
+
+The discriminator column will store a value which indicates the type of object
 represented within the row. The column may be of any datatype, though string
 and integer are the most common.  The actual data value to be applied to this
 column for a particular row in the database is specified using the
-:paramref:`.mapper.polymorphic_identity` parameter, described below.
+:paramref:`_orm.Mapper.polymorphic_identity` parameter, described below.
 
 While a polymorphic discriminator expression is not strictly necessary, it is
-required if polymorphic loading is desired.   Establishing a simple column on
+required if polymorphic loading is desired.   Establishing a column on
 the base table is the easiest way to achieve this, however very sophisticated
-inheritance mappings may even configure a SQL expression such as a CASE
-statement as the polymorphic discriminator.
+inheritance mappings may make use of SQL expressions, such as a CASE
+expression, as the polymorphic discriminator.
 
 .. note::
 
@@ -83,8 +102,8 @@ columns), as well as a foreign key reference to the parent table::
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
-        engineer_name = Column(String(30))
+        id: Mapped[int] = mapped_column(ForeignKey("employee.id"), primary_key=True)
+        engineer_name: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -93,32 +112,32 @@ columns), as well as a foreign key reference to the parent table::
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
-        manager_name = Column(String(30))
+        id: Mapped[int] = mapped_column(ForeignKey("employee.id"), primary_key=True)
+        manager_name: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
         }
 
 In the above example, each mapping specifies the
-:paramref:`.mapper.polymorphic_identity` parameter within its mapper arguments.
+:paramref:`_orm.Mapper.polymorphic_identity` parameter within its mapper arguments.
 This value populates the column designated by the
-:paramref:`.mapper.polymorphic_on` parameter established on the base  mapper.
-The :paramref:`.mapper.polymorphic_identity`  parameter should be unique to
+:paramref:`_orm.Mapper.polymorphic_on` parameter established on the base  mapper.
+The :paramref:`_orm.Mapper.polymorphic_identity`  parameter should be unique to
 each mapped class across the whole hierarchy, and there should only be one
 "identity" per mapped class; as noted above,  "cascading" identities where some
 subclasses introduce a second identity are not supported.
 
-The ORM uses the value set up by :paramref:`.mapper.polymorphic_identity` in
+The ORM uses the value set up by :paramref:`_orm.Mapper.polymorphic_identity` in
 order to determine which class a row belongs towards when loading rows
 polymorphically.  In the example above, every row which represents an
-``Employee`` will have the value ``'employee'`` in its ``type`` row; similarly,
+``Employee`` will have the value ``'employee'`` in its ``type`` column; similarly,
 every ``Engineer`` will get the value ``'engineer'``, and each ``Manager`` will
 get the value ``'manager'``. Regardless of whether the inheritance mapping uses
 distinct joined tables for subclasses as in joined table inheritance, or all
 one table as in single table inheritance, this value is expected to be
 persisted and available to the ORM when querying. The
-:paramref:`.mapper.polymorphic_identity` parameter also applies to concrete
+:paramref:`_orm.Mapper.polymorphic_identity` parameter also applies to concrete
 table inheritance, but is not actually persisted; see the later section at
 :ref:`concrete_inheritance` for details.
 
@@ -159,33 +178,36 @@ below, as the ``employee`` table has a foreign key constraint back to
 the ``company`` table, the relationships are set up between ``Company``
 and ``Employee``::
 
+    from __future__ import annotations
+
+    from sqlalchemy.orm import relationship
+
+
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        employees = relationship("Employee", back_populates="company")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        employees: Mapped[List[Employee]] = relationship(back_populates="company")
 
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(50))
-        company_id = Column(ForeignKey("company.id"))
-        company = relationship("Company", back_populates="employees")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
+        company_id: Mapped[int] = mapped_column(ForeignKey("company.id"))
+        company: Mapped[Company] = relationship(back_populates="employees")
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
         }
 
 
-    class Manager(Employee):
-        ...
+    class Manager(Employee): ...
 
 
-    class Engineer(Employee):
-        ...
+    class Engineer(Employee): ...
 
 If the foreign key constraint is on a table corresponding to a subclass,
 the relationship should target that subclass instead.  In the example
@@ -195,38 +217,37 @@ established between the ``Manager`` and ``Company`` classes::
 
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        managers = relationship("Manager", back_populates="company")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        managers: Mapped[List[Manager]] = relationship(back_populates="company")
 
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(50))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
         }
 
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, ForeignKey("employee.id"), primary_key=True)
-        manager_name = Column(String(30))
+        id: Mapped[int] = mapped_column(ForeignKey("employee.id"), primary_key=True)
+        manager_name: Mapped[str]
 
-        company_id = Column(ForeignKey("company.id"))
-        company = relationship("Company", back_populates="managers")
+        company_id: Mapped[int] = mapped_column(ForeignKey("company.id"))
+        company: Mapped[Company] = relationship(back_populates="managers")
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
         }
 
 
-    class Engineer(Employee):
-        ...
+    class Engineer(Employee): ...
 
 Above, the ``Manager`` class will have a ``Manager.company`` attribute;
 ``Company`` will have a ``Company.managers`` attribute that always
@@ -235,9 +256,8 @@ loads against a join of the ``employee`` and ``manager`` tables together.
 Loading Joined Inheritance Mappings
 +++++++++++++++++++++++++++++++++++
 
-See the sections :ref:`inheritance_loading_toplevel` and
-:ref:`loading_joined_inheritance` for background on inheritance
-loading techniques, including configuration of tables
+See the section :ref:`inheritance_loading_toplevel` for background
+on inheritance loading techniques, including configuration of tables
 to be queried both at mapper configuration time as well as query time.
 
 .. _single_inheritance:
@@ -264,25 +284,26 @@ inheritance, except only the base class specifies ``__tablename__``. A
 discriminator column is also required on the base table so that classes can be
 differentiated from each other.
 
-Even though subclasses share the base table for all of their attributes,
-when using Declarative,  :class:`_schema.Column` objects may still be specified on
-subclasses, indicating that the column is to be mapped only to that subclass;
-the :class:`_schema.Column` will be applied to the same base :class:`_schema.Table` object::
+Even though subclasses share the base table for all of their attributes, when
+using Declarative, :class:`_orm.mapped_column` objects may still be specified
+on subclasses, indicating that the column is to be mapped only to that
+subclass; the :class:`_orm.mapped_column` will be applied to the same base
+:class:`_schema.Table` object::
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(20))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
             "polymorphic_identity": "employee",
         }
 
 
     class Manager(Employee):
-        manager_data = Column(String(50))
+        manager_data: Mapped[str] = mapped_column(nullable=True)
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -290,7 +311,7 @@ the :class:`_schema.Column` will be applied to the same base :class:`_schema.Tab
 
 
     class Engineer(Employee):
-        engineer_info = Column(String(50))
+        engineer_info: Mapped[str] = mapped_column(nullable=True)
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -298,26 +319,33 @@ the :class:`_schema.Column` will be applied to the same base :class:`_schema.Tab
 
 Note that the mappers for the derived classes Manager and Engineer omit the
 ``__tablename__``, indicating they do not have a mapped table of
-their own.
+their own.  Additionally, a :func:`_orm.mapped_column` directive with
+``nullable=True`` is included; as the Python types declared for these classes
+do not include ``Optional[]``, the column would normally be mapped as
+``NOT NULL``, which would not be appropriate as this column only expects to
+be populated for those rows that correspond to that particular subclass.
 
 .. _orm_inheritance_column_conflicts:
 
-Resolving Column Conflicts
-+++++++++++++++++++++++++++
+Resolving Column Conflicts with ``use_existing_column``
++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 
 Note in the previous section that the ``manager_name`` and ``engineer_info`` columns
 are "moved up" to be applied to ``Employee.__table__``, as a result of their
 declaration on a subclass that has no table of its own.   A tricky case
 comes up when two subclasses want to specify *the same* column, as below::
 
+    from datetime import datetime
+
+
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(20))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
             "polymorphic_identity": "employee",
         }
 
@@ -326,39 +354,44 @@ comes up when two subclasses want to specify *the same* column, as below::
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
         }
-        start_date = Column(DateTime)
+        start_date: Mapped[datetime] = mapped_column(nullable=True)
 
 
     class Manager(Employee):
         __mapper_args__ = {
             "polymorphic_identity": "manager",
         }
-        start_date = Column(DateTime)
+        start_date: Mapped[datetime] = mapped_column(nullable=True)
 
 Above, the ``start_date`` column declared on both ``Engineer`` and ``Manager``
-will result in an error::
+will result in an error:
 
-    sqlalchemy.exc.ArgumentError: Column 'start_date' on class
-    <class '__main__.Manager'> conflicts with existing
-    column 'employee.start_date'
+.. sourcecode:: text
+
+
+    sqlalchemy.exc.ArgumentError: Column 'start_date' on class Manager conflicts
+    with existing column 'employee.start_date'.  If using Declarative,
+    consider using the use_existing_column parameter of mapped_column() to
+    resolve conflicts.
 
 The above scenario presents an ambiguity to the Declarative mapping system that
-may be resolved by using
-:class:`.declared_attr` to define the :class:`_schema.Column` conditionally,
-taking care to return the **existing column** via the parent ``__table__``
-if it already exists::
+may be resolved by using the :paramref:`_orm.mapped_column.use_existing_column`
+parameter on :func:`_orm.mapped_column`, which instructs :func:`_orm.mapped_column`
+to look on the inheriting superclass present and use the column that's already
+mapped, if already present, else to map a new column::
 
-    from sqlalchemy.orm import declared_attr
+
+    from sqlalchemy import DateTime
 
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(20))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
             "polymorphic_identity": "employee",
         }
 
@@ -368,10 +401,9 @@ if it already exists::
             "polymorphic_identity": "engineer",
         }
 
-        @declared_attr
-        def start_date(cls):
-            "Start date column, if not present already."
-            return Employee.__table__.c.get("start_date", Column(DateTime))
+        start_date: Mapped[datetime] = mapped_column(
+            nullable=True, use_existing_column=True
+        )
 
 
     class Manager(Employee):
@@ -379,15 +411,27 @@ if it already exists::
             "polymorphic_identity": "manager",
         }
 
-        @declared_attr
-        def start_date(cls):
-            "Start date column, if not present already."
-            return Employee.__table__.c.get("start_date", Column(DateTime))
+        start_date: Mapped[datetime] = mapped_column(
+            nullable=True, use_existing_column=True
+        )
 
 Above, when ``Manager`` is mapped, the ``start_date`` column is
-already present on the ``Employee`` class; by returning the existing
-:class:`_schema.Column` object, the declarative system recognizes that this
-is the same column to be mapped to the two different subclasses separately.
+already present on the ``Employee`` class, having been provided by the
+``Engineer`` mapping already.   The :paramref:`_orm.mapped_column.use_existing_column`
+parameter indicates to :func:`_orm.mapped_column` that it should look for the
+requested :class:`_schema.Column` on the mapped :class:`.Table` for
+``Employee`` first, and if present, maintain that existing mapping.  If not
+present, :func:`_orm.mapped_column` will map the column normally, adding it
+as one of the columns in the :class:`.Table` referenced by the
+``Employee`` superclass.
+
+
+.. versionadded:: 2.0.0b4 - Added :paramref:`_orm.mapped_column.use_existing_column`,
+   which provides a 2.0-compatible means of mapping a column on an inheriting
+   subclass conditionally.  The previous approach which combines
+   :class:`.declared_attr` with a lookup on the parent ``.__table__``
+   continues to function as well, but lacks :pep:`484` typing support.
+
 
 A similar concept can be used with mixin classes (see :ref:`orm_mixins_toplevel`)
 to define a particular series of columns and/or other mapped attributes
@@ -395,9 +439,9 @@ from a reusable mixin class::
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(20))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_on": type,
@@ -406,9 +450,9 @@ from a reusable mixin class::
 
 
     class HasStartDate:
-        @declared_attr
-        def start_date(cls):
-            return cls.__table__.c.get("start_date", Column(DateTime))
+        start_date: Mapped[datetime] = mapped_column(
+            nullable=True, use_existing_column=True
+        )
 
 
     class Engineer(HasStartDate, Employee):
@@ -432,27 +476,27 @@ relationship::
 
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        employees = relationship("Employee", back_populates="company")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        employees: Mapped[List[Employee]] = relationship(back_populates="company")
 
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(50))
-        company_id = Column(ForeignKey("company.id"))
-        company = relationship("Company", back_populates="employees")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
+        company_id: Mapped[int] = mapped_column(ForeignKey("company.id"))
+        company: Mapped[Company] = relationship(back_populates="employees")
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
         }
 
 
     class Manager(Employee):
-        manager_data = Column(String(50))
+        manager_data: Mapped[str] = mapped_column(nullable=True)
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -460,7 +504,7 @@ relationship::
 
 
     class Engineer(Employee):
-        engineer_info = Column(String(50))
+        engineer_info: Mapped[str] = mapped_column(nullable=True)
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -473,28 +517,28 @@ or subclasses::
 
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        managers = relationship("Manager", back_populates="company")
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        managers: Mapped[List[Manager]] = relationship(back_populates="company")
 
 
     class Employee(Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        type = Column(String(50))
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
-            "polymorphic_on": type,
+            "polymorphic_on": "type",
         }
 
 
     class Manager(Employee):
-        manager_name = Column(String(30))
+        manager_name: Mapped[str] = mapped_column(nullable=True)
 
-        company_id = Column(ForeignKey("company.id"))
-        company = relationship("Company", back_populates="managers")
+        company_id: Mapped[int] = mapped_column(ForeignKey("company.id"))
+        company: Mapped[Company] = relationship(back_populates="managers")
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -502,7 +546,7 @@ or subclasses::
 
 
     class Engineer(Employee):
-        engineer_info = Column(String(50))
+        engineer_info: Mapped[str] = mapped_column(nullable=True)
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -512,6 +556,172 @@ Above, the ``Manager`` class will have a ``Manager.company`` attribute;
 ``Company`` will have a ``Company.managers`` attribute that always
 loads against the ``employee`` with an additional WHERE clause that
 limits rows to those with ``type = 'manager'``.
+
+.. _orm_inheritance_abstract_poly:
+
+Building Deeper Hierarchies with ``polymorphic_abstract``
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+.. versionadded:: 2.0
+
+When building any kind of inheritance hierarchy, a mapped class may include the
+:paramref:`_orm.Mapper.polymorphic_abstract` parameter set to ``True``, which
+indicates that the class should be mapped normally, however would not expect to
+be instantiated directly and would not include a
+:paramref:`_orm.Mapper.polymorphic_identity`. Subclasses may then be declared
+as subclasses of this mapped class, which themselves can include a
+:paramref:`_orm.Mapper.polymorphic_identity` and therefore be used normally.
+This allows a series of subclasses to be referenced at once by a common base
+class which is considered to be "abstract" within the hierarchy, both in
+queries as well as in :func:`_orm.relationship` declarations. This use differs
+from the use of the :ref:`declarative_abstract` attribute with Declarative,
+which leaves the target class entirely unmapped and thus not usable as a mapped
+class by itself. :paramref:`_orm.Mapper.polymorphic_abstract` may be applied to
+any class or classes at any level in the hierarchy, including on multiple
+levels at once.
+
+As an example, suppose ``Manager`` and ``Principal`` were both to be classified
+against a superclass ``Executive``, and ``Engineer`` and ``Sysadmin`` were
+classified against a superclass ``Technologist``. Neither ``Executive`` or
+``Technologist`` is ever instantiated, therefore have no
+:paramref:`_orm.Mapper.polymorphic_identity`. These classes can be configured
+using :paramref:`_orm.Mapper.polymorphic_abstract` as follows::
+
+    class Employee(Base):
+        __tablename__ = "employee"
+        id: Mapped[int] = mapped_column(primary_key=True)
+        name: Mapped[str]
+        type: Mapped[str]
+
+        __mapper_args__ = {
+            "polymorphic_identity": "employee",
+            "polymorphic_on": "type",
+        }
+
+
+    class Executive(Employee):
+        """An executive of the company"""
+
+        executive_background: Mapped[str] = mapped_column(nullable=True)
+
+        __mapper_args__ = {"polymorphic_abstract": True}
+
+
+    class Technologist(Employee):
+        """An employee who works with technology"""
+
+        competencies: Mapped[str] = mapped_column(nullable=True)
+
+        __mapper_args__ = {"polymorphic_abstract": True}
+
+
+    class Manager(Executive):
+        """a manager"""
+
+        __mapper_args__ = {"polymorphic_identity": "manager"}
+
+
+    class Principal(Executive):
+        """a principal of the company"""
+
+        __mapper_args__ = {"polymorphic_identity": "principal"}
+
+
+    class Engineer(Technologist):
+        """an engineer"""
+
+        __mapper_args__ = {"polymorphic_identity": "engineer"}
+
+
+    class SysAdmin(Technologist):
+        """a systems administrator"""
+
+        __mapper_args__ = {"polymorphic_identity": "sysadmin"}
+
+In the above example, the new classes ``Technologist`` and ``Executive``
+are ordinary mapped classes, and also indicate new columns to be added to the
+superclass called ``executive_background`` and ``competencies``.   However,
+they both lack a setting for :paramref:`_orm.Mapper.polymorphic_identity`;
+this is because it's not expected that ``Technologist`` or ``Executive`` would
+ever be instantiated directly; we'd always have one of ``Manager``, ``Principal``,
+``Engineer`` or ``SysAdmin``.   We can however query for
+``Principal`` and ``Technologist`` roles, as well as have them be targets
+of :func:`_orm.relationship`.  The example below demonstrates a SELECT
+statement for ``Technologist`` objects:
+
+
+.. sourcecode:: python+sql
+
+    session.scalars(select(Technologist)).all()
+    {execsql}
+    SELECT employee.id, employee.name, employee.type, employee.competencies
+    FROM employee
+    WHERE employee.type IN (?, ?)
+    [...] ('engineer', 'sysadmin')
+
+The ``Technologist`` and ``Executive`` abstract mapped classes may also be
+made the targets of :func:`_orm.relationship` mappings, like any other
+mapped class.  We can extend the above example to include ``Company``,
+with separate collections ``Company.technologists`` and ``Company.principals``::
+
+    class Company(Base):
+        __tablename__ = "company"
+        id = Column(Integer, primary_key=True)
+
+        executives: Mapped[List[Executive]] = relationship()
+        technologists: Mapped[List[Technologist]] = relationship()
+
+
+    class Employee(Base):
+        __tablename__ = "employee"
+        id: Mapped[int] = mapped_column(primary_key=True)
+
+        # foreign key to "company.id" is added
+        company_id: Mapped[int] = mapped_column(ForeignKey("company.id"))
+
+        # rest of mapping is the same
+        name: Mapped[str]
+        type: Mapped[str]
+
+        __mapper_args__ = {
+            "polymorphic_on": "type",
+        }
+
+
+    # Executive, Technologist, Manager, Principal, Engineer, SysAdmin
+    # classes from previous example would follow here unchanged
+
+Using the above mapping we can use joins and relationship loading techniques
+across ``Company.technologists`` and ``Company.executives`` individually:
+
+.. sourcecode:: python+sql
+
+    session.scalars(
+        select(Company)
+        .join(Company.technologists)
+        .where(Technologist.competency.ilike("%java%"))
+        .options(selectinload(Company.executives))
+    ).all()
+    {execsql}
+    SELECT company.id
+    FROM company JOIN employee ON company.id = employee.company_id AND employee.type IN (?, ?)
+    WHERE lower(employee.competencies) LIKE lower(?)
+    [...] ('engineer', 'sysadmin', '%java%')
+
+    SELECT employee.company_id AS employee_company_id, employee.id AS employee_id,
+    employee.name AS employee_name, employee.type AS employee_type,
+    employee.executive_background AS employee_executive_background
+    FROM employee
+    WHERE employee.company_id IN (?) AND employee.type IN (?, ?)
+    [...] (1, 'manager', 'principal')
+
+
+
+.. seealso::
+
+    :ref:`declarative_abstract` - Declarative parameter which allows a
+    Declarative class to be completely un-mapped within a hierarchy, while
+    still extending from a mapped superclass.
 
 
 Loading Single Inheritance Mappings
@@ -560,23 +770,23 @@ is not required**.   Establishing relationships that involve concrete inheritanc
 classes is also more awkward.
 
 To establish a class as using concrete inheritance, add the
-:paramref:`.mapper.concrete` parameter within the ``__mapper_args__``.
+:paramref:`_orm.Mapper.concrete` parameter within the ``__mapper_args__``.
 This indicates to Declarative as well as the mapping that the superclass
 table should not be considered as part of the mapping::
 
     class Employee(Base):
         __tablename__ = "employee"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
 
 
     class Manager(Employee):
         __tablename__ = "manager"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(50))
 
         __mapper_args__ = {
             "concrete": True,
@@ -586,9 +796,9 @@ table should not be considered as part of the mapping::
     class Engineer(Employee):
         __tablename__ = "engineer"
 
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(50))
 
         __mapper_args__ = {
             "concrete": True,
@@ -619,13 +829,13 @@ constructed using a SQLAlchemy helper :func:`.polymorphic_union`.
 
 As discussed in :ref:`inheritance_loading_toplevel`, mapper inheritance
 configurations of any type can be configured to load from a special selectable
-by default using the :paramref:`.mapper.with_polymorphic` argument.  Current
+by default using the :paramref:`_orm.Mapper.with_polymorphic` argument.  Current
 public API requires that this argument is set on a :class:`_orm.Mapper` when
 it is first constructed.
 
 However, in the case of Declarative, both the mapper and the :class:`_schema.Table`
 that is mapped are created at once, the moment the mapped class is defined.
-This means that the :paramref:`.mapper.with_polymorphic` argument cannot
+This means that the :paramref:`_orm.Mapper.with_polymorphic` argument cannot
 be provided yet, since the :class:`_schema.Table` objects that correspond to the
 subclasses haven't yet been defined.
 
@@ -637,15 +847,17 @@ Using :class:`.ConcreteBase`, we can set up our concrete mapping in
 almost the same way as we do other forms of inheritance mappings::
 
     from sqlalchemy.ext.declarative import ConcreteBase
-    from sqlalchemy.orm import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Employee(ConcreteBase, Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
@@ -655,9 +867,9 @@ almost the same way as we do other forms of inheritance mappings::
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(40))
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -667,9 +879,9 @@ almost the same way as we do other forms of inheritance mappings::
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(40))
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -688,20 +900,20 @@ Upon select, the polymorphic union produces a query like this:
 
 .. sourcecode:: python+sql
 
-    session.query(Employee).all()
-    {opensql}
+    session.scalars(select(Employee)).all()
+    {execsql}
     SELECT
-        pjoin.id AS pjoin_id,
-        pjoin.name AS pjoin_name,
-        pjoin.type AS pjoin_type,
-        pjoin.manager_data AS pjoin_manager_data,
-        pjoin.engineer_info AS pjoin_engineer_info
+        pjoin.id,
+        pjoin.name,
+        pjoin.type,
+        pjoin.manager_data,
+        pjoin.engineer_info
     FROM (
         SELECT
             employee.id AS id,
             employee.name AS name,
-            CAST(NULL AS VARCHAR(50)) AS manager_data,
-            CAST(NULL AS VARCHAR(50)) AS engineer_info,
+            CAST(NULL AS VARCHAR(40)) AS manager_data,
+            CAST(NULL AS VARCHAR(40)) AS engineer_info,
             'employee' AS type
         FROM employee
         UNION ALL
@@ -709,14 +921,14 @@ Upon select, the polymorphic union produces a query like this:
             manager.id AS id,
             manager.name AS name,
             manager.manager_data AS manager_data,
-            CAST(NULL AS VARCHAR(50)) AS engineer_info,
+            CAST(NULL AS VARCHAR(40)) AS engineer_info,
             'manager' AS type
         FROM manager
         UNION ALL
         SELECT
             engineer.id AS id,
             engineer.name AS name,
-            CAST(NULL AS VARCHAR(50)) AS manager_data,
+            CAST(NULL AS VARCHAR(40)) AS manager_data,
             engineer.engineer_info AS engineer_info,
             'engineer' AS type
         FROM engineer
@@ -746,9 +958,11 @@ tables, and leave the base class unmapped, this can be achieved very easily.
 When using Declarative, just declare the
 base class with the ``__abstract__`` indicator::
 
-    from sqlalchemy.orm import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Employee(Base):
@@ -757,21 +971,21 @@ base class with the ``__abstract__`` indicator::
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(40))
 
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(40))
 
 Above, we are not actually making use of SQLAlchemy's inheritance mapping
 facilities; we can load and persist instances of ``Manager`` and ``Engineer``
 normally.   The situation changes however when we need to **query polymorphically**,
-that is, we'd like to emit ``session.query(Employee)`` and get back a collection
+that is, we'd like to emit ``select(Employee)`` and get back a collection
 of ``Manager`` and ``Engineer`` instances.    This brings us back into the
 domain of concrete inheritance, and we must build a special mapper against
 ``Employee`` in order to achieve this.
@@ -781,26 +995,30 @@ that is capable of polymorphic loading,
 we will have only an ``engineer`` and a ``manager`` table and no ``employee``
 table, however the ``Employee`` mapper will be mapped directly to the
 "polymorphic union", rather than specifying it locally to the
-:paramref:`.mapper.with_polymorphic` parameter.
+:paramref:`_orm.Mapper.with_polymorphic` parameter.
 
 To help with this, Declarative offers a variant of the :class:`.ConcreteBase`
 class called :class:`.AbstractConcreteBase` which achieves this automatically::
 
     from sqlalchemy.ext.declarative import AbstractConcreteBase
-    from sqlalchemy.orm import declarative_base
+    from sqlalchemy.orm import DeclarativeBase
 
-    Base = declarative_base()
+
+    class Base(DeclarativeBase):
+        pass
 
 
     class Employee(AbstractConcreteBase, Base):
-        pass
+        strict_attrs = True
+
+        name = mapped_column(String(50))
 
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(40))
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -810,9 +1028,9 @@ class called :class:`.AbstractConcreteBase` which achieves this automatically::
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(40))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(40))
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -831,6 +1049,48 @@ of the base class must be delayed until all the subclasses have been declared.
 With a mapping like the above, only instances of ``Manager`` and ``Engineer``
 may be persisted; querying against the ``Employee`` class will always produce
 ``Manager`` and ``Engineer`` objects.
+
+Using the above mapping, queries can be produced in terms of the ``Employee``
+class and any attributes that are locally declared upon it, such as the
+``Employee.name``:
+
+.. sourcecode:: pycon+sql
+
+    >>> stmt = select(Employee).where(Employee.name == "n1")
+    >>> print(stmt)
+    {printsql}SELECT pjoin.id, pjoin.name, pjoin.type, pjoin.manager_data, pjoin.engineer_info
+    FROM (
+      SELECT engineer.id AS id, engineer.name AS name, engineer.engineer_info AS engineer_info,
+      CAST(NULL AS VARCHAR(40)) AS manager_data, 'engineer' AS type
+      FROM engineer
+      UNION ALL
+      SELECT manager.id AS id, manager.name AS name, CAST(NULL AS VARCHAR(40)) AS engineer_info,
+      manager.manager_data AS manager_data, 'manager' AS type
+      FROM manager
+    ) AS pjoin
+    WHERE pjoin.name = :name_1
+
+The :paramref:`.AbstractConcreteBase.strict_attrs` parameter indicates that the
+``Employee`` class should directly map only those attributes which are local to
+the ``Employee`` class, in this case the ``Employee.name`` attribute. Other
+attributes such as ``Manager.manager_data`` and ``Engineer.engineer_info`` are
+present only on their corresponding subclass.
+When :paramref:`.AbstractConcreteBase.strict_attrs`
+is not set, then all subclass attributes such as ``Manager.manager_data`` and
+``Engineer.engineer_info`` get mapped onto the base ``Employee`` class.  This
+is a legacy mode of use which may be more convenient for querying but has the
+effect that all subclasses share the
+full set of attributes for the whole hierarchy; in the above example, not
+using :paramref:`.AbstractConcreteBase.strict_attrs` would have the effect
+of generating non-useful ``Engineer.manager_name`` and ``Manager.engineer_info``
+attributes.
+
+.. versionadded:: 2.0  Added :paramref:`.AbstractConcreteBase.strict_attrs`
+   parameter to :class:`.AbstractConcreteBase` which produces a cleaner
+   mapping; the default is False to allow legacy mappings to continue working
+   as they did in 1.x versions.
+
+
 
 .. seealso::
 
@@ -893,7 +1153,7 @@ Next, the UNION is produced using :func:`.polymorphic_union`::
 With the above :class:`_schema.Table` objects, the mappings can be produced using "semi-classical" style,
 where we use Declarative in conjunction with the ``__table__`` argument;
 our polymorphic union above is passed via ``__mapper_args__`` to
-the :paramref:`.mapper.with_polymorphic` parameter::
+the :paramref:`_orm.Mapper.with_polymorphic` parameter::
 
     class Employee(Base):
         __table__ = employee_table
@@ -923,7 +1183,7 @@ Alternatively, the same :class:`_schema.Table` objects can be used in
 fully "classical" style, without using Declarative at all.
 A constructor similar to that supplied by Declarative is illustrated::
 
-    class Employee(object):
+    class Employee:
         def __init__(self, **kw):
             for k in kw:
                 setattr(self, k, kw[k])
@@ -960,7 +1220,7 @@ A constructor similar to that supplied by Declarative is illustrated::
 
 The "abstract" example can also be mapped using "semi-classical" or "classical"
 style.  The difference is that instead of applying the "polymorphic union"
-to the :paramref:`.mapper.with_polymorphic` parameter, we apply it directly
+to the :paramref:`_orm.Mapper.with_polymorphic` parameter, we apply it directly
 as the mapped selectable on our basemost mapper.  The semi-classical
 mapping is illustrated below::
 
@@ -1030,16 +1290,16 @@ such a configuration is as follows::
 
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
         employees = relationship("Employee")
 
 
     class Employee(ConcreteBase, Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        company_id = mapped_column(ForeignKey("company.id"))
 
         __mapper_args__ = {
             "polymorphic_identity": "employee",
@@ -1049,10 +1309,10 @@ such a configuration is as follows::
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(40))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(40))
+        company_id = mapped_column(ForeignKey("company.id"))
 
         __mapper_args__ = {
             "polymorphic_identity": "manager",
@@ -1062,10 +1322,10 @@ such a configuration is as follows::
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(40))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(40))
+        company_id = mapped_column(ForeignKey("company.id"))
 
         __mapper_args__ = {
             "polymorphic_identity": "engineer",
@@ -1090,16 +1350,16 @@ each of the relationships::
 
     class Company(Base):
         __tablename__ = "company"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
         employees = relationship("Employee", back_populates="company")
 
 
     class Employee(ConcreteBase, Base):
         __tablename__ = "employee"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        company_id = mapped_column(ForeignKey("company.id"))
         company = relationship("Company", back_populates="employees")
 
         __mapper_args__ = {
@@ -1110,10 +1370,10 @@ each of the relationships::
 
     class Manager(Employee):
         __tablename__ = "manager"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        manager_data = Column(String(40))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        manager_data = mapped_column(String(40))
+        company_id = mapped_column(ForeignKey("company.id"))
         company = relationship("Company", back_populates="employees")
 
         __mapper_args__ = {
@@ -1124,10 +1384,10 @@ each of the relationships::
 
     class Engineer(Employee):
         __tablename__ = "engineer"
-        id = Column(Integer, primary_key=True)
-        name = Column(String(50))
-        engineer_info = Column(String(40))
-        company_id = Column(ForeignKey("company.id"))
+        id = mapped_column(Integer, primary_key=True)
+        name = mapped_column(String(50))
+        engineer_info = mapped_column(String(40))
+        company_id = mapped_column(ForeignKey("company.id"))
         company = relationship("Company", back_populates="employees")
 
         __mapper_args__ = {
